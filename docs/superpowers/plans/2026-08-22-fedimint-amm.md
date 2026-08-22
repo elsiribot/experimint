@@ -548,8 +548,8 @@ mod tests {
 
     #[test]
     fn new_sorts_the_pair() {
-        let a = AmountUnit::new(1);
-        let b = AmountUnit::new(7);
+        let a = AmountUnit::new_custom(1);
+        let b = AmountUnit::new_custom(7);
         assert_eq!(PoolId::new(a, b), PoolId::new(b, a));
         let id = PoolId::new(b, a).unwrap();
         assert_eq!(id.lo(), a);
@@ -558,13 +558,13 @@ mod tests {
 
     #[test]
     fn new_rejects_identical_units() {
-        let a = AmountUnit::new(3);
+        let a = AmountUnit::new_custom(3);
         assert_eq!(PoolId::new(a, a), None);
     }
 
     #[test]
     fn round_trips_through_encoding() {
-        let id = PoolId::new(AmountUnit::new(2), AmountUnit::new(9)).unwrap();
+        let id = PoolId::new(AmountUnit::new_custom(2), AmountUnit::new_custom(9)).unwrap();
         let bytes = id.consensus_encode_to_vec();
         let decoded =
             PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).unwrap();
@@ -576,8 +576,8 @@ mod tests {
     fn rejects_non_canonical_encoding() {
         // Hand-build the wire form with lo > hi.
         let mut bytes = Vec::new();
-        AmountUnit::new(9).consensus_encode(&mut bytes).unwrap();
-        AmountUnit::new(2).consensus_encode(&mut bytes).unwrap();
+        AmountUnit::new_custom(9).consensus_encode(&mut bytes).unwrap();
+        AmountUnit::new_custom(2).consensus_encode(&mut bytes).unwrap();
         assert!(
             PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err()
         );
@@ -586,8 +586,8 @@ mod tests {
     #[test]
     fn rejects_equal_units_in_encoding() {
         let mut bytes = Vec::new();
-        AmountUnit::new(4).consensus_encode(&mut bytes).unwrap();
-        AmountUnit::new(4).consensus_encode(&mut bytes).unwrap();
+        AmountUnit::new_custom(4).consensus_encode(&mut bytes).unwrap();
+        AmountUnit::new_custom(4).consensus_encode(&mut bytes).unwrap();
         assert!(
             PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err()
         );
@@ -743,8 +743,8 @@ mod tests {
 
     fn units() -> BTreeMap<AmountUnit, UnitParams> {
         BTreeMap::from([
-            (AmountUnit::new(0), UnitParams { min_swap_in: Amount::from_msats(1_000) }),
-            (AmountUnit::new(1), UnitParams { min_swap_in: Amount::from_msats(10) }),
+            (AmountUnit::new_custom(0), UnitParams { min_swap_in: Amount::from_msats(1_000) }),
+            (AmountUnit::new_custom(1), UnitParams { min_swap_in: Amount::from_msats(10) }),
         ])
     }
 
@@ -779,7 +779,7 @@ mod tests {
     fn rejects_zero_min_swap_in() {
         let mut c = cfg();
         c.units.insert(
-            AmountUnit::new(0),
+            AmountUnit::new_custom(0),
             UnitParams { min_swap_in: Amount::ZERO },
         );
         assert_eq!(c.validate(), Err(ConfigError::ZeroMinSwapIn));
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn rejects_fee_override_for_an_unknown_unit() {
         let mut c = cfg();
-        let unknown = PoolId::new(AmountUnit::new(0), AmountUnit::new(99)).unwrap();
+        let unknown = PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(99)).unwrap();
         c.fee_overrides.insert(unknown, 5);
         assert_eq!(c.validate(), Err(ConfigError::UnknownUnitInOverride));
     }
@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn fee_for_prefers_the_override() {
         let mut c = cfg();
-        let pool = PoolId::new(AmountUnit::new(0), AmountUnit::new(1)).unwrap();
+        let pool = PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap();
         assert_eq!(c.fee_for(pool), 3);
         c.fee_overrides.insert(pool, 1);
         assert_eq!(c.fee_for(pool), 1);
@@ -967,8 +967,8 @@ mod tests {
     #[test]
     fn swap_output_round_trips() {
         let out = AmmOutput::SwapV0 {
-            unit_in: AmountUnit::new(0),
-            unit_out: AmountUnit::new(1),
+            unit_in: AmountUnit::new_custom(0),
+            unit_out: AmountUnit::new_custom(1),
             amount_in: Amount::from_msats(10_000),
             min_out: Amount::from_msats(9_000),
             recipient_pk: pk(),
@@ -984,7 +984,7 @@ mod tests {
     fn claim_balance_input_round_trips() {
         let inp = AmmInput::ClaimBalanceV0 {
             pubkey: pk(),
-            unit: AmountUnit::new(1),
+            unit: AmountUnit::new_custom(1),
         };
         let bytes = inp.consensus_encode_to_vec();
         let back =
@@ -995,7 +995,7 @@ mod tests {
     #[test]
     fn withdraw_input_round_trips() {
         let inp = AmmInput::WithdrawV0 {
-            pool: PoolId::new(AmountUnit::new(0), AmountUnit::new(1)).unwrap(),
+            pool: PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap(),
             owner_pk: pk(),
             shares: 500,
             min_lo: Amount::from_msats(1),
@@ -1197,7 +1197,7 @@ mod tests {
     }
 
     fn pool_id(a: u64, b: u64) -> PoolId {
-        PoolId::new(AmountUnit::new(a), AmountUnit::new(b)).unwrap()
+        PoolId::new(AmountUnit::new_custom(a), AmountUnit::new_custom(b)).unwrap()
     }
 
     #[tokio::test]
@@ -1250,7 +1250,7 @@ mod tests {
     async fn balances_round_trip_and_delete() {
         let db = db();
         let mut dbtx = db.begin_transaction().await;
-        let key = BalanceKey { owner: test_pubkey(3), unit: AmountUnit::new(1) };
+        let key = BalanceKey { owner: test_pubkey(3), unit: AmountUnit::new_custom(1) };
         dbtx.insert_new_entry(
             &key,
             &BalanceEntry { amount: Amount::from_msats(42), tweak: [1u8; 16] },
