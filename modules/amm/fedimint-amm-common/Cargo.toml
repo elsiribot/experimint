@@ -1,0 +1,21 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-amm-common contains the types shared between the AMM module's client and server"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-amm-common"
+repository = { workspace = true }
+version = { workspace = true }
+
+[lib]
+name = "fedimint_amm_common"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+fedimint-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

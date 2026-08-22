@@ -1,0 +1,96 @@
+[workspace]
+members = [
+    "modules/amm/fedimint-amm-client",
+    "modules/amm/fedimint-amm-common",
+    "modules/amm/fedimint-amm-server",
+    "modules/amm/fedimint-amm-tests",
+]
+resolver = "2"
+
+[workspace.package]
+authors = ["The Experimint Developers"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/elsirion/experimint"
+version = "0.1.0"
+
+[workspace.dependencies]
+# --- fedimint (pinned to master) ---------------------------------------------
+#
+# All fedimint crates MUST share the exact same `rev`, otherwise cargo resolves
+# them as distinct source packages and the trait impls stop lining up.
+#
+# rev 4794ee166afc191e0125c092893bd8f080939b53 == master @ 2026-08-22
+# ("ci: gate fedimint-bot on the new bot-access team (#9048)"), workspace
+# version 0.13.0-alpha.
+fedimint-api-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-client-module = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-eventlog = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-logging = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-server-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-testing = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+
+# NOTE: fedimint's own `Cargo.lock` is NOT inherited when you depend on it as a
+# git dependency — cargo re-resolves the whole tree from scratch. That can land
+# on version combinations fedimint itself never builds. Concretely: a fresh
+# resolve picks `bdk_electrum 0.23.2`, which pulls `electrum-client 0.24.1`,
+# while `fedimint-ldk-node 0.6.1` also depends on `electrum-client 0.23.1`
+# directly. Two semver-incompatible copies end up in the graph and
+# `fedimint-ldk-node` fails to compile ("`electrum_client::Client: Deref` is not
+# satisfied"). Our `Cargo.lock` pins `bdk_electrum` back to 0.23.0, matching
+# fedimint's lock. If you ever `cargo update` this back into the ditch:
+#
+#     cargo update -p bdk_electrum --precise 0.23.0
+#
+# This only affects `fedimint-amm-tests` (the only crate pulling
+# `fedimint-testing` -> gateway -> ldk-node). Keep `Cargo.lock` committed.
+
+# --- in-workspace ------------------------------------------------------------
+fedimint-amm-client = { path = "modules/amm/fedimint-amm-client", version = "0.1.0" }
+fedimint-amm-common = { path = "modules/amm/fedimint-amm-common", version = "0.1.0" }
+fedimint-amm-server = { path = "modules/amm/fedimint-amm-server", version = "0.1.0" }
+
+# --- third party -------------------------------------------------------------
+# Versions mirror fedimint master's `[workspace.dependencies]` so we share
+# resolved versions with it rather than pulling in a second copy.
+anyhow = "1.0.98"
+async-stream = "0.3.6"
+async-trait = "0.1.88"
+bitcoin = { version = "0.32.6", features = ["serde"] }
+erased-serde = "0.4"
+futures = "0.3.32"
+rand = "0.8.5"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.149"
+strum = { version = "0.27", features = ["derive"] }
+strum_macros = "0.27"
+thiserror = "2.0.18"
+tokio = "1.48.0"
+tokio-stream = "0.1.18"
+tracing = "0.1.44"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Mirrors fedimint: crypto/serialization crates are unusably slow in a debug
+# build otherwise.
+[profile.dev.package]
+bitcoin_hashes = { opt-level = 3 }
+bls12_381 = { opt-level = 3 }
+ff = { opt-level = 3 }
+group = { opt-level = 3 }
+librocksdb-sys = { opt-level = 3 }
+pairing = { opt-level = 3 }
+rand = { opt-level = 3 }
+rand_chacha = { opt-level = 3 }
+rand_core = { opt-level = 3 }
+ring = { opt-level = 3 }
+secp256k1 = { opt-level = 3 }
+secp256k1-sys = { opt-level = 3 }
+subtle = { opt-level = 3 }
+zeroize = { opt-level = 3 }

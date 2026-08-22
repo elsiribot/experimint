@@ -1,0 +1,33 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-amm-tests contains integration tests for the AMM module"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-amm-tests"
+publish = false
+repository = { workspace = true }
+version = { workspace = true }
+
+[lib]
+name = "fedimint_amm_tests"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+fedimint-amm-client = { workspace = true }
+fedimint-amm-common = { workspace = true }
+fedimint-amm-server = { workspace = true }
+fedimint-client = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-logging = { workspace = true }
+fedimint-server-core = { workspace = true }
+fedimint-testing = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

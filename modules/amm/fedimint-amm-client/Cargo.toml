@@ -1,0 +1,33 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-amm-client contains the client side of the AMM module"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-amm-client"
+repository = { workspace = true }
+version = { workspace = true }
+
+[lib]
+name = "fedimint_amm_client"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-amm-common = { workspace = true }
+fedimint-api-client = { workspace = true }
+fedimint-client-module = { workspace = true }
+fedimint-core = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

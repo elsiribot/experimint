@@ -1,0 +1,19 @@
+/target
+/target-nix
+target/
+
+# nix
+result
+result-*
+/.direnv
+.direnv/
+
+# editors / os
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# local overrides
+/.envrc.local
+/.shrc.local
