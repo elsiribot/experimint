@@ -322,7 +322,8 @@ LpPosition[(pool, owner_pk)] = LpPosition { shares: to_owner, tweak }
 
 Pool creation is otherwise **permissionless within the DKG unit allowlist**: validation is `lo != hi`, both units present in `units`, and `minted > MINIMUM_LIQUIDITY`.
 
-`isqrt` is an explicit integer Newton iteration in `common`, never `f64::sqrt`, differentially tested against a reference across a `u128` sample.
+`isqrt` uses `u128::isqrt` from std (stable since Rust 1.84) — integer-only,
+deterministic, and better tested than a hand-rolled Newton iteration.
 
 ### 7.3 Withdraw — `burn`
 
