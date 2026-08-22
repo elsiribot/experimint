@@ -3,3 +3,4 @@
 //! Scaffolding only; no module logic yet.
 
 pub mod math;
+pub mod pool_id;
