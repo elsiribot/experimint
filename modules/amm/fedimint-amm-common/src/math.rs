@@ -9,7 +9,7 @@ use thiserror::Error;
 ///
 /// The largest intermediate below is `997 * amount_in * reserve_out`. Since
 /// `997 < 2^10`, safety needs `amount_in * reserve_out < 2^118`; capping both
-/// at `2^58` yields `997 * 2^116 < 2^126`, four bits of headroom. `2^58` msats
+/// at `2^58` yields `997 * 2^116 < 2^126`, two bits of headroom. `2^58` msats
 /// is ~2.88e6 BTC — two orders of magnitude above the entire supply. Spec §7.1.
 pub const MAX_RESERVE: u64 = 1 << 58;
 

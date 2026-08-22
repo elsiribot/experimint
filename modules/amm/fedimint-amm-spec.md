@@ -289,7 +289,9 @@ fn amount_out(reserve_in: u64, reserve_out: u64, amount_in: u64, fee_per_mille: 
 
 State update: `reserve_in += amount_in` — the **full** amount, fee included — and `reserve_out -= out`. Nothing collects the fee; it stays as reserve and lifts `k`, paying LPs through a rising share price rather than a transfer. This is the reference behaviour verbatim.
 
-**Why `MAX_RESERVE = 2^58`.** The largest intermediate is `numerator = 997 · amount_in · reserve_out`, and `997 < 2^10`, so safety requires `amount_in · reserve_out < 2^118`. Capping both at `2^58` gives `997 · 2^116 < 2^126` — four bits of headroom. The same bound covers `da · total_shares ≤ 2^116` (§7.2), `isqrt(da · db) ≤ 2^58`, and the `k` product (`≤ 2^116`).
+**Why `MAX_RESERVE = 2^58`.** The largest intermediate is `numerator = 997 · amount_in · reserve_out`, and `997 < 2^10`, so safety requires `amount_in · reserve_out < 2^118`. Capping both at `2^58` gives `997 · 2^116 < 2^126` — two bits of headroom. The same bound covers `da · total_shares ≤ 2^116` (§7.2), `isqrt(da · db) ≤ 2^58`, and the `k` product (`≤ 2^116`).
+
+Note that `mint_shares` and `burn_shares` are safe independently of this cap: their largest intermediate is a two-factor `u64 × u64` product, which cannot overflow `u128` for any input. `MAX_RESERVE` is load-bearing only for `amount_out`'s three-factor product. `total_shares` itself is deliberately *not* capped: it is a `u64` guarded by `checked_add`, it is never audited (§9.1 reports reserves and balances only), and it appears solely as a two-factor product. Reserves are capped, which is what the audit path's `i64::try_from` depends on.
 
 `2^58` msats is ≈ 2.88 × 10⁶ BTC, two orders of magnitude above the entire supply, so the cap is unreachable for BTC and still ≈ 2.9 × 10¹⁷ base units for any other unit. Per-mille rather than ppm is what buys the headroom: ppm would cost 20 bits instead of 10 and force the cap down to `2^54`.
 

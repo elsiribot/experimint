@@ -17,3 +17,4 @@ result-*
 # local overrides
 /.envrc.local
 /.shrc.local
+/.superpowers/
