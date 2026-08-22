@@ -959,16 +959,9 @@ mod tests {
     use crate::pool_id::PoolId;
 
     fn pk() -> secp256k1::PublicKey {
-        "02".to_owned().repeat(1) // replaced below
-            .parse()
-            .unwrap_or_else(|_| {
-                let kp = secp256k1::Keypair::from_seckey_slice(
-                    secp256k1::SECP256K1,
-                    &[1u8; 32],
-                )
-                .unwrap();
-                kp.public_key()
-            })
+        secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &[1u8; 32])
+            .expect("valid secret key")
+            .public_key()
     }
 
     #[test]
@@ -1030,7 +1023,7 @@ mod tests {
 }
 ```
 
-Replace the `pk()` helper body with whatever the codebase's idiomatic test-key construction is once you have read `fedimint-dummy-common`; the shape above is deliberately conservative but ugly.
+If `fedimint-dummy-common`'s tests use a different idiom for constructing a test pubkey, prefer theirs.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1409,20 +1402,34 @@ fn init_reports_our_module_kind() {
     assert_eq!(AmmInit::kind(), fedimint_amm_common::KIND);
 }
 
+/// `trusted_dealer_gen` must emit a config that passes `validate()` for every
+/// peer, and all peers must agree on it. Build the params with two units
+/// (unit 0 with `min_swap_in` 1000 msats, unit 1 with 10) and a default fee of
+/// 3, using whatever `ServerModuleInit::trusted_dealer_gen` signature the
+/// pinned rev exposes — read `fedimint-dummy-server/src/lib.rs` for its shape.
 #[test]
-fn generated_config_validates() {
-    // Build a trivial two-unit config via the init's config generation path
-    // and assert `validate()` accepts it. Fill in using whatever
-    // `ServerModuleInit::trusted_dealer_gen` signature the pinned rev exposes;
-    // mirror `fedimint-dummy-server/tests` if one exists, otherwise construct
-    // `AmmConfigConsensus` directly and assert `validate() == Ok(())`.
-    let cfg = fedimint_amm_common::config::AmmConfigConsensus {
+fn trusted_dealer_gen_emits_a_valid_config_for_every_peer() {
+    let configs = /* AmmInit.trusted_dealer_gen(&peers, &params) */;
+    assert_eq!(configs.len(), 4);
+    let mut consensus = Vec::new();
+    for (_peer, cfg) in configs {
+        let cfg: AmmConfigConsensus = /* project cfg.consensus */;
+        assert_eq!(cfg.validate(), Ok(()));
+        consensus.push(cfg);
+    }
+    // Every peer must derive byte-identical consensus config.
+    assert!(consensus.windows(2).all(|w| w[0] == w[1]));
+}
+
+/// The generator must never emit an empty unit set, which `validate` rejects.
+#[test]
+fn empty_units_are_rejected_by_validation() {
+    let cfg = AmmConfigConsensus {
         units: Default::default(),
         default_fee_per_mille: 3,
         fee_overrides: Default::default(),
     };
-    // Empty units must be rejected — the generator must never emit this.
-    assert!(cfg.validate().is_err());
+    assert_eq!(cfg.validate(), Err(ConfigError::NoUnits));
 }
 ```
 
