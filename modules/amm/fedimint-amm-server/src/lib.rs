@@ -1,10 +1,9 @@
 //! The AMM module server crate.
 //!
 //! Implements the `ServerModuleInit`/`ServerModule` skeleton and DKG config
-//! generation (spec §11). `process_input`/`process_output` are stubs that
-//! reject every variant — Tasks 7 and 8 fill in the real curve logic. `audit`
-//! is empty — Task 9 implements it. `api_endpoints` is empty — Task 9 adds
-//! them.
+//! generation (spec §11). `process_output` (Task 7) and `process_input`
+//! (Task 8) implement the real curve logic. `audit` is empty — Task 9
+//! implements it. `api_endpoints` is empty — Task 9 adds them.
 
 pub mod db;
 
@@ -233,6 +232,19 @@ fn map_curve_error(e: math::CurveError) -> AmmOutputError {
     }
 }
 
+/// Maps a [`math::CurveError`] onto the wire-level [`AmmInputError`]
+/// taxonomy, mirroring [`map_curve_error`] for the input side. `burn_shares`
+/// can independently report `InsufficientShares` (its own `shares >
+/// total_shares` guard) — give that its dedicated variant too, even though
+/// `process_input`'s own `shares > position.shares` check is expected to
+/// catch every reachable case first.
+fn map_curve_error_input(e: math::CurveError) -> AmmInputError {
+    match e {
+        math::CurveError::InsufficientShares => AmmInputError::InsufficientShares,
+        other => AmmInputError::Curve(other.to_string()),
+    }
+}
+
 /// AMM module.
 #[derive(Debug)]
 pub struct Amm {
@@ -276,12 +288,111 @@ impl ServerModule for Amm {
 
     async fn process_input<'a, 'b, 'c>(
         &'a self,
-        _dbtx: &mut DatabaseTransaction<'c>,
-        _input: &'b AmmInput,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b AmmInput,
         _in_point: InPoint,
     ) -> Result<InputMeta, AmmInputError> {
-        // Stub for this task: Task 7 implements `ClaimBalanceV0`/`WithdrawV0`.
-        Err(AmmInputError::UnknownVariant)
+        match input {
+            AmmInput::ClaimBalanceV0 { pubkey, unit } => {
+                // Full claim, no amount field (spec §6.1): the record is
+                // removed unconditionally and its stored amount is what we
+                // report. One read (via `remove_entry`), one binding, used
+                // once. A second claim for the same key finds nothing and
+                // returns `NoSuchBalance` — the retry-safety property.
+                let key = BalanceKey {
+                    owner: *pubkey,
+                    unit: *unit,
+                };
+                let entry = dbtx
+                    .remove_entry(&key)
+                    .await
+                    .ok_or(AmmInputError::NoSuchBalance)?;
+
+                Ok(InputMeta {
+                    amount: TransactionItemAmounts {
+                        amounts: Amounts::new_custom(*unit, entry.amount),
+                        fees: Amounts::ZERO,
+                    },
+                    pub_key: *pubkey,
+                })
+            }
+            AmmInput::WithdrawV0 {
+                pool,
+                owner_pk,
+                shares,
+                min_lo,
+                min_hi,
+            } => {
+                let mut db_pool = dbtx
+                    .get_value(&PoolKey(*pool))
+                    .await
+                    .ok_or(AmmInputError::NoSuchPool)?;
+
+                let lp_key = LpPositionKey {
+                    pool: *pool,
+                    owner: *owner_pk,
+                };
+                let mut position = dbtx
+                    .get_value(&lp_key)
+                    .await
+                    .ok_or(AmmInputError::NoSuchPosition)?;
+
+                // Checked against the POSITION's shares, not the pool's
+                // `total_shares` — `burn_shares` only guards the latter, and
+                // this is the check spec §7.3 actually wants: you may only
+                // burn what you hold.
+                if *shares > position.shares {
+                    return Err(AmmInputError::InsufficientShares);
+                }
+
+                // Computed ONCE. `da`/`db` are the same bindings used for
+                // both the reserve debit below and the returned `amounts` —
+                // spec §7.4. Never recompute them.
+                let outcome = math::burn_shares(
+                    db_pool.reserve_lo.msats,
+                    db_pool.reserve_hi.msats,
+                    db_pool.total_shares,
+                    *shares,
+                )
+                .map_err(map_curve_error_input)?;
+
+                if outcome.da < min_lo.msats || outcome.db < min_hi.msats {
+                    return Err(AmmInputError::SlippageExceeded);
+                }
+
+                // `Amounts` never stores an explicit zero entry (P3):
+                // `checked_add_unit` already skips a zero amount, so a leg
+                // that floored to zero is omitted here rather than inserted
+                // as zero. `pool.lo() != pool.hi()`, so neither `checked_add`
+                // can overflow from summing into the same slot twice.
+                let amounts = Amounts::ZERO
+                    .checked_add_unit(Amount::from_msats(outcome.da), pool.lo())
+                    .and_then(|a| a.checked_add_unit(Amount::from_msats(outcome.db), pool.hi()))
+                    .ok_or_else(|| AmmInputError::Curve("amount overflow".to_string()))?;
+
+                // All checks passed: now, and only now, write.
+                db_pool.reserve_lo = Amount::from_msats(db_pool.reserve_lo.msats - outcome.da);
+                db_pool.reserve_hi = Amount::from_msats(db_pool.reserve_hi.msats - outcome.db);
+                db_pool.total_shares = outcome.new_total_shares;
+                dbtx.insert_entry(&PoolKey(*pool), &db_pool).await;
+
+                position.shares -= *shares;
+                if position.shares == 0 {
+                    dbtx.remove_entry(&lp_key).await;
+                } else {
+                    dbtx.insert_entry(&lp_key, &position).await;
+                }
+
+                Ok(InputMeta {
+                    amount: TransactionItemAmounts {
+                        amounts,
+                        fees: Amounts::ZERO,
+                    },
+                    pub_key: *owner_pk,
+                })
+            }
+            AmmInput::Default { .. } => Err(AmmInputError::UnknownVariant),
+        }
     }
 
     async fn process_output<'a, 'b>(
