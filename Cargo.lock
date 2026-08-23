@@ -2178,11 +2178,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bitcoin_hashes",
  "erased-serde",
  "fedimint-amm-common",
  "fedimint-api-client",
  "fedimint-client-module",
  "fedimint-core",
+ "fedimint-derive-secret",
  "futures",
  "rand 0.8.7",
  "serde",

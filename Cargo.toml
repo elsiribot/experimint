@@ -27,6 +27,7 @@ fedimint-api-client = { git = "https://github.com/fedimint/fedimint", rev = "479
 fedimint-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-client-module = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-derive-secret = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-eventlog = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-logging = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-server-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
@@ -59,6 +60,7 @@ anyhow = "1.0.98"
 async-stream = "0.3.6"
 async-trait = "0.1.88"
 bitcoin = { version = "0.32.6", features = ["serde"] }
+bitcoin_hashes = "0.14.0"
 erased-serde = "0.4"
 futures = "0.3.32"
 rand = "0.8.5"
