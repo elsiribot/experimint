@@ -315,10 +315,16 @@ else:
     to_owner = minted
 require to_owner >= min_shares
 reserve_lo += da; reserve_hi += db                       // both ≤ MAX_RESERVE
-LpPosition[(pool, owner_pk)] = LpPosition { shares: to_owner, tweak }
+existing = LpPosition[(pool, owner_pk)]                  // may be absent
+LpPosition[(pool, owner_pk)] = LpPosition {
+    shares: existing.map_or(0, |p| p.shares) + to_owner,  // ACCUMULATE, never overwrite
+    tweak:  existing.map_or(tweak, |p| p.tweak),           // preserve the stored tweak
+}
 ```
 
 **The `min()` forces deposits at the current ratio**; excess on the over-supplied side is donated to existing LPs. That is reference behaviour and a genuine UX footgun, so it belongs in client docs — but it needs no second mechanism, because `min_shares` guards both failure modes at once. A ratio move between quote and landing drops `minted`; an unbalanced pair drops `minted` by the same arithmetic. One guard, two protections.
+
+**Why the last line is not a plain assignment.** The reference `mint()` can afford `LpPosition[(pool, owner_pk)] = LpPosition { shares: to_owner, tweak }` because Uniswap V2's LP token is a fungible ERC-20 balance with its own `mint`/`transfer` semantics — there is no way to "overwrite" a balance, only to add to it. Our `LpPosition` is a plain keyed record, and `owner_pk` is an attacker-controlled wire value (§8, §13): nothing here enforces that it was freshly ground per deposit. A literal assignment on a second `DepositV0` that happens to land on an existing `(pool, owner_pk)` would replace `to_owner` in place of `existing.shares + to_owner` — erasing an earlier depositor's shares while `Pool.total_shares` still counts them. That is not merely a UX bug: the erased depositor's shares become permanently unbacked and unwithdrawable (their `WithdrawV0` share count still exists nowhere to redeem against), and it is triggerable for the cost of one honest-looking deposit at any key an attacker chooses to target. Accumulating shares — and, for the same reason, preserving the record's existing `tweak` rather than taking the incoming one (§13's "Recovery-tweak overwrite" row) — is therefore not an implementation nicety but the only assignment that keeps `total_shares` and the sum of all `LpPosition.shares` in agreement.
 
 `MINIMUM_LIQUIDITY` shares are credited to no `LpPosition` and are unwithdrawable forever. Besides defeating the first-depositor share-price inflation attack, this means **`total_shares` can never return to zero**, so the `total_shares == 0` branch runs exactly once per pool, no later deposit can divide by zero, and `Pool` records are created once and never deleted. It also makes pool creation cost a permanent two-sided deposit — a natural anti-spam bond.
 
@@ -558,7 +564,7 @@ Units are declared client-side (P10) and `ClientModule` is unit-parameterised th
 | Split-pool via non-canonical `PoolId` | Two records for one pair | Enforced in `Decodable` (§5.1) |
 | Abandoned-balance audit cost | Ungarbage-collected balances inflate the audit scan | §9.2; bonded by `min_swap_in` |
 | Audit-induced halt | Misreported liability trips the global assert | §7.4, §9; lifecycle test in §14 |
-| Recovery-tweak overwrite | `recipient_pk`/`owner_pk` and `tweak` are unverified wire fields — the server cannot check a pubkey was derived from a tweak, since that needs the client's root secret. An attacker can credit a victim's balance or LP position (cost: one `min_swap_in`) with a garbage `tweak` | The stored `tweak` is preserved whenever the `BalanceEntry`/`LpPosition` record already exists; the incoming `tweak` is used only on record creation (§7, §8.2). Ownership is unaffected either way — the pubkey, not the tweak, authorises spending — only seed-only recovery (§8.2) would have been broken |
+| Recovery-tweak overwrite | `recipient_pk`/`owner_pk` and `tweak` are unverified wire fields — the server cannot check a pubkey was derived from a tweak, since that needs the client's root secret. An attacker can credit a victim's balance or LP position (cost: one `min_swap_in`) with a garbage `tweak` | The stored `tweak` is preserved whenever the `BalanceEntry`/`LpPosition` record already exists; the incoming `tweak` is used only on record creation (§7, §8.2). Ownership is unaffected either way — the pubkey, not the tweak, authorises spending — only seed-only recovery (§8.2) would have been broken. This first-writer-wins mitigation is sound specifically *because* `recipient_pk`/`owner_pk` are ground from the client's own seed (§8.1: `keypair(module_root.child_key(ChildId).tweak(&tweak))`, with `tweak` a random `[u8; 16]`) — an attacker cannot predict, and therefore cannot pre-create a record at, a victim's key before the victim's own honest credit lands. If `recipient_pk`/`owner_pk` were instead attacker-choosable in a way that let them be guessed or front-run ahead of the victim, first-writer-wins would just hand the attacker the write instead of the victim, and this mitigation would not hold |
 
 ### 13.1 Swap privacy
 

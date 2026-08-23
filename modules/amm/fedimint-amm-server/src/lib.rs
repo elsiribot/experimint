@@ -221,6 +221,18 @@ impl ServerModuleInit for AmmInit {
     }
 }
 
+/// Maps a [`math::CurveError`] onto the wire-level [`AmmOutputError`]
+/// taxonomy. `ReserveCapExceeded` gets its own dedicated variant — used by
+/// both the swap and deposit paths — so a caller can distinguish "a reserve
+/// would exceed `MAX_RESERVE`" from every other curve failure without string
+/// matching on `Curve`'s payload.
+fn map_curve_error(e: math::CurveError) -> AmmOutputError {
+    match e {
+        math::CurveError::ReserveCapExceeded => AmmOutputError::ReserveCapExceeded,
+        other => AmmOutputError::Curve(other.to_string()),
+    }
+}
+
 /// AMM module.
 #[derive(Debug)]
 pub struct Amm {
@@ -325,7 +337,7 @@ impl ServerModule for Amm {
                 // recompute it.
                 let dy =
                     math::amount_out(reserve_in.msats, reserve_out.msats, amount_in.msats, fee)
-                        .map_err(|e| AmmOutputError::Curve(e.to_string()))?;
+                        .map_err(map_curve_error)?;
 
                 if dy < min_out.msats {
                     return Err(AmmOutputError::SlippageExceeded);
@@ -350,16 +362,6 @@ impl ServerModule for Amm {
                 ) {
                     return Err(AmmOutputError::KInvariantViolated);
                 }
-
-                // All checks passed: now, and only now, write.
-                if in_is_lo {
-                    pool.reserve_lo = Amount::from_msats(reserve_in_new);
-                    pool.reserve_hi = Amount::from_msats(reserve_out_new);
-                } else {
-                    pool.reserve_hi = Amount::from_msats(reserve_in_new);
-                    pool.reserve_lo = Amount::from_msats(reserve_out_new);
-                }
-                dbtx.insert_entry(&PoolKey(pool_id), &pool).await;
 
                 // A second SwapV0 into an existing (recipient_pk, unit_out)
                 // ADDS to the balance rather than replacing it: anyone may
@@ -387,6 +389,10 @@ impl ServerModule for Amm {
                 // crediting the same pubkey twice necessarily supplies the
                 // same tweak (the pubkey is derived from it), so this is a
                 // no-op for honest use.
+                //
+                // This is computed BEFORE any write below: `checked_add` here
+                // can still fail, and nothing may hit the database until
+                // every fallible step — including this one — has succeeded.
                 let bkey = BalanceKey {
                     owner: *recipient_pk,
                     unit: *unit_out,
@@ -403,6 +409,17 @@ impl ServerModule for Amm {
                     ),
                     None => (dy, *tweak),
                 };
+
+                // All checks passed: now, and only now, write.
+                if in_is_lo {
+                    pool.reserve_lo = Amount::from_msats(reserve_in_new);
+                    pool.reserve_hi = Amount::from_msats(reserve_out_new);
+                } else {
+                    pool.reserve_hi = Amount::from_msats(reserve_in_new);
+                    pool.reserve_lo = Amount::from_msats(reserve_out_new);
+                }
+                dbtx.insert_entry(&PoolKey(pool_id), &pool).await;
+
                 dbtx.insert_entry(
                     &bkey,
                     &BalanceEntry {
@@ -446,11 +463,41 @@ impl ServerModule for Amm {
                     amount_lo.msats,
                     amount_hi.msats,
                 )
-                .map_err(|e| AmmOutputError::Curve(e.to_string()))?;
+                .map_err(map_curve_error)?;
 
                 if outcome.to_owner < *min_shares {
                     return Err(AmmOutputError::SlippageExceeded);
                 }
+
+                // An `owner_pk` is expected to be freshly ground per deposit
+                // (spec §8.3), so this should never collide — but `owner_pk`
+                // is an attacker-controlled wire value with no freshness
+                // enforced here. Accumulating shares (rather than
+                // `insert_new_entry`, which would panic on a collision, or
+                // overwriting, which would erase an existing depositor's
+                // claim) keeps this path panic-free and loses no one's
+                // funds regardless of input.
+                //
+                // As with the `BalanceEntry` above, `owner_pk` and `tweak`
+                // are both unverified wire fields, so the incoming `tweak`
+                // must NOT overwrite an existing record's tweak — only a
+                // freshly-created record takes the incoming value. Otherwise
+                // an attacker could grief a victim's LP position's
+                // seed-only recovery the same way (spec §8.2, §13).
+                //
+                // This is computed BEFORE any write below: `checked_add` here
+                // can still fail, and nothing may hit the database until
+                // every fallible step — including this one — has succeeded.
+                let lp_key = LpPositionKey {
+                    pool: *pool,
+                    owner: *owner_pk,
+                };
+                let existing = dbtx.get_value(&lp_key).await;
+                let existing_shares = existing.as_ref().map_or(0, |p| p.shares);
+                let shares = existing_shares
+                    .checked_add(outcome.to_owner)
+                    .ok_or_else(|| AmmOutputError::Curve("share overflow".to_string()))?;
+                let stored_tweak = existing.map_or(*tweak, |p| p.tweak);
 
                 // All checks passed: now, and only now, write.
                 // `mint_shares` already verified reserve_{lo,hi} + amount_{lo,hi}
@@ -468,31 +515,6 @@ impl ServerModule for Amm {
                 db_pool.total_shares = outcome.new_total_shares;
                 dbtx.insert_entry(&PoolKey(*pool), &db_pool).await;
 
-                // An `owner_pk` is expected to be freshly ground per deposit
-                // (spec §8.3), so this should never collide — but `owner_pk`
-                // is an attacker-controlled wire value with no freshness
-                // enforced here. Accumulating shares (rather than
-                // `insert_new_entry`, which would panic on a collision, or
-                // overwriting, which would erase an existing depositor's
-                // claim) keeps this path panic-free and loses no one's
-                // funds regardless of input.
-                //
-                // As with the `BalanceEntry` above, `owner_pk` and `tweak`
-                // are both unverified wire fields, so the incoming `tweak`
-                // must NOT overwrite an existing record's tweak — only a
-                // freshly-created record takes the incoming value. Otherwise
-                // an attacker could grief a victim's LP position's
-                // seed-only recovery the same way (spec §8.2, §13).
-                let lp_key = LpPositionKey {
-                    pool: *pool,
-                    owner: *owner_pk,
-                };
-                let existing = dbtx.get_value(&lp_key).await;
-                let existing_shares = existing.as_ref().map_or(0, |p| p.shares);
-                let shares = existing_shares
-                    .checked_add(outcome.to_owner)
-                    .ok_or_else(|| AmmOutputError::Curve("share overflow".to_string()))?;
-                let stored_tweak = existing.map_or(*tweak, |p| p.tweak);
                 dbtx.insert_entry(
                     &lp_key,
                     &LpPosition {

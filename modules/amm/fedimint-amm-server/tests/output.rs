@@ -157,7 +157,12 @@ async fn deposit_below_minimum_liquidity_is_rejected_and_writes_nothing() {
     };
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
-    assert!(result.is_err(), "expected rejection, got {result:?}");
+    assert_eq!(
+        result,
+        Err(AmmOutputError::Curve(
+            math::CurveError::InsufficientInitialLiquidity.to_string()
+        ))
+    );
     assert!(
         dbtx.get_value(&PoolKey(pool)).await.is_none(),
         "a rejected DepositV0 must leave no Pool record behind"
@@ -288,6 +293,103 @@ async fn swap_moves_reserves_and_credits_balance_by_the_same_dy() {
     assert_eq!(balance.amount.msats, reserve_hi_delta);
 }
 
+/// 5b. Mirror of case 5 but swapping in the **hi** direction (`unit_in ==
+///     pool.hi()`), so `in_is_lo` is `false` and the `else` arm of both the
+///     reserve read (lib.rs) and the write-back executes. Every other test
+///     in this file swaps `unit(0) -> unit(1)`, i.e. lo -> hi, so `in_is_lo`
+///     is `true` throughout the rest of the suite and this arm is otherwise
+///     completely uncovered — swapping the two assignments in the `else` arm
+///     of the write-back would corrupt every hi->lo swap's reserves and the
+///     rest of the suite would still pass. `expected_dy` is hand-computed
+///     from the Uniswap V2 formula and hard-coded (not derived by calling
+///     `math::amount_out`), so an inverted read can't cancel out against an
+///     inverted expectation.
+#[tokio::test]
+async fn swap_in_hi_direction_moves_reserves_and_credits_balance_by_the_same_dy() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    // Same seeded pool as case 5: reserve_lo (unit 0) = 1_000_000_000,
+    // reserve_hi (unit 1) = 1_000_000.
+    let reserve_lo = Amount::from_msats(1_000_000_000);
+    let reserve_hi = Amount::from_msats(1_000_000);
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo,
+            reserve_hi,
+            total_shares: 1_000_000_000,
+        },
+    )
+    .await;
+
+    // Swap unit(1) [[hi]] -> unit(0) [[lo]]: unit_in == pool.hi(), so
+    // `in_is_lo` is false, reserve_in == reserve_hi, reserve_out == reserve_lo.
+    //
+    // By hand, Uniswap V2's getAmountOut with reserve_in = 1_000_000,
+    // reserve_out = 1_000_000_000, amount_in = 10_000, fee 3/1000:
+    //   in_with_fee = 10_000 * 997 = 9_970_000
+    //   numerator   = 9_970_000 * 1_000_000_000 = 9_970_000_000_000_000
+    //   denominator = 1_000_000 * 1000 + 9_970_000 = 1_009_970_000
+    //   out         = floor(9_970_000_000_000_000 / 1_009_970_000) = 9_871_580
+    let amount_in = Amount::from_msats(10_000);
+    let expected_dy: u64 = 9_871_580;
+    let recipient = test_pubkey(16);
+    let output = AmmOutput::SwapV0 {
+        unit_in: unit(1),
+        unit_out: unit(0),
+        amount_in,
+        min_out: Amount::ZERO,
+        recipient_pk: recipient,
+        tweak: [13u8; 16],
+    };
+
+    let result = module
+        .process_output(&mut dbtx, &output, out_point())
+        .await
+        .expect("swap on a live pool must succeed");
+
+    assert_eq!(result.amounts.get(&unit(1)), Some(&amount_in));
+    assert_eq!(result.amounts.len(), 1);
+    assert!(result.fees.is_empty());
+
+    let stored_pool = dbtx.get_value(&PoolKey(pool)).await.unwrap();
+    // The correct reserve is credited: reserve_hi (unit 1, the `in` side)
+    // goes UP by amount_in.
+    assert_eq!(
+        stored_pool.reserve_hi,
+        Amount::from_msats(reserve_hi.msats + amount_in.msats)
+    );
+    // The correct reserve is debited: reserve_lo (unit 0, the `out` side)
+    // goes DOWN by expected_dy. An inverted write-back would instead leave
+    // reserve_lo unchanged and debit reserve_hi, failing this assertion.
+    assert_eq!(
+        stored_pool.reserve_lo,
+        Amount::from_msats(reserve_lo.msats - expected_dy)
+    );
+
+    // The balance lands under unit(0) -- the `out` unit -- not unit(1).
+    let balance = dbtx
+        .get_value(&BalanceKey {
+            owner: recipient,
+            unit: unit(0),
+        })
+        .await
+        .expect("balance must be credited under the OUT unit");
+    assert_eq!(balance.amount, Amount::from_msats(expected_dy));
+    assert!(
+        dbtx.get_value(&BalanceKey {
+            owner: recipient,
+            unit: unit(1)
+        })
+        .await
+        .is_none(),
+        "must not credit the IN unit"
+    );
+}
+
 /// 6. `SwapV0` with `min_out` above `dy` returns `SlippageExceeded` and
 ///    writes nothing.
 #[tokio::test]
@@ -373,6 +475,28 @@ async fn swap_with_unit_outside_allowlist_is_rejected() {
     assert_eq!(result, Err(AmmOutputError::UnknownUnit));
 }
 
+/// 8b. `SwapV0` with `unit_in` outside `units` returns `UnknownUnit`. Case 8
+///     only covers an unknown `unit_out`; this exercises the separate
+///     `self.cfg.units.get(unit_in)` guard, which was otherwise untested.
+#[tokio::test]
+async fn swap_with_unknown_unit_in_is_rejected() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+
+    let output = AmmOutput::SwapV0 {
+        unit_in: unit(99),
+        unit_out: unit(0),
+        amount_in: Amount::from_msats(10_000),
+        min_out: Amount::ZERO,
+        recipient_pk: test_pubkey(17),
+        tweak: [14u8; 16],
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::UnknownUnit));
+}
+
 /// 9. `SwapV0` with `amount_in` below `min_swap_in` returns `BelowMinSwapIn`.
 #[tokio::test]
 async fn swap_below_min_swap_in_is_rejected() {
@@ -427,6 +551,51 @@ async fn swap_that_would_exceed_max_reserve_is_rejected() {
         dbtx.get_value(&BalanceKey {
             owner: recipient,
             unit: unit(1)
+        })
+        .await
+        .is_none()
+    );
+}
+
+/// 10b. `DepositV0` that would push a reserve above `MAX_RESERVE` returns
+///      `AmmOutputError::ReserveCapExceeded` specifically, not just some
+///      `Curve(..)` string. `mint_shares` reports this case as
+///      `CurveError::ReserveCapExceeded`; the server must map it to the
+///      dedicated output-error variant (the same one the swap path uses in
+///      case 10 above) rather than flattening it into `Curve(..)`, so
+///      `AmmOutputError::ReserveCapExceeded` is actually reachable on the
+///      deposit path.
+#[tokio::test]
+async fn deposit_that_would_exceed_max_reserve_is_rejected() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    let seeded_pool = Pool {
+        reserve_lo: Amount::from_msats(math::MAX_RESERVE),
+        reserve_hi: Amount::from_msats(math::MAX_RESERVE),
+        total_shares: 1,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+
+    let output = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1_000),
+        amount_hi: Amount::from_msats(1_000),
+        min_shares: 0,
+        owner_pk: test_pubkey(20),
+        tweak: [0x11u8; 16],
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::ReserveCapExceeded));
+
+    assert_eq!(dbtx.get_value(&PoolKey(pool)).await.unwrap(), seeded_pool);
+    assert!(
+        dbtx.get_value(&LpPositionKey {
+            pool,
+            owner: test_pubkey(20)
         })
         .await
         .is_none()
@@ -721,4 +890,22 @@ async fn duplicate_owner_deposit_accumulates_without_panicking() {
     .unwrap()
     .to_owner;
     assert_eq!(position.shares, shares_after_first + expected_second_mint);
+}
+
+/// 15. `AmmOutput::Default { .. }` — the catch-all for a wire variant this
+///     binary doesn't understand — is rejected with `UnknownVariant`, never
+///     accepted or panicked on.
+#[tokio::test]
+async fn default_output_variant_is_rejected_as_unknown() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+
+    let output = AmmOutput::Default {
+        variant: 42,
+        bytes: vec![1, 2, 3],
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::UnknownVariant));
 }
