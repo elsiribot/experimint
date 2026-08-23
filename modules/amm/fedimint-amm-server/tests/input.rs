@@ -540,6 +540,29 @@ async fn zero_leg_is_omitted_from_amounts() {
         "the zero leg must be OMITTED, not present as an explicit zero"
     );
     assert_eq!(result.amount.amounts.len(), 1);
+
+    // The pool is asymmetric (`reserve_lo != reserve_hi`), so a mutant that
+    // swaps the two reserve debits (`reserve_lo -= db` / `reserve_hi -= da`)
+    // would go undetected by the `amounts` assertions above alone. Pin the
+    // stored reserves too, with the expected numbers hard-coded (not
+    // recomputed from `burn_shares`, which is exactly what a debit-orientation
+    // mutant would still agree with): 1_000_000_000 * 1 / 1_000_000 = 1_000,
+    // 10 * 1 / 1_000_000 floors to 0.
+    assert_eq!(expected.da, 1_000);
+    let stored_pool = dbtx
+        .get_value(&PoolKey(pool))
+        .await
+        .expect("pool must still exist after withdrawal");
+    assert_eq!(
+        stored_pool.reserve_lo,
+        Amount::from_msats(1_000_000_000 - 1_000),
+        "reserve_lo must be debited by da"
+    );
+    assert_eq!(
+        stored_pool.reserve_hi,
+        Amount::from_msats(10),
+        "reserve_hi must be debited by db (which is 0 here), not by da"
+    );
 }
 
 /// 12. `total_shares` never reaches zero even after every assigned position
@@ -598,5 +621,122 @@ async fn total_shares_never_reaches_zero_after_full_withdrawal() {
     assert!(
         dbtx.get_value(&LpPositionKey { pool, owner }).await.is_none(),
         "the emptied position must be deleted"
+    );
+}
+
+/// 13. `WithdrawV0` whose payout is below `min_hi` ONLY (`min_lo` is zero)
+///     still returns `SlippageExceeded` and writes nothing. The existing
+///     `min_lo`/`min_hi` coverage (case 9) only ever trips `min_lo` — this
+///     pins the second operand of `outcome.db < min_hi.msats` so a mutant
+///     that mispairs it (e.g. checking `outcome.db < min_lo.msats`) fails
+///     the suite.
+#[tokio::test]
+async fn withdraw_below_min_hi_only_fails_and_writes_nothing() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+    let owner = test_pubkey(13);
+
+    let seeded_pool = Pool {
+        reserve_lo: Amount::from_msats(1_001_000),
+        reserve_hi: Amount::from_msats(1_001_000),
+        total_shares: 1_000_000,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+    let seeded_position = LpPosition {
+        shares: 1_000,
+        tweak: [13u8; 16],
+    };
+    dbtx.insert_new_entry(&LpPositionKey { pool, owner }, &seeded_position)
+        .await;
+
+    let expected = math::burn_shares(
+        seeded_pool.reserve_lo.msats,
+        seeded_pool.reserve_hi.msats,
+        seeded_pool.total_shares,
+        500,
+    )
+    .unwrap();
+
+    let input = AmmInput::WithdrawV0 {
+        pool,
+        owner_pk: owner,
+        shares: 500,
+        min_lo: Amount::ZERO,
+        min_hi: Amount::from_msats(expected.db + 1),
+    };
+
+    let result = module.process_input(&mut dbtx, &input, in_point()).await;
+    assert_eq!(result, Err(AmmInputError::SlippageExceeded));
+
+    assert_eq!(dbtx.get_value(&PoolKey(pool)).await.unwrap(), seeded_pool);
+    assert_eq!(
+        dbtx.get_value(&LpPositionKey { pool, owner }).await.unwrap(),
+        seeded_position
+    );
+}
+
+/// 14. `AmmInput::Default { variant, bytes }` is rejected as
+///     `UnknownVariant`, mirroring `output.rs`'s
+///     `default_output_variant_is_rejected_as_unknown`.
+#[tokio::test]
+async fn default_input_variant_is_rejected_as_unknown() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+
+    let input = AmmInput::Default {
+        variant: 42,
+        bytes: vec![1, 2, 3],
+    };
+
+    let result = module.process_input(&mut dbtx, &input, in_point()).await;
+    assert_eq!(result, Err(AmmInputError::UnknownVariant));
+}
+
+/// 15. `WithdrawV0` with `shares == 0` is rejected. Spec §7.3 requires
+///     `0 < shares`; the implementation has no dedicated check for this —
+///     it relies on `burn_shares`'s `shares == 0 -> CurveError::ZeroAmount`
+///     guard. Pin the exact error so that guard stays covered even without
+///     a dedicated variant.
+#[tokio::test]
+async fn withdraw_zero_shares_fails() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+    let owner = test_pubkey(14);
+
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo: Amount::from_msats(1_000_000),
+            reserve_hi: Amount::from_msats(1_000_000),
+            total_shares: 1_000_000,
+        },
+    )
+    .await;
+    dbtx.insert_new_entry(
+        &LpPositionKey { pool, owner },
+        &LpPosition {
+            shares: 100,
+            tweak: [14u8; 16],
+        },
+    )
+    .await;
+
+    let input = AmmInput::WithdrawV0 {
+        pool,
+        owner_pk: owner,
+        shares: 0,
+        min_lo: Amount::ZERO,
+        min_hi: Amount::ZERO,
+    };
+
+    let result = module.process_input(&mut dbtx, &input, in_point()).await;
+    assert_eq!(
+        result,
+        Err(AmmInputError::Curve(math::CurveError::ZeroAmount.to_string()))
     );
 }

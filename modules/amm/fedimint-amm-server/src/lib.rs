@@ -371,6 +371,10 @@ impl ServerModule for Amm {
                     .ok_or_else(|| AmmInputError::Curve("amount overflow".to_string()))?;
 
                 // All checks passed: now, and only now, write.
+                // `burn_shares` only succeeds when `shares <= total_shares`,
+                // and `da`/`db` are that same fraction of `reserve_lo`/
+                // `reserve_hi`, so `da <= reserve_lo` and `db <= reserve_hi`:
+                // these never underflow.
                 db_pool.reserve_lo = Amount::from_msats(db_pool.reserve_lo.msats - outcome.da);
                 db_pool.reserve_hi = Amount::from_msats(db_pool.reserve_hi.msats - outcome.db);
                 db_pool.total_shares = outcome.new_total_shares;
