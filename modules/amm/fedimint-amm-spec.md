@@ -625,6 +625,7 @@ This module is **not trust-minimised relative to the federation**. Reserves are 
 3. **Per-unit audit.** Would upstream accept `AuditItem` carrying an `AmountUnit` (§9.2)? It would make the global assert per-unit and remove a class of federation-halting bugs across the ecosystem.
 4. **Recovery primitives upstream.** Should `grind_tweak` / `check_tweak` / `tweak_filter` move to `fedimint-client-module` (§8.4)?
 5. **`MAX_RESERVE` for non-BTC units.** `2^58` is unreachable for BTC but is a real ceiling for a fine-grained unit. Should it be per-unit configurable at DKG rather than a global constant?
+6. **`AmountUnit` inner-value access.** `AmountUnit` (`fedimint-core/src/module/mod.rs:77-98`) has a private field and no accessor, `From<AmountUnit> for u64`, or `Display`. Would upstream expose one? Without it, any module needing a textual or map-key representation of a unit (`PoolId`, §5.1) must round-trip through a derived trait to get the `u64` back out.
 
 ---
 

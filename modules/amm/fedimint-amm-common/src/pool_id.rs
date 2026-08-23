@@ -66,8 +66,18 @@ impl PoolId {
 
 impl Serialize for PoolId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let lo = amount_unit_to_u64(self.lo).map_err(SerdeSerError::custom)?;
-        let hi = amount_unit_to_u64(self.hi).map_err(SerdeSerError::custom)?;
+        let lo = amount_unit_to_u64(self.lo).ok_or_else(|| {
+            SerdeSerError::custom(format!(
+                "AmountUnit did not serialise to a plain u64: {:?}",
+                self.lo
+            ))
+        })?;
+        let hi = amount_unit_to_u64(self.hi).ok_or_else(|| {
+            SerdeSerError::custom(format!(
+                "AmountUnit did not serialise to a plain u64: {:?}",
+                self.hi
+            ))
+        })?;
         serializer.collect_str(&format_args!("{lo}:{hi}"))
     }
 }
@@ -109,16 +119,13 @@ impl<'de> Deserialize<'de> for PoolId {
     }
 }
 
-/// `AmountUnit`'s field is private with no accessor, so the only way to read
-/// its numeric id back out is through its own (derived) `Serialize` impl,
-/// which forwards transparently to a plain `u64`. `fedimint_core` already
-/// re-exports `serde_json` (`fedimint_core::module::serde_json`) for exactly
-/// this kind of use, so this adds no dependency of our own.
-fn amount_unit_to_u64(unit: AmountUnit) -> Result<u64, String> {
-    let encoded = serde_json::to_string(&unit).map_err(|e| e.to_string())?;
-    encoded
-        .parse::<u64>()
-        .map_err(|_| format!("AmountUnit did not serialise to a plain integer: {encoded:?}"))
+/// `AmountUnit` is a newtype over `u64` with a private field and no public
+/// accessor, no `Display`, and no `From<AmountUnit> for u64` on the pinned
+/// rev (fedimint-core/src/module/mod.rs:77-98). Its derived `Serialize` is
+/// transparent, so this is the only available route to the inner value.
+/// Remove this helper if upstream ever exposes one.
+fn amount_unit_to_u64(unit: AmountUnit) -> Option<u64> {
+    serde_json::to_value(unit).ok()?.as_u64()
 }
 
 impl Encodable for PoolId {
