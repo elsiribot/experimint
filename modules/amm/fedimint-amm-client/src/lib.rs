@@ -264,6 +264,45 @@ where
     Ok((min_out, quote))
 }
 
+/// Computes [`AmmClientModule::deposit`]'s `min_shares` wire guard from a
+/// share-mint preview against the pool's CURRENT reserves — the deposit-side
+/// analogue of [`fetch_min_out`] for `swap`'s `min_out` (see crate-level docs
+/// on why calling `math::mint_shares` here is not curve reimplementation).
+/// Extracted into its own function, mirroring `fetch_min_out`, so this exact
+/// computation — not a hand-copy of it — is what a test can observe without a
+/// running federation client (the "client seam" gap: every guard here is
+/// tested at the server end via hand-built inputs, never proven to be what
+/// the client actually puts on the wire). [`AmmClientModule::deposit`] calls
+/// this exact function rather than reimplementing the same two steps inline.
+fn deposit_min_shares(
+    reserve_lo: u64,
+    reserve_hi: u64,
+    total_shares: u64,
+    amount_lo: u64,
+    amount_hi: u64,
+    max_slippage_bps: u64,
+) -> anyhow::Result<(u64, math::MintOutcome)> {
+    let preview = math::mint_shares(reserve_lo, reserve_hi, total_shares, amount_lo, amount_hi)?;
+    let min_shares = min_after_slippage(preview.to_owner, max_slippage_bps)?;
+    Ok((min_shares, preview))
+}
+
+/// Computes [`AmmClientModule::withdraw`]'s four wire guards from a burn
+/// preview: exact-or-reject in both directions (see `withdraw`'s doc comment
+/// for why) — `min_lo == max_lo == preview.da`, `min_hi == max_hi ==
+/// preview.db`. Extracted into its own function, mirroring
+/// [`deposit_min_shares`]/[`fetch_min_out`], so this exact pinning — not a
+/// hand-copy of it — is what a test can observe without a running federation
+/// client. [`AmmClientModule::withdraw`] calls this exact function rather
+/// than assigning the four fields inline.
+fn withdraw_guards(preview: math::BurnOutcome) -> (Amount, Amount, Amount, Amount) {
+    let min_lo = Amount::from_msats(preview.da);
+    let min_hi = Amount::from_msats(preview.db);
+    let max_lo = min_lo;
+    let max_hi = min_hi;
+    (min_lo, min_hi, max_lo, max_hi)
+}
+
 /// The recovery matching predicate (spec §8, §8.2): whether `tweak` plausibly
 /// belongs to `root` (the cheap [`check_tweak`] prefilter, spec's ~1-in-65536
 /// tag) AND, only for the tweaks that pass, whether deriving `child` from it
@@ -606,14 +645,14 @@ impl AmmClientModule {
             .map(|p| (p.reserve_lo.msats, p.reserve_hi.msats, p.total_shares))
             .unwrap_or((0, 0, 0));
 
-        let preview = math::mint_shares(
+        let (min_shares, preview) = deposit_min_shares(
             reserve_lo,
             reserve_hi,
             total_shares,
             amount_lo.msats,
             amount_hi.msats,
+            max_slippage_bps,
         )?;
-        let min_shares = min_after_slippage(preview.to_owner, max_slippage_bps)?;
 
         let tweak = grind_tweak(&self.root_secret);
         let owner_keypair = derive_keypair(&self.root_secret, CHILD_LP, tweak);
@@ -746,11 +785,10 @@ impl AmmClientModule {
         )?;
         // Exact, not tolerance-reduced (see this method's doc comment): a
         // withdrawal is exact-or-reject in both directions, so `min_*` and
-        // `max_*` are both pinned to the same preview.
-        let min_lo = Amount::from_msats(preview.da);
-        let min_hi = Amount::from_msats(preview.db);
-        let max_lo = min_lo;
-        let max_hi = min_hi;
+        // `max_*` are both pinned to the same preview. Computed by
+        // `withdraw_guards` (not inline) so a test can observe this exact
+        // pinning without a running federation client.
+        let (min_lo, min_hi, max_lo, max_hi) = withdraw_guards(preview);
 
         let input = AmmInput::WithdrawV0 {
             pool,
@@ -1520,6 +1558,105 @@ mod tests {
         assert_ne!(
             first, second,
             "recipient_pk must not be reused across swaps"
+        );
+    }
+
+    /// The "client seam" gap this module's server-side guards were missing a
+    /// counterpart for: `withdraw`'s `min_lo`/`min_hi`/`max_lo`/`max_hi` are
+    /// well tested on the server against hand-built inputs (`process_input`'s
+    /// `WithdrawV0` arm), but nothing proved the client actually populates
+    /// them the way `withdraw`'s doc comment claims. `withdraw_guards` is the
+    /// exact function [`AmmClientModule::withdraw`] calls for this — this
+    /// pins both `max_lo == min_lo` and `max_hi == min_hi`, each equal to the
+    /// preview's `da`/`db`, independently of `withdraw`'s own doc comment
+    /// (i.e. against hard-coded expected values, not by re-deriving them
+    /// through any shared helper).
+    #[test]
+    fn withdraw_guards_pins_max_to_min_to_the_preview() {
+        let preview = math::BurnOutcome {
+            da: 12_345,
+            db: 6_789,
+            new_total_shares: 100,
+        };
+
+        let (min_lo, min_hi, max_lo, max_hi) = withdraw_guards(preview);
+
+        assert_eq!(min_lo, Amount::from_msats(12_345));
+        assert_eq!(min_hi, Amount::from_msats(6_789));
+        assert_eq!(
+            max_lo, min_lo,
+            "an unpinned max_lo would let settlement above the preview \
+             forfeit the surplus under core's overpay rule"
+        );
+        assert_eq!(
+            max_hi, min_hi,
+            "an unpinned max_hi would let settlement above the preview \
+             forfeit the surplus under core's overpay rule"
+        );
+    }
+
+    /// Deposit-side counterpart of the test above: `deposit_min_shares` is
+    /// the exact function [`AmmClientModule::deposit`] calls for its
+    /// `min_shares` wire guard. `1_000_000`/`1_000_000` into a fresh pool
+    /// mints `isqrt(1_000_000 * 1_000_000) - MINIMUM_LIQUIDITY ==
+    /// 999_000` (case 2 of `fedimint-amm-server`'s `tests/output.rs`, same
+    /// worked example); the expected `min_shares` after 1% tolerance is
+    /// computed independently here, not by calling `min_after_slippage`
+    /// again, so this cannot pass merely because the two call the same
+    /// arithmetic.
+    #[test]
+    fn deposit_min_shares_applies_tolerance_to_the_mint_preview() {
+        let (min_shares, preview) = deposit_min_shares(0, 0, 0, 1_000_000, 1_000_000, 100)
+            .expect("minting into a fresh pool succeeds");
+
+        assert_eq!(preview.to_owner, 999_000);
+        // Independently computed: 1% of 999_000, floored.
+        assert_eq!(min_shares, 989_010);
+        assert_ne!(
+            min_shares, 0,
+            "a zero min_shares would accept a total loss on the deposit"
+        );
+        assert_ne!(
+            min_shares, preview.to_owner,
+            "min_shares equal to the full preview would mean no tolerance was applied at all"
+        );
+    }
+
+    /// Swap-side counterpart: [`AmmClientModule::swap`] passes
+    /// `fetch_min_out`'s return value straight into
+    /// `AmmOutput::SwapV0::min_out` with no further transform in between
+    /// (see `swap`'s source), so this bound on `fetch_min_out` itself is the
+    /// bound on what ends up on the wire — same reasoning as
+    /// `withdraw_guards`/`deposit_min_shares` above for their operations.
+    /// `fetch_min_out_applies_slippage_to_the_fetched_quote` above already
+    /// pins the exact value (990); this makes the two failure directions a
+    /// degenerate guard could take explicit.
+    #[tokio::test]
+    async fn fetch_min_out_is_neither_zero_nor_unbounded_for_an_ordinary_tolerance() {
+        let (min_out, _) = fetch_min_out(
+            |_req| async {
+                Ok::<_, anyhow::Error>(QuoteResponse {
+                    amount_out: Amount::from_msats(1_000),
+                    price_impact_per_mille: 0,
+                })
+            },
+            AmountUnit::new_custom(0),
+            AmountUnit::new_custom(1),
+            Amount::from_msats(1_000),
+            100, // 1%
+        )
+        .await
+        .expect("fetch succeeds");
+
+        assert_ne!(
+            min_out,
+            Amount::ZERO,
+            "a zero min_out would accept a total loss on the trade"
+        );
+        assert_ne!(
+            min_out,
+            Amount::from_msats(u64::MAX),
+            "an unpinned min_out would accept any output at all"
         );
     }
 }

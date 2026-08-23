@@ -220,6 +220,128 @@ async fn deposit_with_min_shares_too_high_returns_slippage_exceeded() {
     );
 }
 
+/// 4b. `DepositV0` naming a `PoolId` whose **`lo`** is outside `cfg.units`
+///     returns `UnknownUnit` and writes nothing.
+///
+/// Unlike the `SwapV0` allowlist tests (case 8), no `Pool` needs to be seeded
+/// here: `DepositV0` is the only pool-creation path (case 2's doc comment),
+/// so an unseeded pool cannot pre-empt this check with `NoSuchPool` — there
+/// is no such error on the deposit path to begin with. The allowlist here is
+/// deliberately just `{unit(5)}` rather than the shared `amm()` fixture's
+/// `{unit(0), unit(1)}`: `PoolId::lo()` is always the numerically smaller
+/// unit (`pool_id.rs`'s `PoolId::new`), so with `amm()`'s allowlist starting
+/// at `0` there is no unit number left to be both `< 1` and outside the
+/// allowlist. `unit(1)` here is deliberately NOT in this test's allowlist,
+/// so `lo` is the only side excluded.
+#[tokio::test]
+async fn deposit_with_lo_outside_allowlist_is_rejected() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = Amm::new(AmmConfigConsensus {
+        units: BTreeMap::from([(
+            unit(5),
+            UnitParams {
+                min_swap_in: Amount::from_msats(1_000),
+            },
+        )]),
+        default_fee_per_mille: 3,
+        fee_overrides: BTreeMap::new(),
+    });
+    let pool = PoolId::new(unit(1), unit(5)).unwrap();
+    assert_eq!(
+        pool.lo(),
+        unit(1),
+        "test setup: lo must be the excluded unit"
+    );
+    assert_eq!(
+        pool.hi(),
+        unit(5),
+        "test setup: hi must be the allowed unit"
+    );
+
+    let output = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1_000_000),
+        amount_hi: Amount::from_msats(1_000_000),
+        min_shares: 0,
+        owner_pk: test_pubkey(20),
+        tweak: [20u8; 16],
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::UnknownUnit));
+    assert!(
+        dbtx.get_value(&PoolKey(pool)).await.is_none(),
+        "a rejected DepositV0 must leave no Pool record behind"
+    );
+    assert!(
+        dbtx.get_value(&LpPositionKey {
+            pool,
+            owner: test_pubkey(20)
+        })
+        .await
+        .is_none(),
+        "a rejected DepositV0 must leave no LpPosition record behind"
+    );
+}
+
+/// 4c. `DepositV0` naming a `PoolId` whose **`hi`** is outside `cfg.units`
+///     returns `UnknownUnit` and writes nothing. Mirror of case 4b — see its
+///     doc comment for why no `Pool` needs to be seeded — covering the other
+///     operand of the `||` in the allowlist guard, so deleting either half of
+///     that guard is caught by one of these two tests.
+#[tokio::test]
+async fn deposit_with_hi_outside_allowlist_is_rejected() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = Amm::new(AmmConfigConsensus {
+        units: BTreeMap::from([(
+            unit(1),
+            UnitParams {
+                min_swap_in: Amount::from_msats(1_000),
+            },
+        )]),
+        default_fee_per_mille: 3,
+        fee_overrides: BTreeMap::new(),
+    });
+    let pool = PoolId::new(unit(1), unit(5)).unwrap();
+    assert_eq!(
+        pool.lo(),
+        unit(1),
+        "test setup: lo must be the allowed unit"
+    );
+    assert_eq!(
+        pool.hi(),
+        unit(5),
+        "test setup: hi must be the excluded unit"
+    );
+
+    let output = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1_000_000),
+        amount_hi: Amount::from_msats(1_000_000),
+        min_shares: 0,
+        owner_pk: test_pubkey(21),
+        tweak: [21u8; 16],
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::UnknownUnit));
+    assert!(
+        dbtx.get_value(&PoolKey(pool)).await.is_none(),
+        "a rejected DepositV0 must leave no Pool record behind"
+    );
+    assert!(
+        dbtx.get_value(&LpPositionKey {
+            pool,
+            owner: test_pubkey(21)
+        })
+        .await
+        .is_none(),
+        "a rejected DepositV0 must leave no LpPosition record behind"
+    );
+}
+
 /// 5. `SwapV0` on a live pool moves reserves by exactly `amount_in` / `dy`,
 ///    credits `Balance[(recipient_pk, unit_out)] == dy`, and returns
 ///    `amounts == {unit_in: amount_in}`. The credited balance and the reserve
