@@ -359,9 +359,35 @@ mod tests {
         /// construction for every possible implementation — the assertion
         /// could never fail. What this test actually has value for is fuzzing
         /// the internal `u128` arithmetic across the full input space for a
-        /// panic (overflow, in debug builds); see
-        /// `price_impact_per_mille_is_monotonic_in_amount_in` below for a
-        /// property that can actually fail.
+        /// panic (overflow, in debug builds).
+        ///
+        /// A prior version of this file also carried
+        /// `price_impact_per_mille_is_monotonic_in_amount_in`, asserting that
+        /// a larger `amount_in` against the same pool never reports LESS
+        /// price impact, gated by an `amount_out >= 10_000` guard claimed to
+        /// scope the property to a regime where it held. Re-review found
+        /// that claim false, with a fabricated counterexample (the comment's
+        /// own cited case, `reserve_in = reserve_out = 1000`, `fee = 3`,
+        /// `amount_in` 100 vs 101, does not reproduce: both report impact
+        /// 100). Removed rather than re-guarded, because the property is
+        /// false above the guard too — reproduced directly against this
+        /// file's own `amount_out`/`price_impact_per_mille`
+        /// (`nix develop --command rustc`, not just asserted here):
+        ///
+        /// `reserve_in = 5_653_265`, `reserve_out = 4_045_128`,
+        /// `fee_per_mille = 638`: `amount_in = 42_093` → `amount_out =
+        /// 10_873`, impact 640; `amount_in = 42_449` (a LARGER trade) →
+        /// `amount_out = 10_965`, impact 639 — a real decrease, with
+        /// `amount_out` well into five digits on both sides, so no
+        /// output-size threshold restores monotonicity in general. The
+        /// underlying cause: `amount_out` floors once, and
+        /// `price_impact_per_mille` floors the ratio of that already-floored
+        /// value again; at mid-scale reserves this compounded floor error can
+        /// exceed the genuine, monotonically-shrinking exact-rational
+        /// improvement in effective price between two nearby `amount_in`
+        /// values, flipping the reported (integer, twice-floored) impact the
+        /// wrong way. No replacement monotonicity property is asserted here;
+        /// none has been found to hold without a false caveat.
         #[test]
         fn price_impact_per_mille_never_panics_within_caps(
             r_in in 1u64..=MAX_RESERVE,
@@ -373,56 +399,27 @@ mod tests {
                 let _ = price_impact_per_mille(r_in, r_out, amt, out);
             }
         }
+    }
 
-        /// Finding M6: a larger swap against the same pool must never be
-        /// reported as having LESS price impact. This follows from
-        /// `amount_out`'s exact-rational formula
-        /// `out/amt = fee·r_out / (r_in·1000 + fee·amt)`, which is strictly
-        /// decreasing in `amt` — so the exact effective-price ratio only
-        /// gets worse as the trade grows.
-        ///
-        /// The `>= MIN_OUT_FOR_MONOTONICITY` guard is load-bearing, not
-        /// cosmetic. `price_impact_per_mille` floors `out` (in `amount_out`)
-        /// and then floors the ratio again; when `out` is tiny (single
-        /// digits), that double-flooring is a huge fraction of the value and
-        /// can make the reported impact NON-monotonic in a way that is a
-        /// genuine, reproducible property of this integer implementation, not
-        /// a proptest false positive. Concretely, at `reserve_in =
-        /// reserve_out = 1000`, `fee = 3`: `amount_in = 100` reports impact
-        /// `100`, but `amount_in = 101` reports impact `99` — a real
-        /// decrease from a one-unit LARGER trade, because `amount_out` floors
-        /// 90.66 and 91.63 down to 90 and 91 respectively, and that rounding
-        /// noise dominates at such small outputs. This is an inherent
-        /// limitation of reporting price impact from twice-floored integers
-        /// at the extreme low end, not a bug this task is asked to fix — the
-        /// guard scopes the property to the regime where it is actually true
-        /// (confirmed by a 2M-sample adversarial search across the full
-        /// input space during development, finding zero violations at this
-        /// threshold, versus thousands of violations — some off by over 400
-        /// per-mille — with the guard removed).
-        #[test]
-        fn price_impact_per_mille_is_monotonic_in_amount_in(
-            r_in in 1u64..=MAX_RESERVE,
-            r_out in 1u64..=MAX_RESERVE,
-            amt_small in 1u64..=MAX_RESERVE,
-            extra in 0u64..=MAX_RESERVE,
-            fee in 0u16..1000,
-        ) {
-            const MIN_OUT_FOR_MONOTONICITY: u64 = 10_000;
+    /// Fix pass 2, Important 1: the violation cited in
+    /// `price_impact_per_mille_never_panics_within_caps`'s doc comment,
+    /// pinned as a regression test so it cannot silently start reproducing
+    /// monotonicity again without this test being noticed and reconsidered.
+    #[test]
+    fn price_impact_per_mille_is_not_monotonic_above_the_former_guard() {
+        let out_small = amount_out(5_653_265, 4_045_128, 42_093, 638).unwrap();
+        let out_big = amount_out(5_653_265, 4_045_128, 42_449, 638).unwrap();
+        assert_eq!(out_small, 10_873);
+        assert_eq!(out_big, 10_965);
 
-            let amt_big = amt_small.saturating_add(extra);
-            if let (Ok(out_small), Ok(out_big)) = (
-                amount_out(r_in, r_out, amt_small, fee),
-                amount_out(r_in, r_out, amt_big, fee),
-            )
-                && out_small >= MIN_OUT_FOR_MONOTONICITY
-                && out_big >= MIN_OUT_FOR_MONOTONICITY
-            {
-                let impact_small = price_impact_per_mille(r_in, r_out, amt_small, out_small);
-                let impact_big = price_impact_per_mille(r_in, r_out, amt_big, out_big);
-                proptest::prop_assert!(impact_big >= impact_small);
-            }
-        }
+        let impact_small = price_impact_per_mille(5_653_265, 4_045_128, 42_093, out_small);
+        let impact_big = price_impact_per_mille(5_653_265, 4_045_128, 42_449, out_big);
+        assert_eq!(impact_small, 640);
+        assert_eq!(impact_big, 639);
+        assert!(
+            impact_big < impact_small,
+            "a larger amount_in reporting less impact is exactly the (real) violation this test pins"
+        );
     }
 
     proptest::proptest! {

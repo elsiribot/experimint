@@ -28,7 +28,10 @@ use fedimint_core::config::{
     TypedServerModuleConsensusConfig,
 };
 use fedimint_core::core::ModuleInstanceId;
-use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::db::{
+    DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCore,
+    IDatabaseTransactionOpsCoreTyped, WithDecoders,
+};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     AmountUnit, Amounts, ApiEndpoint, ApiError, ApiVersion, CoreConsensusVersion, InputMeta,
@@ -250,11 +253,17 @@ fn map_curve_error_input(e: math::CurveError) -> AmmInputError {
     }
 }
 
-/// Output of [`quote_swap`]: the swap's computed output plus the orientation
-/// resolved to compute it. `process_output`'s `SwapV0` arm needs `in_is_lo`
-/// too (to write the reserves back on the correct side), so it is returned
-/// here rather than re-derived independently at the call site — finding I1
-/// was exactly that kind of hand-copy drifting out of sync.
+/// Output of [`quote_swap`]: the swap's computed output plus everything
+/// resolved to compute it. `process_output`'s `SwapV0` arm and
+/// `QUOTE_ENDPOINT` both need the oriented reserves (finding M6: previously
+/// each re-derived `(reserve_in, reserve_out)` from `in_is_lo` independently,
+/// a second copy of the same selection alongside the one inside this
+/// function); `process_output` additionally needs `reserve_in_new` (finding
+/// M5: previously recomputed there via a second `checked_add`, even though
+/// this function had already computed and validated the identical sum on
+/// the identical operands). All three are returned here instead, so there
+/// is exactly one place that selects orientation and exactly one place that
+/// computes `reserve_in_new` — the hand-copy-drift finding I1 was about.
 struct SwapQuote {
     /// `amount_out` for this swap. Spec §7.4: this ONE binding must be used
     /// for both the reserve debit and the balance credit — never recompute
@@ -262,6 +271,13 @@ struct SwapQuote {
     dy: u64,
     /// Whether `unit_in` is `pool_id.lo()` (vs `.hi()`).
     in_is_lo: bool,
+    /// The reserve `unit_in` was drawn from, before this swap.
+    reserve_in: Amount,
+    /// The reserve `unit_out` was drawn from, before this swap.
+    reserve_out: Amount,
+    /// `reserve_in.msats + amount_in.msats`, already validated `<=
+    /// MAX_RESERVE`.
+    reserve_in_new: u64,
 }
 
 /// Resolves orientation, applies every swap admission check, and computes
@@ -277,12 +293,22 @@ struct SwapQuote {
 /// constructed as `PoolId::new(unit_in, unit_out)` by the caller (both call
 /// sites do this), so `unit_out` is simply the side of `pool_id` that is not
 /// `unit_in`.
+///
+/// `min_out` is `Some` only from `process_output`'s `SwapV0` arm —
+/// `QUOTE_ENDPOINT` passes `None`, since a mere quote has no slippage
+/// tolerance to check against. Checking it here, immediately after `dy` is
+/// known and before the `MAX_RESERVE`-on-`reserve_in_new` check below,
+/// restores the error priority settlement had before finding I1 folded both
+/// checks into this one function (fix pass 2, Minor 4): a swap that both
+/// misses slippage and would push the reserve past its cap reports
+/// `SlippageExceeded`, not `ReserveCapExceeded`.
 fn quote_swap(
     cfg: &AmmConfigConsensus,
     pool: &Pool,
     pool_id: PoolId,
     unit_in: AmountUnit,
     amount_in: Amount,
+    min_out: Option<Amount>,
 ) -> Result<SwapQuote, AmmOutputError> {
     let params_in = cfg.units.get(&unit_in).ok_or(AmmOutputError::UnknownUnit)?;
     let in_is_lo = unit_in == pool_id.lo();
@@ -307,6 +333,12 @@ fn quote_swap(
     let dy = math::amount_out(reserve_in.msats, reserve_out.msats, amount_in.msats, fee)
         .map_err(map_curve_error)?;
 
+    if let Some(min_out) = min_out
+        && dy < min_out.msats
+    {
+        return Err(AmmOutputError::SlippageExceeded);
+    }
+
     let reserve_in_new = reserve_in
         .msats
         .checked_add(amount_in.msats)
@@ -315,7 +347,13 @@ fn quote_swap(
         return Err(AmmOutputError::ReserveCapExceeded);
     }
 
-    Ok(SwapQuote { dy, in_is_lo })
+    Ok(SwapQuote {
+        dy,
+        in_is_lo,
+        reserve_in,
+        reserve_out,
+        reserve_in_new,
+    })
 }
 
 /// Clamps a client-requested recovery page size to `[1,
@@ -327,6 +365,55 @@ fn recovery_page_limit(requested: Option<u32>) -> usize {
     requested
         .unwrap_or(MAX_RECOVERY_PAGE_SIZE)
         .clamp(1, MAX_RECOVERY_PAGE_SIZE) as usize
+}
+
+/// Ceiling on a client-supplied keyset cursor's length in bytes (fix pass 2
+/// hardening, prompted by switching `RecoveryPageRequest::cursor` from a
+/// fixed 8-byte `u64` to an opaque `Vec<u8>`, Important 2). Every real
+/// cursor this module ever hands out is a `BalanceKey` or `LpPositionKey`
+/// encoding — comfortably under 100 bytes — so this is generous, not tight;
+/// its only job is to stop an unauthenticated caller from supplying an
+/// arbitrarily large `cursor` purely to make the server allocate and copy
+/// that much memory on every request, which the old fixed-size cursor could
+/// never do. Same "never trust a client-supplied size directly" reasoning as
+/// [`recovery_page_limit`].
+const MAX_RECOVERY_CURSOR_LEN: usize = 256;
+
+/// Builds the half-open `[start, end)` raw byte range for one page of a
+/// keyset-cursor scan over a single-table `DbKeyPrefix` byte (fix pass 2,
+/// Important 2 and Important 3).
+///
+/// `end` is one past `db_prefix`: every real key in the table starts with
+/// `db_prefix`, and any byte string starting with `db_prefix + 1` therefore
+/// compares strictly greater than all of them regardless of what follows.
+/// This bounds the whole table without needing a "maximum key" of the
+/// table's actual key type — which, for a key containing a
+/// `secp256k1::PublicKey`, cannot be constructed at all through the public
+/// API without an actual valid curve point, so `find_by_range`'s typed
+/// `Range<K>` (the pinned `fedimint-core`'s native range-start scan) is not
+/// usable for these composite keys and `raw_find_by_range`'s untyped byte
+/// range is used instead.
+///
+/// `start` is `cursor` — the exact bytes the previous page returned as
+/// `next_cursor`, themselves exactly what `DatabaseKeyPrefix::to_bytes`
+/// produces for a key of this table — with one extra `0x00` byte appended.
+/// Appending a byte to `X` always sorts strictly after `X` in
+/// byte-lexicographic order (a string that is a proper prefix of another
+/// always sorts first), and there is no real key strictly between the two:
+/// resuming here excludes exactly the cursor's own row and nothing else,
+/// independent of whether this table's key encoding is fixed- or
+/// variable-length. `None` starts from the first key in the table.
+fn recovery_range(db_prefix: u8, cursor: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
+    let start = match cursor {
+        Some(last_key_bytes) => {
+            let mut start = last_key_bytes.to_vec();
+            start.push(0);
+            start
+        }
+        None => vec![db_prefix],
+    };
+    let end = vec![db_prefix + 1];
+    (start, end)
 }
 
 /// AMM module.
@@ -513,39 +600,22 @@ impl ServerModule for Amm {
                 // call itself — the exact function `QUOTE_ENDPOINT` calls
                 // (finding I1), so a quote can never disagree with
                 // settlement.
-                let quote = quote_swap(&self.cfg, &pool, pool_id, *unit_in, *amount_in)?;
+                let quote =
+                    quote_swap(&self.cfg, &pool, pool_id, *unit_in, *amount_in, Some(*min_out))?;
                 let dy = quote.dy;
 
-                if dy < min_out.msats {
-                    return Err(AmmOutputError::SlippageExceeded);
-                }
-
-                let (reserve_in, reserve_out) = if quote.in_is_lo {
-                    (pool.reserve_lo, pool.reserve_hi)
-                } else {
-                    (pool.reserve_hi, pool.reserve_lo)
-                };
-
-                // `quote_swap` already proved `reserve_in.msats +
-                // amount_in.msats <= MAX_RESERVE` on these exact operands;
-                // this re-derives the same sum for the write below rather
-                // than threading a third field through `SwapQuote`. Unlike
-                // `dy`, a plain `checked_add` of two already-validated
-                // integers cannot diverge between two evaluations, so this
-                // is not the kind of "compute a value twice" spec §7.4
-                // forbids — the `ok_or` is a non-panicking
-                // belt-and-suspenders, not a reachable error path.
-                let reserve_in_new = reserve_in
-                    .msats
-                    .checked_add(amount_in.msats)
-                    .ok_or(AmmOutputError::ReserveCapExceeded)?;
+                // Findings Minor 4/5/6: orientation, `reserve_in_new`, and
+                // the `min_out` slippage check all now live in `quote_swap`
+                // (see its doc comment) — reused here via `SwapQuote`
+                // rather than re-selected or recomputed.
+                let reserve_in_new = quote.reserve_in_new;
                 // `amount_out` guarantees `dy < reserve_out`, so this never
                 // underflows.
-                let reserve_out_new = reserve_out.msats - dy;
+                let reserve_out_new = quote.reserve_out.msats - dy;
 
                 if !math::k_non_decreasing(
-                    reserve_in.msats,
-                    reserve_out.msats,
+                    quote.reserve_in.msats,
+                    quote.reserve_out.msats,
                     reserve_in_new,
                     reserve_out_new,
                 ) {
@@ -853,18 +923,14 @@ impl ServerModule for Amm {
                     // The exact function `process_output`'s `SwapV0` arm
                     // settles with (finding I1): orientation, the admission
                     // checks, and the curve call cannot drift apart between
-                    // quote and settlement (finding M9).
-                    let quote = quote_swap(&module.cfg, &pool, pool_id, unit_in, amount_in)
+                    // quote and settlement (finding M9). `min_out` is `None`:
+                    // a quote has no slippage tolerance of its own to check.
+                    let quote = quote_swap(&module.cfg, &pool, pool_id, unit_in, amount_in, None)
                         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-                    let (reserve_in, reserve_out) = if quote.in_is_lo {
-                        (pool.reserve_lo, pool.reserve_hi)
-                    } else {
-                        (pool.reserve_hi, pool.reserve_lo)
-                    };
                     let price_impact_per_mille = math::price_impact_per_mille(
-                        reserve_in.msats,
-                        reserve_out.msats,
+                        quote.reserve_in.msats,
+                        quote.reserve_out.msats,
                         amount_in.msats,
                         quote.dy,
                     );
@@ -879,34 +945,91 @@ impl ServerModule for Amm {
                 BALANCE_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Amm, context, request: RecoveryPageRequest| -> BalanceRecoveryResponse {
+                    if request.cursor.as_ref().is_some_and(|c| c.len() > MAX_RECOVERY_CURSOR_LEN) {
+                        return Err(ApiError::bad_request("cursor too large".to_string()));
+                    }
+
                     let db = context.db();
                     let mut dbtx = db.begin_transaction_nc().await;
                     let limit = recovery_page_limit(request.limit);
 
-                    // Finding I2: bounded to `limit + 1` rows regardless of
-                    // table size, so one request can never amplify into an
-                    // O(live rows) scan, allocation and response — even
-                    // though `Balance` rows are attacker-creatable for one
-                    // `min_swap_in` each and never garbage-collected (spec
-                    // §9.2). The `+1` lets us tell whether more rows remain
-                    // without a separate count query.
-                    let mut rows: Vec<_> = dbtx
-                        .find_by_prefix(&BalancePrefix)
+                    // Fix pass 2, Important 2: a keyset cursor, not a row
+                    // offset — resumes from the last KEY returned rather
+                    // than a row count, so it stays correct under concurrent
+                    // deletion. `Balance` rows are deleted routinely (every
+                    // `ClaimBalanceV0`), and the previous `.skip(cursor)`
+                    // counted positions: a deletion below the cursor shifted
+                    // every later row left by one, so the next page silently
+                    // dropped whatever row landed on the boundary.
+                    // `balance_recovery_keyset_cursor_survives_deletion_below_cursor`
+                    // (tests/endpoints.rs) reproduces this against the prior
+                    // offset implementation and fails there; it passes here.
+                    //
+                    // Also genuinely bounds the scan (Important 3: the old
+                    // comment here claimed this without it being true —
+                    // `find_by_prefix().skip(n)` still polls and decodes,
+                    // including a full secp256k1 `PublicKey` parse, every
+                    // row up to the cursor on every call, so an
+                    // unauthenticated caller replaying a cursor pinned at
+                    // table size paid O(table size) per request; only
+                    // allocation and response size were actually bounded).
+                    // `raw_find_by_range` seeks directly to `start` in every
+                    // store this module runs against — confirmed by reading
+                    // `MemDatabase::raw_find_by_range` (`BTreeMap::range`,
+                    // `fedimint-core/src/db/mem_impl.rs`) and RocksDB's
+                    // (`IteratorMode::From` plus `set_iterate_range`,
+                    // `fedimint-rocksdb/src/lib.rs`) at the pinned rev —
+                    // neither iterates from the start of the table, so
+                    // per-request work is O(limit), not O(cursor).
+                    let (start, end) =
+                        recovery_range(DbKeyPrefix::Balance as u8, request.cursor.as_deref());
+                    let decoders = dbtx.decoders().clone();
+                    // Keeps the raw `key_bytes` alongside the decoded value,
+                    // rather than decoding and later re-encoding a
+                    // `BalanceKey` for `next_cursor`: `key_bytes` already
+                    // *is* what `to_bytes()` would produce, since it came
+                    // straight off the wire from `raw_find_by_range`.
+                    let mut rows: Vec<(Vec<u8>, BalanceKey, BalanceEntry)> = dbtx
+                        .raw_find_by_range(start.as_slice()..end.as_slice())
                         .await
-                        .skip(request.cursor as usize)
+                        .expect("Unrecoverable error occurred while listing entries from the database")
                         .take(limit + 1)
+                        .map(|(key_bytes, value_bytes)| {
+                            let key =
+                                <BalanceKey as fedimint_core::db::DatabaseKey>::from_bytes(
+                                    &key_bytes, &decoders,
+                                )
+                                .expect(
+                                    "raw_find_by_range over the Balance prefix only yields \
+                                     bytes this module itself wrote as BalanceKey",
+                                );
+                            let value =
+                                <BalanceEntry as fedimint_core::db::DatabaseValue>::from_bytes(
+                                    &value_bytes,
+                                    &decoders,
+                                )
+                                .expect(
+                                    "raw_find_by_range over the Balance prefix only yields \
+                                     bytes this module itself wrote as BalanceEntry",
+                                );
+                            (key_bytes, key, value)
+                        })
                         .collect()
                         .await;
 
-                    let next_cursor = (rows.len() > limit).then(|| {
+                    let has_more = rows.len() > limit;
+                    if has_more {
                         rows.truncate(limit);
-                        request.cursor + limit as u64
-                    });
+                    }
+                    let next_cursor = has_more
+                        .then(|| rows.last())
+                        .flatten()
+                        .map(|(key_bytes, _, _)| key_bytes.clone());
 
                     Ok(BalanceRecoveryResponse {
                         entries: rows
                             .into_iter()
-                            .map(|(key, entry)| BalanceRecoveryEntry {
+                            .map(|(_, key, entry)| BalanceRecoveryEntry {
                                 tweak: entry.tweak,
                                 pubkey: key.owner,
                                 unit: key.unit,
@@ -921,29 +1044,61 @@ impl ServerModule for Amm {
                 LP_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Amm, context, request: RecoveryPageRequest| -> LpRecoveryResponse {
+                    if request.cursor.as_ref().is_some_and(|c| c.len() > MAX_RECOVERY_CURSOR_LEN) {
+                        return Err(ApiError::bad_request("cursor too large".to_string()));
+                    }
+
                     let db = context.db();
                     let mut dbtx = db.begin_transaction_nc().await;
                     let limit = recovery_page_limit(request.limit);
 
-                    // Finding I2: see `BALANCE_RECOVERY_ENDPOINT` above —
-                    // same bounded-page reasoning, mirrored for `LpPosition`.
-                    let mut rows: Vec<_> = dbtx
-                        .find_by_prefix(&LpPositionPrefix)
+                    // See `BALANCE_RECOVERY_ENDPOINT` above — same keyset
+                    // cursor, mirrored for `LpPosition` (fix pass 2,
+                    // Important 2 and Important 3).
+                    let (start, end) =
+                        recovery_range(DbKeyPrefix::LpPosition as u8, request.cursor.as_deref());
+                    let decoders = dbtx.decoders().clone();
+                    let mut rows: Vec<(Vec<u8>, LpPositionKey, LpPosition)> = dbtx
+                        .raw_find_by_range(start.as_slice()..end.as_slice())
                         .await
-                        .skip(request.cursor as usize)
+                        .expect("Unrecoverable error occurred while listing entries from the database")
                         .take(limit + 1)
+                        .map(|(key_bytes, value_bytes)| {
+                            let key =
+                                <LpPositionKey as fedimint_core::db::DatabaseKey>::from_bytes(
+                                    &key_bytes, &decoders,
+                                )
+                                .expect(
+                                    "raw_find_by_range over the LpPosition prefix only yields \
+                                     bytes this module itself wrote as LpPositionKey",
+                                );
+                            let value =
+                                <LpPosition as fedimint_core::db::DatabaseValue>::from_bytes(
+                                    &value_bytes,
+                                    &decoders,
+                                )
+                                .expect(
+                                    "raw_find_by_range over the LpPosition prefix only yields \
+                                     bytes this module itself wrote as LpPosition",
+                                );
+                            (key_bytes, key, value)
+                        })
                         .collect()
                         .await;
 
-                    let next_cursor = (rows.len() > limit).then(|| {
+                    let has_more = rows.len() > limit;
+                    if has_more {
                         rows.truncate(limit);
-                        request.cursor + limit as u64
-                    });
+                    }
+                    let next_cursor = has_more
+                        .then(|| rows.last())
+                        .flatten()
+                        .map(|(key_bytes, _, _)| key_bytes.clone());
 
                     Ok(LpRecoveryResponse {
                         entries: rows
                             .into_iter()
-                            .map(|(key, position)| LpRecoveryEntry {
+                            .map(|(_, key, position)| LpRecoveryEntry {
                                 tweak: position.tweak,
                                 pool: key.pool,
                                 pubkey: key.owner,

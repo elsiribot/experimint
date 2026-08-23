@@ -21,11 +21,16 @@ pub const QUOTE_ENDPOINT: &str = "amm_quote";
 /// page at a time (finding I2: `Balance` rows are attacker-creatable for one
 /// `min_swap_in` each and are never garbage-collected, so an unpaginated dump
 /// lets a single tiny request amplify into an O(live rows) scan, allocation
-/// and response — spec §8.2, §9.2, §12).
+/// and response — spec §8.2, §9.2, §12). Paginated with a keyset cursor (fix
+/// pass 2, Important 2): resuming from the last row's key, not a row offset,
+/// so a `Balance` deleted below the cursor between pages — which happens
+/// routinely in a live federation, since every completed swap deletes one —
+/// can never shift a later row into a skipped position.
 pub const BALANCE_RECOVERY_ENDPOINT: &str = "amm_balance_recovery";
 
 /// Streams `(tweak, pool, pubkey, shares)` for every stored `LpPosition`, one
-/// page at a time, mirroring [`BALANCE_RECOVERY_ENDPOINT`] for LP positions.
+/// page at a time, mirroring [`BALANCE_RECOVERY_ENDPOINT`] for LP positions,
+/// including its keyset cursor (fix pass 2, Important 2).
 pub const LP_RECOVERY_ENDPOINT: &str = "amm_lp_recovery";
 
 /// Server-enforced ceiling on a recovery page's size (finding I2). The
@@ -36,11 +41,19 @@ pub const LP_RECOVERY_ENDPOINT: &str = "amm_lp_recovery";
 pub const MAX_RECOVERY_PAGE_SIZE: u32 = 500;
 
 /// Request shared by both recovery endpoints (finding I2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RecoveryPageRequest {
-    /// Resume point: rows already returned by earlier pages are skipped.
-    /// `0` (the default) starts from the beginning.
-    pub cursor: u64,
+    /// Keyset resume point (fix pass 2, Important 2): the exact bytes a
+    /// previous page returned as `next_cursor`, or `None` to start from the
+    /// beginning. Opaque to the client — it is the server's own encoding of
+    /// the last row returned, not a row count, so a client must pass back
+    /// exactly what it was given rather than construct or mutate one. This
+    /// replaces an earlier `u64` row-offset cursor, which a deletion below
+    /// the cursor between pages could make skip a row (Important 2): an
+    /// offset counts positions, and a row removed below it shifts every
+    /// later row left by one, so the next page's `.skip(offset)` lands one
+    /// row too far and silently drops whatever was there.
+    pub cursor: Option<Vec<u8>>,
     /// Requested page size. `None` requests the maximum. Always clamped
     /// server-side to `[1, MAX_RECOVERY_PAGE_SIZE]` — a client cannot ask
     /// for an unbounded page.
@@ -86,8 +99,9 @@ pub struct BalanceRecoveryEntry {
 pub struct BalanceRecoveryResponse {
     pub entries: Vec<BalanceRecoveryEntry>,
     /// `Some(cursor)` to pass as the next [`RecoveryPageRequest::cursor`]
-    /// iff more rows remain; `None` means this was the last page.
-    pub next_cursor: Option<u64>,
+    /// iff more rows remain; `None` means this was the last page. Opaque
+    /// keyset bytes, not a row count (fix pass 2, Important 2).
+    pub next_cursor: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +117,7 @@ pub struct LpRecoveryEntry {
 pub struct LpRecoveryResponse {
     pub entries: Vec<LpRecoveryEntry>,
     /// `Some(cursor)` to pass as the next [`RecoveryPageRequest::cursor`]
-    /// iff more rows remain; `None` means this was the last page.
-    pub next_cursor: Option<u64>,
+    /// iff more rows remain; `None` means this was the last page. Opaque
+    /// keyset bytes, not a row count (fix pass 2, Important 2).
+    pub next_cursor: Option<Vec<u8>>,
 }

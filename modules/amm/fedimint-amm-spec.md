@@ -257,6 +257,10 @@ Note that **each transaction touches exactly one unit on the mint side** for swa
 
 Implement `verify_output_submission` and `verify_input_submission` (P12) to re-check `min_out`, `min_shares`, `min_lo`/`min_hi`, balance existence and reserve caps against the current dbtx. These run only in Submission mode and are not consensus-binding, but they turn a doomed transaction into an immediate client-visible error instead of a wasted consensus round.
 
+### 6.5 A consequence of `DepositV0` being the only pool creator
+
+`DepositV0` is the only item that ever creates a `Pool`, and it validates both units against the config allowlist before doing so (§11). So in the common case, `AmmOutputError::UnknownUnit` is unreachable on both the swap and quote paths: `SwapV0` and `QUOTE_ENDPOINT` both look the pool up *before* `quote_swap` gets a chance to check the allowlist, and a pool can only exist for a pair that was allowlisted at deposit time — so a swap or quote naming a unit that was never allowlisted instead reports `NoSuchPool`, there being no pool for that pair to find. `quote_swap`'s own allowlist check only becomes reachable if a unit is later *removed* from `AmmConfigConsensus.units` while a pool created under the old config still references it — a case this spec does not otherwise discuss, since §11 only describes adding units. Not a bug; recorded here so the taxonomy is understood rather than rediscovered.
+
 ---
 
 ## 7. Arithmetic
@@ -529,7 +533,7 @@ Units are declared client-side (P10) and `ClientModule` is unit-parameterised th
 
 - `POOLS_ENDPOINT` → every `PoolId` with reserves, `total_shares`, effective fee.
 - `QUOTE_ENDPOINT(unit_in, unit_out, amount_in)` → `{ amount_out, price_impact_per_mille }`, computed with the same `common` function the server settles with. `effective_price` is deliberately omitted (finding M5): it is a ratio with no exact integer representation, and the client can compute it exactly itself from `amount_out` and the `amount_in` it already knows.
-- `BALANCE_RECOVERY_ENDPOINT` → paginated stream of `(tweak, pubkey, unit, amount)` (finding I2: cursor + limit, server-enforced max page size — `Balance` rows are attacker-creatable for one `min_swap_in` each and never garbage-collected, §9.2, so an unpaginated dump is a single-request amplification).
+- `BALANCE_RECOVERY_ENDPOINT` → paginated stream of `(tweak, pubkey, unit, amount)` (finding I2: cursor + limit, server-enforced max page size — `Balance` rows are attacker-creatable for one `min_swap_in` each and never garbage-collected, §9.2, so an unpaginated dump is a single-request amplification). The cursor is a keyset cursor (fix pass 2, Important 2) — the server's opaque encoding of the last row returned, echoed back verbatim by the client — not a row offset, so pagination stays correct even though `Balance` rows are deleted continuously in a live federation (every `ClaimBalanceV0`).
 - `LP_RECOVERY_ENDPOINT` → paginated stream of `(tweak, pool, pubkey, shares)`, same pagination as above.
 
 ### 12.1 Documented limitations
