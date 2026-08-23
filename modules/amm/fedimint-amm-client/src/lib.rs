@@ -1066,7 +1066,42 @@ async fn claim_pending_balances(
                         claimed += 1;
                     }
                     Err(error) => {
-                        errors.push(format!("{:?}/{:?}: {error}", key.pubkey, key.unit));
+                        // The re-read above found `Some(amount)`, but the
+                        // claim was rejected anyway: a second claimant for
+                        // this exact balance (this module's own background
+                        // sweep racing this same function's other caller,
+                        // another client process recovering the same seed,
+                        // spec §8.1) may have landed its own `ClaimBalanceV0`
+                        // in the gap between that re-read and this
+                        // transaction reaching consensus. That is the same
+                        // benign race the `Ok(None)` arm above already
+                        // tolerates (this function's own doc comment) — only
+                        // observed one step later here, via a rejection
+                        // instead of a proactive re-read. Re-check now: if
+                        // the balance is gone, someone else's claim is the
+                        // only thing that could have removed it (spec §6.3:
+                        // no expiry, no refund path — nothing else deletes a
+                        // `Balance`), so this is that same benign case, not a
+                        // real error; drop the stale row exactly as the
+                        // `Ok(None)` arm does. Otherwise this was a genuine
+                        // failure (the balance is still there, unclaimed) and
+                        // must be reported so the row is retried next sweep.
+                        match module_api
+                            .amm_balance(BalanceRequest {
+                                pubkey: key.pubkey,
+                                unit: key.unit,
+                            })
+                            .await
+                        {
+                            Ok(None) => {
+                                let mut dbtx = db.begin_transaction().await;
+                                dbtx.remove_entry(&key).await;
+                                dbtx.commit_tx().await;
+                            }
+                            _ => {
+                                errors.push(format!("{:?}/{:?}: {error}", key.pubkey, key.unit));
+                            }
+                        }
                     }
                 }
             }

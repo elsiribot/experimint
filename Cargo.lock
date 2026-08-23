@@ -2231,19 +2231,32 @@ name = "fedimint-amm-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "erased-serde",
  "fedimint-amm-client",
  "fedimint-amm-common",
  "fedimint-amm-server",
  "fedimint-client",
+ "fedimint-client-module",
  "fedimint-core",
+ "fedimint-derive-secret",
+ "fedimint-dummy-client",
+ "fedimint-dummy-server",
  "fedimint-logging",
+ "fedimint-mintv2-client",
+ "fedimint-mintv2-common",
+ "fedimint-mintv2-server",
  "fedimint-server-core",
  "fedimint-testing",
  "futures",
  "rand 0.8.7",
  "serde",
  "serde_json",
+ "strum 0.27.2",
+ "strum_macros 0.27.2",
+ "thiserror 2.0.20",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 
@@ -2524,6 +2537,57 @@ dependencies = [
  "fedimint-core",
  "fedimint-hkdf",
  "ring",
+]
+
+[[package]]
+name = "fedimint-dummy-client"
+version = "0.13.0-alpha"
+source = "git+https://github.com/fedimint/fedimint?rev=4794ee166afc191e0125c092893bd8f080939b53#4794ee166afc191e0125c092893bd8f080939b53"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "erased-serde",
+ "fedimint-api-client",
+ "fedimint-client-module",
+ "fedimint-core",
+ "fedimint-dummy-common",
+ "futures",
+ "rand 0.8.7",
+ "serde",
+ "strum 0.27.2",
+ "strum_macros 0.27.2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "fedimint-dummy-common"
+version = "0.13.0-alpha"
+source = "git+https://github.com/fedimint/fedimint?rev=4794ee166afc191e0125c092893bd8f080939b53#4794ee166afc191e0125c092893bd8f080939b53"
+dependencies = [
+ "anyhow",
+ "fedimint-core",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "fedimint-dummy-server"
+version = "0.13.0-alpha"
+source = "git+https://github.com/fedimint/fedimint?rev=4794ee166afc191e0125c092893bd8f080939b53#4794ee166afc191e0125c092893bd8f080939b53"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "erased-serde",
+ "fedimint-core",
+ "fedimint-dummy-common",
+ "fedimint-server-core",
+ "futures",
+ "serde",
+ "strum 0.27.2",
+ "strum_macros 0.27.2",
 ]
 
 [[package]]
@@ -3079,6 +3143,31 @@ dependencies = [
  "fedimint-tbs",
  "serde",
  "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "fedimint-mintv2-server"
+version = "0.13.0-alpha"
+source = "git+https://github.com/fedimint/fedimint?rev=4794ee166afc191e0125c092893bd8f080939b53#4794ee166afc191e0125c092893bd8f080939b53"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitcoin",
+ "erased-serde",
+ "fedimint-core",
+ "fedimint-logging",
+ "fedimint-mintv2-common",
+ "fedimint-server-core",
+ "fedimint-tbs",
+ "fedimint-threshold-crypto",
+ "futures",
+ "itertools 0.14.0",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "serde",
+ "strum 0.27.2",
+ "strum_macros 0.27.2",
  "tracing",
 ]
 

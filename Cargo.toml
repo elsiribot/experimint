@@ -28,8 +28,13 @@ fedimint-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee1
 fedimint-client-module = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-derive-secret = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-dummy-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-dummy-server = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-eventlog = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-logging = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-mintv2-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-mintv2-common = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+fedimint-mintv2-server = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-server-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 fedimint-testing = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
 

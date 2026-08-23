@@ -14,19 +14,32 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+erased-serde = { workspace = true }
 fedimint-amm-client = { workspace = true }
 fedimint-amm-common = { workspace = true }
 fedimint-amm-server = { workspace = true }
 fedimint-client = { workspace = true }
+fedimint-client-module = { workspace = true }
 fedimint-core = { workspace = true }
+fedimint-derive-secret = { workspace = true }
+fedimint-dummy-client = { workspace = true }
+fedimint-dummy-server = { workspace = true }
 fedimint-logging = { workspace = true }
+fedimint-mintv2-client = { workspace = true }
+fedimint-mintv2-common = { workspace = true }
+fedimint-mintv2-server = { workspace = true }
 fedimint-server-core = { workspace = true }
 fedimint-testing = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tracing = { workspace = true }
 
 [lints]
