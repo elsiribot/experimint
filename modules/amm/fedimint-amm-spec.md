@@ -558,6 +558,7 @@ Units are declared client-side (P10) and `ClientModule` is unit-parameterised th
 | Split-pool via non-canonical `PoolId` | Two records for one pair | Enforced in `Decodable` (§5.1) |
 | Abandoned-balance audit cost | Ungarbage-collected balances inflate the audit scan | §9.2; bonded by `min_swap_in` |
 | Audit-induced halt | Misreported liability trips the global assert | §7.4, §9; lifecycle test in §14 |
+| Recovery-tweak overwrite | `recipient_pk`/`owner_pk` and `tweak` are unverified wire fields — the server cannot check a pubkey was derived from a tweak, since that needs the client's root secret. An attacker can credit a victim's balance or LP position (cost: one `min_swap_in`) with a garbage `tweak` | The stored `tweak` is preserved whenever the `BalanceEntry`/`LpPosition` record already exists; the incoming `tweak` is used only on record creation (§7, §8.2). Ownership is unaffected either way — the pubkey, not the tweak, authorises spending — only seed-only recovery (§8.2) would have been broken |
 
 ### 13.1 Swap privacy
 

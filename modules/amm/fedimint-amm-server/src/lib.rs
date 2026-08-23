@@ -372,24 +372,42 @@ impl ServerModule for Amm {
                 // any single swap's `MAX_RESERVE`-bounded `dy`, so this is
                 // not reachable in practice, but we still refuse to lose the
                 // difference silently.
+                //
+                // `recipient_pk` and `tweak` are both unverified wire
+                // fields — the server has no way to check that a pubkey was
+                // actually derived from a tweak (that needs the client's
+                // root secret). If the incoming `tweak` were written back
+                // unconditionally, an attacker could credit a victim's
+                // `recipient_pk` with a garbage `tweak` for the cost of one
+                // `min_swap_in`, silently breaking the victim's seed-only
+                // recovery (spec §8.2, §13) even though their funds remain
+                // safe and spendable. So: preserve the EXISTING record's
+                // tweak whenever one exists, and only take the incoming
+                // tweak when creating a new record. An honest client
+                // crediting the same pubkey twice necessarily supplies the
+                // same tweak (the pubkey is derived from it), so this is a
+                // no-op for honest use.
                 let bkey = BalanceKey {
                     owner: *recipient_pk,
                     unit: *unit_out,
                 };
                 let existing = dbtx.get_value(&bkey).await;
-                let credited = match existing {
-                    Some(entry) => entry
-                        .amount
-                        .msats
-                        .checked_add(dy)
-                        .ok_or_else(|| AmmOutputError::Curve("balance overflow".to_string()))?,
-                    None => dy,
+                let (credited, stored_tweak) = match existing {
+                    Some(entry) => (
+                        entry
+                            .amount
+                            .msats
+                            .checked_add(dy)
+                            .ok_or_else(|| AmmOutputError::Curve("balance overflow".to_string()))?,
+                        entry.tweak,
+                    ),
+                    None => (dy, *tweak),
                 };
                 dbtx.insert_entry(
                     &bkey,
                     &BalanceEntry {
                         amount: Amount::from_msats(credited),
-                        tweak: *tweak,
+                        tweak: stored_tweak,
                     },
                 )
                 .await;
@@ -458,19 +476,28 @@ impl ServerModule for Amm {
                 // overwriting, which would erase an existing depositor's
                 // claim) keeps this path panic-free and loses no one's
                 // funds regardless of input.
+                //
+                // As with the `BalanceEntry` above, `owner_pk` and `tweak`
+                // are both unverified wire fields, so the incoming `tweak`
+                // must NOT overwrite an existing record's tweak — only a
+                // freshly-created record takes the incoming value. Otherwise
+                // an attacker could grief a victim's LP position's
+                // seed-only recovery the same way (spec §8.2, §13).
                 let lp_key = LpPositionKey {
                     pool: *pool,
                     owner: *owner_pk,
                 };
-                let existing_shares = dbtx.get_value(&lp_key).await.map_or(0, |p| p.shares);
+                let existing = dbtx.get_value(&lp_key).await;
+                let existing_shares = existing.as_ref().map_or(0, |p| p.shares);
                 let shares = existing_shares
                     .checked_add(outcome.to_owner)
                     .ok_or_else(|| AmmOutputError::Curve("share overflow".to_string()))?;
+                let stored_tweak = existing.map_or(*tweak, |p| p.tweak);
                 dbtx.insert_entry(
                     &lp_key,
                     &LpPosition {
                         shares,
-                        tweak: *tweak,
+                        tweak: stored_tweak,
                     },
                 )
                 .await;

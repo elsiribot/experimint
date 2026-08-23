@@ -508,6 +508,217 @@ async fn second_swap_into_existing_balance_adds_rather_than_replaces() {
         .await
         .unwrap();
     assert_eq!(balance_after_second.amount.msats, dy1 + dy2);
-    // The most recent tweak wins on the shared balance record.
-    assert_eq!(balance_after_second.tweak, [12u8; 16]);
+    // The FIRST tweak wins on the shared balance record: an attacker who
+    // credits someone else's `recipient_pk` with a garbage `tweak` must not
+    // be able to overwrite the tweak the honest owner is relying on for
+    // seed-only recovery (spec §8.2, §13).
+    assert_eq!(balance_after_second.tweak, [11u8; 16]);
+}
+
+/// 12. A second `SwapV0` into an existing `(recipient_pk, unit)` balance,
+///     carrying a DIFFERENT `tweak`, must NOT overwrite the stored tweak.
+///     This is the attacker-controlled-tweak-overwrite defect (spec §13):
+///     the pubkey and tweak on the wire are unverified, so anyone can
+///     "credit" anyone else's balance with a garbage tweak. Preserving the
+///     first tweak protects the victim's seed-only recovery even though the
+///     attacker's transaction is otherwise a legitimate credit.
+#[tokio::test]
+async fn balance_tweak_is_preserved_across_accumulation() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo: Amount::from_msats(1_000_000_000),
+            reserve_hi: Amount::from_msats(1_000_000),
+            total_shares: 1_000_000_000,
+        },
+    )
+    .await;
+
+    let recipient = test_pubkey(13);
+    let amount_in = Amount::from_msats(10_000_000);
+    let tweak_a = [0xAAu8; 16];
+    let tweak_b = [0xBBu8; 16];
+
+    let first = AmmOutput::SwapV0 {
+        unit_in: unit(0),
+        unit_out: unit(1),
+        amount_in,
+        min_out: Amount::ZERO,
+        recipient_pk: recipient,
+        tweak: tweak_a,
+    };
+    module
+        .process_output(&mut dbtx, &first, out_point())
+        .await
+        .expect("first swap must succeed");
+    let dy1 = dbtx
+        .get_value(&BalanceKey {
+            owner: recipient,
+            unit: unit(1),
+        })
+        .await
+        .unwrap()
+        .amount
+        .msats;
+
+    let pool_after_first = dbtx.get_value(&PoolKey(pool)).await.unwrap();
+    let dy2 = math::amount_out(
+        pool_after_first.reserve_lo.msats,
+        pool_after_first.reserve_hi.msats,
+        amount_in.msats,
+        3,
+    )
+    .unwrap();
+
+    // Attacker-controlled second swap: same recipient/unit, garbage tweak.
+    let second = AmmOutput::SwapV0 {
+        unit_in: unit(0),
+        unit_out: unit(1),
+        amount_in,
+        min_out: Amount::ZERO,
+        recipient_pk: recipient,
+        tweak: tweak_b,
+    };
+    module
+        .process_output(&mut dbtx, &second, out_point())
+        .await
+        .expect("second swap must succeed");
+
+    let balance = dbtx
+        .get_value(&BalanceKey {
+            owner: recipient,
+            unit: unit(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(balance.amount.msats, dy1 + dy2, "amount must accumulate");
+    assert_eq!(
+        balance.tweak, tweak_a,
+        "the FIRST tweak must be preserved, not overwritten by the second swap"
+    );
+}
+
+/// 13. A second `DepositV0` into an existing `(pool, owner_pk)` LP position,
+///     carrying a DIFFERENT `tweak`, must NOT overwrite the stored tweak.
+///     Same defect as case 12, but for LP positions (spec §13).
+#[tokio::test]
+async fn lp_position_tweak_is_preserved_across_accumulation() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+    let owner = test_pubkey(14);
+    let tweak_a = [0xCCu8; 16];
+    let tweak_b = [0xDDu8; 16];
+
+    let first = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1_000_000),
+        amount_hi: Amount::from_msats(1_000_000),
+        min_shares: 0,
+        owner_pk: owner,
+        tweak: tweak_a,
+    };
+    module
+        .process_output(&mut dbtx, &first, out_point())
+        .await
+        .expect("first deposit must succeed");
+    let shares_after_first = dbtx
+        .get_value(&LpPositionKey { pool, owner })
+        .await
+        .unwrap()
+        .shares;
+
+    // Attacker-controlled second deposit: same pool/owner, garbage tweak.
+    let second = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(100),
+        amount_hi: Amount::from_msats(100),
+        min_shares: 0,
+        owner_pk: owner,
+        tweak: tweak_b,
+    };
+    let result = module
+        .process_output(&mut dbtx, &second, out_point())
+        .await
+        .expect("second deposit must succeed");
+    assert!(!result.amounts.is_empty());
+
+    let position = dbtx.get_value(&LpPositionKey { pool, owner }).await.unwrap();
+    assert!(
+        position.shares > shares_after_first,
+        "shares must accumulate: {shares_after_first} -> {}",
+        position.shares
+    );
+    assert_eq!(
+        position.tweak, tweak_a,
+        "the FIRST tweak must be preserved, not overwritten by the second deposit"
+    );
+}
+
+/// 14. Two `DepositV0`s to the same `(pool, owner_pk)` must not panic — the
+///     previous fix pass changed `insert_new_entry` (which panics on a
+///     duplicate key) to an accumulate, but shipped no test for it. A panic
+///     in `process_output` halts every guardian (it runs inside consensus),
+///     so this is a federation-halt regression test, not just a
+///     correctness check.
+#[tokio::test]
+async fn duplicate_owner_deposit_accumulates_without_panicking() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+    let owner = test_pubkey(15);
+
+    let first = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1_000_000),
+        amount_hi: Amount::from_msats(1_000_000),
+        min_shares: 0,
+        owner_pk: owner,
+        tweak: [0xEEu8; 16],
+    };
+    module
+        .process_output(&mut dbtx, &first, out_point())
+        .await
+        .expect("first deposit must succeed");
+    let shares_after_first = dbtx
+        .get_value(&LpPositionKey { pool, owner })
+        .await
+        .unwrap()
+        .shares;
+    let pool_after_first = dbtx.get_value(&PoolKey(pool)).await.unwrap();
+
+    let second = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(100),
+        amount_hi: Amount::from_msats(100),
+        min_shares: 0,
+        owner_pk: owner,
+        tweak: [0xFFu8; 16],
+    };
+    // Must return Ok, not panic, despite `owner_pk` colliding with an
+    // existing LP position.
+    let result = module.process_output(&mut dbtx, &second, out_point()).await;
+    assert!(
+        result.is_ok(),
+        "duplicate-owner deposit must not error, got {result:?}"
+    );
+
+    let position = dbtx.get_value(&LpPositionKey { pool, owner }).await.unwrap();
+    let expected_second_mint = math::mint_shares(
+        pool_after_first.reserve_lo.msats,
+        pool_after_first.reserve_hi.msats,
+        pool_after_first.total_shares,
+        100,
+        100,
+    )
+    .unwrap()
+    .to_owner;
+    assert_eq!(position.shares, shares_after_first + expected_second_mint);
 }
