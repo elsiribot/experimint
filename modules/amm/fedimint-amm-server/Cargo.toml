@@ -24,6 +24,7 @@ strum = { workspace = true }
 strum_macros = { workspace = true }
 
 [dev-dependencies]
+bitcoin = { workspace = true }
 tokio = { workspace = true }
 
 [lints]
