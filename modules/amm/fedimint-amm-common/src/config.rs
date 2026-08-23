@@ -3,11 +3,14 @@
 use std::collections::BTreeMap;
 
 use fedimint_core::Amount;
+use fedimint_core::core::ModuleKind;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{AmountUnit, serde_json};
+use fedimint_core::plugin_types_trait_impl_config;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::AmmCommonInit;
 use crate::pool_id::PoolId;
 
 /// Per-unit configuration.
@@ -54,6 +57,23 @@ impl std::fmt::Display for AmmClientConfig {
 /// host many pools while a mintv2 instance hosts exactly one unit (P13).
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
 pub struct AmmConfigPrivate;
+
+/// Contains all the configuration for the server: the private and consensus
+/// parts combined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmmConfig {
+    pub private: AmmConfigPrivate,
+    pub consensus: AmmConfigConsensus,
+}
+
+// Wire together the configs for this module.
+plugin_types_trait_impl_config!(
+    AmmCommonInit,
+    AmmConfig,
+    AmmConfigPrivate,
+    AmmConfigConsensus,
+    AmmClientConfig
+);
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigError {
