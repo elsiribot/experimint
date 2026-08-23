@@ -292,8 +292,15 @@ async fn partial_withdraw_debits_reserves_and_keeps_position() {
     )
     .await;
 
-    let expected = math::burn_shares(reserve_lo.msats, reserve_hi.msats, total_shares, 500)
-        .expect("burn must succeed for this fixture");
+    // Final-review finding T8: hard-coded, not derived by calling
+    // `math::burn_shares` — the very function `process_input` itself calls
+    // — so a bug shared between the two can't cancel out. By hand: da =
+    // floor(reserve_lo * shares / total_shares) = floor(1_001_000 * 500 /
+    // 1_000_000) = floor(500.5) = 500; db is symmetric (reserve_hi ==
+    // reserve_lo here) = 500; new_total_shares = 1_000_000 - 500 = 999_500.
+    let expected_da = 500u64;
+    let expected_db = 500u64;
+    let expected_new_total_shares = 999_500u64;
 
     let input = AmmInput::WithdrawV0 {
         pool,
@@ -313,23 +320,23 @@ async fn partial_withdraw_debits_reserves_and_keeps_position() {
     assert_eq!(result.pub_key, owner);
     assert_eq!(
         result.amount.amounts.get(&pool.lo()),
-        Some(&Amount::from_msats(expected.da))
+        Some(&Amount::from_msats(expected_da))
     );
     assert_eq!(
         result.amount.amounts.get(&pool.hi()),
-        Some(&Amount::from_msats(expected.db))
+        Some(&Amount::from_msats(expected_db))
     );
 
     let stored_pool = dbtx.get_value(&PoolKey(pool)).await.unwrap();
     assert_eq!(
         stored_pool.reserve_lo,
-        Amount::from_msats(reserve_lo.msats - expected.da)
+        Amount::from_msats(reserve_lo.msats - expected_da)
     );
     assert_eq!(
         stored_pool.reserve_hi,
-        Amount::from_msats(reserve_hi.msats - expected.db)
+        Amount::from_msats(reserve_hi.msats - expected_db)
     );
-    assert_eq!(stored_pool.total_shares, expected.new_total_shares);
+    assert_eq!(stored_pool.total_shares, expected_new_total_shares);
 
     let position = dbtx
         .get_value(&LpPositionKey { pool, owner })

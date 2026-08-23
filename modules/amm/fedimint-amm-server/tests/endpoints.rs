@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use fedimint_amm_common::config::{AmmConfigConsensus, UnitParams};
 use fedimint_amm_common::endpoints::{
     BALANCE_ENDPOINT, BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryResponse, BalanceRequest,
-    LP_RECOVERY_ENDPOINT, LpRecoveryResponse, MAX_RECOVERY_PAGE_SIZE, QUOTE_ENDPOINT, QuoteRequest,
-    QuoteResponse, RecoveryPageRequest,
+    LP_RECOVERY_ENDPOINT, LpRecoveryResponse, MAX_RECOVERY_PAGE_SIZE, POOLS_ENDPOINT, PoolSummary,
+    QUOTE_ENDPOINT, QuoteRequest, QuoteResponse, RecoveryPageRequest,
 };
 use fedimint_amm_common::math;
 use fedimint_amm_common::pool_id::PoolId;
@@ -305,6 +305,55 @@ async fn balance_endpoint_looks_up_a_single_stored_balance() {
     .await
     .expect("lookup itself must succeed");
     assert_eq!(not_found, None);
+}
+
+/// Final-review finding T1: `POOLS_ENDPOINT` must report the pool's fee
+/// OVERRIDE, not `default_fee_per_mille` — the other half of "fee_overrides
+/// must reach settlement", since a client previewing a swap via this
+/// endpoint would otherwise be quoted the wrong fee for an overridden pool.
+#[tokio::test]
+async fn pools_endpoint_reports_the_fee_override_not_the_default() {
+    let db = db();
+    let pool = pool01();
+    let module = Amm::new(AmmConfigConsensus {
+        units: BTreeMap::from([
+            (
+                unit(0),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1_000),
+                },
+            ),
+            (
+                unit(1),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1_000),
+                },
+            ),
+        ]),
+        default_fee_per_mille: 3,
+        fee_overrides: BTreeMap::from([(pool, 100)]),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo: Amount::from_msats(1_000_000),
+            reserve_hi: Amount::from_msats(1_000_000),
+            total_shares: 1_000_000,
+        },
+    )
+    .await;
+    dbtx.commit_tx().await;
+
+    let pools: Vec<PoolSummary> = call(&module, &db, POOLS_ENDPOINT, ())
+        .await
+        .expect("POOLS_ENDPOINT must succeed");
+    assert_eq!(pools.len(), 1);
+    assert_eq!(
+        pools[0].fee_per_mille, 100,
+        "must report the pool's fee override (100), not default_fee_per_mille (3)"
+    );
 }
 
 /// Fix pass 2, Minor 7: `quote_swap` also enforces `MAX_RESERVE` on

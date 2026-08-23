@@ -1015,3 +1015,230 @@ async fn default_output_variant_is_rejected_as_unknown() {
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::UnknownVariant));
 }
+
+/// 16. Final-review finding T1: `cfg.fee_overrides` must actually reach
+///     settlement, not just `AmmConfigConsensus::fee_for` in isolation
+///     (already covered at the config level). Every other test in this file
+///     uses an empty `fee_overrides`, so this pins a config with a
+///     per-pool override that is FAR from `default_fee_per_mille` (100
+///     vs. 3) and asserts the swap settles at the OVERRIDE fee: `expected_dy`
+///     is computed by calling `math::amount_out` directly with the literal
+///     override fee (100) baked in here, never by reading `cfg.fee_for` or
+///     any other value the module under test could also get wrong the same
+///     way — so a settlement path that silently fell back to
+///     `default_fee_per_mille` (mutating `cfg.fee_for(pool_id)` to
+///     `cfg.default_fee_per_mille`) would settle at fee 3 instead, landing
+///     on a different `dy` and failing this assertion.
+#[tokio::test]
+async fn swap_settles_at_the_pool_fee_override_not_the_default() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let pool = pool01();
+
+    let module = Amm::new(AmmConfigConsensus {
+        units: BTreeMap::from([
+            (
+                unit(0),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1_000),
+                },
+            ),
+            (
+                unit(1),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1_000),
+                },
+            ),
+        ]),
+        default_fee_per_mille: 3,
+        fee_overrides: BTreeMap::from([(pool, 100)]),
+    });
+
+    // Same reserves as the reference-vector tests, so the ONLY thing that
+    // could make `expected_dy` differ from the well-known fee-3 answer
+    // (9_871) is the fee actually applied.
+    let reserve_lo = Amount::from_msats(1_000_000_000);
+    let reserve_hi = Amount::from_msats(1_000_000);
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo,
+            reserve_hi,
+            total_shares: 1_000_000_000,
+        },
+    )
+    .await;
+
+    let amount_in = Amount::from_msats(10_000_000);
+    let expected_dy = math::amount_out(reserve_lo.msats, reserve_hi.msats, amount_in.msats, 100)
+        .expect("override-fee amount_out must compute cleanly");
+    // Sanity: this really is a different number from the fee-3 reference
+    // vector (9_871), so a settlement that used the wrong fee would be
+    // caught, not accidentally agree by coincidence.
+    assert_ne!(expected_dy, 9_871);
+
+    let output = AmmOutput::SwapV0 {
+        unit_in: unit(0),
+        unit_out: unit(1),
+        amount_in,
+        min_out: Amount::ZERO,
+        recipient_pk: test_pubkey(20),
+        tweak: [20u8; 16],
+    };
+
+    let result = module
+        .process_output(&mut dbtx, &output, out_point())
+        .await
+        .expect("swap at the override fee must succeed");
+    assert_eq!(result.amounts.get(&unit(0)), Some(&amount_in));
+
+    let balance = dbtx
+        .get_value(&BalanceKey {
+            owner: test_pubkey(20),
+            unit: unit(1),
+        })
+        .await
+        .expect("balance must be credited");
+    assert_eq!(
+        balance.amount.msats, expected_dy,
+        "settlement must use the pool's fee OVERRIDE (100), not default_fee_per_mille (3)"
+    );
+}
+
+/// 17. Final-review finding T2: `fee_per_mille == 0` is a legal config
+///     (`validate()` only rejects `fee >= 1000`), and at fee 0 an
+///     exactly-dividing swap hits `k_new == k_old` EXACTLY. This is the
+///     case that distinguishes the correct `k_non_decreasing`'s `new >= old`
+///     from a wrongly-tightened `new > old`: under the mutant, this
+///     legitimate swap would be wrongly rejected with `KInvariantViolated`.
+///     No other server-side test in this suite uses any fee but 3, so this
+///     is also the only test that exercises `fee_per_mille == 0` at all.
+///
+///     reserve_in 1_000, reserve_out 1_000, amount_in 1_000, fee 0:
+///     in_with_fee = 1_000 * 1_000 = 1_000_000; numerator = 1_000_000 *
+///     1_000 = 1_000_000_000; denominator = 1_000*1_000 + 1_000_000 =
+///     2_000_000; out = 500. k_old = 1_000*1_000 = 1_000_000; k_new =
+///     (1_000+1_000)*(1_000-500) = 2_000*500 = 1_000_000 — unchanged.
+#[tokio::test]
+async fn swap_with_fee_zero_and_exact_division_is_accepted() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let pool = pool01();
+
+    let module = Amm::new(AmmConfigConsensus {
+        units: BTreeMap::from([
+            (
+                unit(0),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1),
+                },
+            ),
+            (
+                unit(1),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1),
+                },
+            ),
+        ]),
+        default_fee_per_mille: 0,
+        fee_overrides: BTreeMap::new(),
+    });
+
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo: Amount::from_msats(1_000),
+            reserve_hi: Amount::from_msats(1_000),
+            total_shares: 1_000,
+        },
+    )
+    .await;
+
+    let output = AmmOutput::SwapV0 {
+        unit_in: unit(0),
+        unit_out: unit(1),
+        amount_in: Amount::from_msats(1_000),
+        min_out: Amount::ZERO,
+        recipient_pk: test_pubkey(21),
+        tweak: [21u8; 16],
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(
+        result.map(|r| r.amounts.get(&unit(0)).copied()),
+        Ok(Some(Amount::from_msats(1_000))),
+        "a fee-0 exactly-dividing swap (k_new == k_old exactly) must be ACCEPTED, not rejected \
+         with KInvariantViolated"
+    );
+
+    let balance = dbtx
+        .get_value(&BalanceKey {
+            owner: test_pubkey(21),
+            unit: unit(1),
+        })
+        .await
+        .expect("balance must be credited");
+    assert_eq!(balance.amount, Amount::from_msats(500));
+}
+
+/// 18. Final-review finding T3: a later deposit too small to mint even one
+///     share must be REJECTED (`OutputRoundsToZero`), not silently accepted
+///     with `to_owner = 0` — which would still grow the reserves by the
+///     full deposit and write a 0-share `LpPosition`, donating the
+///     depositor's funds to existing LPs with no error. Seeds a live pool
+///     directly (as e.g. `swap_moves_reserves_and_credits_balance_by_the_same_dy`
+///     does) with `total_shares` (1) far below `reserve_lo`
+///     (1_000_000), so `via_lo = floor(amount_lo * total_shares /
+///     reserve_lo) = floor(1 * 1 / 1_000_000) = 0` — with a huge
+///     `amount_hi` alongside it (so `via_hi` is never the binding minimum),
+///     isolating the `via_lo` floor as the sole cause of `minted == 0`.
+///     Same fixture as `fedimint-amm-common`'s
+///     `later_mint_rejects_a_deposit_too_small_to_mint_any_shares`, driven
+///     here through the real `process_output` path instead of `math::mint_shares`
+///     directly.
+#[tokio::test]
+async fn later_deposit_too_small_to_mint_any_shares_is_rejected_and_writes_nothing() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+    let owner = test_pubkey(22);
+
+    let seeded_pool = Pool {
+        reserve_lo: Amount::from_msats(1_000_000),
+        reserve_hi: Amount::from_msats(1_000_000),
+        total_shares: 1,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+
+    let output = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1),
+        amount_hi: Amount::from_msats(1_000_000_000),
+        min_shares: 0,
+        owner_pk: owner,
+        tweak: [22u8; 16],
+    };
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(
+        result,
+        Err(AmmOutputError::Curve(
+            math::CurveError::OutputRoundsToZero.to_string()
+        )),
+        "a deposit that mints zero shares must be rejected, never silently accepted"
+    );
+
+    // Nothing changed: no reserves grown, no LP position for the rejected
+    // depositor — the donation this guard exists to prevent.
+    let pool_after = dbtx.get_value(&PoolKey(pool)).await.unwrap();
+    assert_eq!(
+        seeded_pool, pool_after,
+        "a rejected deposit must not grow the reserves"
+    );
+    assert!(
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .is_none(),
+        "a rejected deposit must not create a 0-share LpPosition"
+    );
+}

@@ -74,6 +74,17 @@ pub fn amount_out(
     if out == 0 {
         return Err(CurveError::OutputRoundsToZero);
     }
+    // Final-review finding T7: this branch is provably UNREACHABLE, kept
+    // as defence in depth rather than deleted. `denominator = reserve_in *
+    // 1000 + in_with_fee`, and `reserve_in >= 1` is already guaranteed by
+    // the `ZeroReserve` guard above, so `denominator > in_with_fee`
+    // strictly. Therefore `out = numerator / denominator = (in_with_fee *
+    // reserve_out) / denominator < (in_with_fee * reserve_out) /
+    // in_with_fee = reserve_out` always — `out >= reserve_out` would
+    // require `denominator <= in_with_fee`, i.e. `reserve_in * 1000 <= 0`,
+    // impossible for `reserve_in >= 1`. `amount_out_never_drains_the_pool`
+    // below pins the guaranteed conclusion (`out < reserve_out`), not
+    // coverage of this branch — it cannot be exercised by any input.
     if out >= u128::from(reserve_out) {
         return Err(CurveError::InsufficientLiquidity);
     }
@@ -259,6 +270,15 @@ mod tests {
             amount_out(1_000, 1_000, MAX_RESERVE + 1, 3),
             Err(CurveError::ReserveCapExceeded)
         );
+        // Final-review finding T4: `reserve_out > MAX_RESERVE` is the one
+        // of the three `MAX_RESERVE` operands with no test above it
+        // (`reserve_in` and `amount_in` are both covered right above) —
+        // and `reserve_out` is exactly the factor spec §7.1's `997 *
+        // amount_in * reserve_out < 2^126` proof depends on.
+        assert_eq!(
+            amount_out(1_000, MAX_RESERVE + 1, 10, 3),
+            Err(CurveError::ReserveCapExceeded)
+        );
     }
 
     #[test]
@@ -270,9 +290,15 @@ mod tests {
         );
     }
 
+    /// Even an enormous input leaves at least one unit behind. NOT a test
+    /// of the `InsufficientLiquidity` branch (`out >= reserve_out`) in
+    /// `amount_out` — that branch is unreachable by construction (see its
+    /// doc comment, finding T7) and this assertion holds regardless of
+    /// whether that guard exists at all; it pins the mathematical
+    /// guarantee itself (`out < reserve_out` always), not coverage of any
+    /// particular line that enforces it.
     #[test]
     fn amount_out_never_drains_the_pool() {
-        // Even an enormous input leaves at least one unit behind.
         let out = amount_out(1_000, MAX_RESERVE, MAX_RESERVE, 3).unwrap();
         assert!(out < MAX_RESERVE);
     }
@@ -301,6 +327,24 @@ mod tests {
         let outcome = mint_shares(1_000, 1_000, 1_000, 100, 500).unwrap();
         assert_eq!(outcome.to_owner, 100);
         assert_eq!(outcome.new_total_shares, 1_100);
+    }
+
+    /// Final-review finding T3: the later-mint (`total_shares != 0`) branch's
+    /// `minted == 0` guard has no test — the existing proptest
+    /// (`deposit_withdraw_never_profits`) generates `da, db >= 1_000`
+    /// against reserves `>= 10^6`, never small enough to floor. Without
+    /// this guard, a too-small deposit is silently ACCEPTED with
+    /// `to_owner = 0`: reserves still grow by the full `da`/`db`, and a
+    /// 0-share `LpPosition` is written — the depositor's funds donated to
+    /// existing LPs with no error. `via_lo = floor(da * total_shares /
+    /// reserve_lo) = floor(1 * 1 / 1_000_000) = 0` here, so `minted =
+    /// min(via_lo, via_hi) = 0` regardless of `via_hi`.
+    #[test]
+    fn later_mint_rejects_a_deposit_too_small_to_mint_any_shares() {
+        assert_eq!(
+            mint_shares(1_000_000, 1_000_000, 1, 1, 1_000_000),
+            Err(CurveError::OutputRoundsToZero)
+        );
     }
 
     #[test]
@@ -428,18 +472,59 @@ mod tests {
         );
     }
 
+    /// Final-review finding T2: `k_non_decreasing` itself is asserted by
+    /// zero tests — the property test below only calls `amount_out` and
+    /// checks the k identity directly, never `k_non_decreasing`, so it
+    /// can't catch a bug localized to that function (e.g. `new >= old`
+    /// weakened to `new > old`; a legitimate fee-0 exactly-dividing swap
+    /// has `k_new == k_old` exactly — see `swap_with_fee_zero_and_exact_division_is_accepted`
+    /// in `tests/output.rs`, which DOES exercise `k_non_decreasing` through
+    /// real settlement and is what actually catches that mutation). This
+    /// test instead hand-constructs a real decrease and checks
+    /// `k_non_decreasing` reports it: not reachable through any real
+    /// `amount_out` call (see `k_never_decreases` below, and
+    /// `AmmOutputError::KInvariantViolated`'s doc comment in
+    /// `fedimint-amm-common/src/types.rs` for why), but this proves the
+    /// backstop function itself is correct in isolation, independent of
+    /// whether real settlement can ever reach it.
+    #[test]
+    fn k_non_decreasing_rejects_a_manufactured_decrease() {
+        // k: 1_000 * 1_000 = 1_000_000 -> 500 * 500 = 250_000. No real swap
+        // produces this pair (amount_out always yields r_in_new * r_out_new
+        // >= r_in_old * r_out_old — see k_never_decreases); constructed by
+        // hand purely to give k_non_decreasing something to reject.
+        assert!(!k_non_decreasing(1_000, 1_000, 500, 500));
+        // And the boundary it must NOT reject: equal k.
+        assert!(k_non_decreasing(1_000, 1_000, 2_000, 500));
+    }
+
     proptest::proptest! {
-        /// Spec §14: k is non-decreasing under any swap.
+        /// Spec §14: k is non-decreasing under any swap. `k_old`/`k_new`
+        /// are computed independently here (direct `u128` multiplication),
+        /// never by calling `k_non_decreasing` — the function under
+        /// backstop, not the oracle for its own test (finding T2: the
+        /// prior version of this test asserted `k_non_decreasing(...)`
+        /// directly, making the function its own oracle, so no mutation of
+        /// `k_non_decreasing` itself could ever fail it). Widened from
+        /// `2^40` to the full `MAX_RESERVE` domain, and `fee_per_mille` now
+        /// ranges over every legal value including 0 — `validate()` only
+        /// rejects `fee >= 1000`, so `fee_per_mille == 0` is a legal
+        /// config, and it is the regime where `k_new == k_old` can hold
+        /// EXACTLY on an exactly-dividing swap (the prior version pinned
+        /// `fee` at 3, where that boundary is never hit).
         #[test]
         fn k_never_decreases(
-            r_in in 1u64..=(1 << 40),
-            r_out in 1u64..=(1 << 40),
-            amt in 1u64..=(1 << 40),
+            r_in in 1u64..=MAX_RESERVE,
+            r_out in 1u64..=MAX_RESERVE,
+            amt in 1u64..=MAX_RESERVE,
+            fee in 0u16..1000,
         ) {
-            if let Ok(out) = amount_out(r_in, r_out, amt, 3) {
+            if let Ok(out) = amount_out(r_in, r_out, amt, fee) {
                 let r_in_new = r_in + amt;
                 let r_out_new = r_out - out;
-                proptest::prop_assert!(k_non_decreasing(r_in, r_out, r_in_new, r_out_new));
+                let k_old = u128::from(r_in) * u128::from(r_out);
+                let k_new = u128::from(r_in_new) * u128::from(r_out_new);
+                proptest::prop_assert!(k_new >= k_old);
             }
         }
 
@@ -459,6 +544,10 @@ mod tests {
         }
 
         /// Spec §14: deposit then immediate withdraw never returns more.
+        /// Only exercises the LATER-mint branch (`total_shares != 0`) —
+        /// `shares` never generates 0; see
+        /// `deposit_withdraw_never_profits_on_pool_creation` below for the
+        /// creation branch (finding T5).
         #[test]
         fn deposit_withdraw_never_profits(
             r_lo in 1_000_000u64..=(1 << 40),
@@ -476,6 +565,32 @@ mod tests {
             }
         }
 
+        /// Final-review finding T5: `deposit_withdraw_never_profits` above
+        /// never generates `total_shares == 0`, so the pool-creation branch
+        /// — `isqrt` plus the `MINIMUM_LIQUIDITY` burn, i.e. the
+        /// first-depositor-inflation defence — was never property-tested
+        /// against this "never profits" invariant. Mirrors the test above
+        /// exactly, but starting from an empty pool (`total_shares == 0`,
+        /// reserves `0`): the freshly created pool's reserves become
+        /// exactly `(da, db)` (spec §7.2), and the immediate withdraw of
+        /// everything actually credited (`m.to_owner` — deliberately NOT
+        /// `m.new_total_shares`, since `MINIMUM_LIQUIDITY` is unassigned
+        /// and unwithdrawable forever) must still return no more than was
+        /// put in.
+        #[test]
+        fn deposit_withdraw_never_profits_on_pool_creation(
+            da in 1u64..=(1 << 30),
+            db in 1u64..=(1 << 30),
+        ) {
+            if let Ok(m) = mint_shares(0, 0, 0, da, db) {
+                let b = burn_shares(da, db, m.new_total_shares, m.to_owner);
+                if let Ok(b) = b {
+                    proptest::prop_assert!(b.da <= da);
+                    proptest::prop_assert!(b.db <= db);
+                }
+            }
+        }
+
         /// Nothing inside the caps may overflow u128 (would panic in debug).
         #[test]
         fn no_overflow_within_caps(
@@ -485,6 +600,27 @@ mod tests {
             fee in 0u16..1000,
         ) {
             let _ = amount_out(r_in, r_out, amt, fee);
+        }
+
+        /// Final-review finding T6: `isqrt` (`u128::isqrt`, used by
+        /// `mint_shares`'s pool-creation branch) had no test of its own —
+        /// spec §14 requires "isqrt agrees with a reference across a u128
+        /// sample". The reference here is the algebraic definition of an
+        /// integer square root: `r = isqrt(n)` iff `r * r <= n < (r+1) *
+        /// (r+1)`. Sampled as `da * db` (rather than an unconstrained
+        /// `u128`) so every value stays in the exact domain `mint_shares`
+        /// actually calls `isqrt` on, and `(r+1)^2` cannot overflow `u128`:
+        /// `da, db <= MAX_RESERVE == 2^58`, so `n <= 2^116` and `r <=
+        /// 2^58`, comfortably inside `u128`.
+        #[test]
+        fn isqrt_agrees_with_the_algebraic_definition(
+            da in 0u64..=MAX_RESERVE,
+            db in 0u64..=MAX_RESERVE,
+        ) {
+            let n = u128::from(da) * u128::from(db);
+            let r = n.isqrt();
+            proptest::prop_assert!(r * r <= n);
+            proptest::prop_assert!(n < (r + 1) * (r + 1));
         }
     }
 }

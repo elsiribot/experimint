@@ -200,6 +200,29 @@ pub enum AmmOutputError {
     SlippageExceeded,
     #[error("would exceed MAX_RESERVE")]
     ReserveCapExceeded,
+    /// `process_output`'s `SwapV0` arm returns this when
+    /// `math::k_non_decreasing` reports a decrease (spec §7.1's backstop).
+    ///
+    /// Verified (final review, finding T2) not to be reachable through any
+    /// legitimate swap given a correct `math::amount_out`: for any
+    /// `reserve_in, reserve_out, amount_in >= 1` and `fee_per_mille` in
+    /// `[0, 999]`, `(reserve_in + amount_in) * (reserve_out -
+    /// amount_out(..)) >= reserve_in * reserve_out` always — algebraically
+    /// (the continuous, non-floored formula gives `k_new_exact / k_old =
+    /// (reserve_in*1000 + amount_in*1000) / (reserve_in*1000 +
+    /// amount_in*(1000-fee)) >= 1`, and `amount_out` only floors `out`
+    /// downward, which can only raise `reserve_out_new` and thus `k_new`
+    /// further) and confirmed by exhaustive brute force over `reserve_in,
+    /// reserve_out, amount_in` in `1..=60` and every `fee_per_mille` in
+    /// `0..1000` (186_271_143 combinations, zero violations). This makes
+    /// `KInvariantViolated` defense-in-depth against a hypothetical future
+    /// bug in `amount_out`, not a path any test can drive through real
+    /// settlement — mirroring `CurveError::InsufficientLiquidity` in
+    /// `math.rs`, which is unreachable for the same reason (both guards
+    /// exist to fail closed rather than trust the arithmetic above them).
+    /// `math::k_non_decreasing` itself IS tested directly (with a
+    /// hand-constructed, not-otherwise-reachable decrease) in
+    /// `math.rs`'s `k_non_decreasing_rejects_a_manufactured_decrease`.
     #[error("k invariant violated")]
     KInvariantViolated,
     #[error("arithmetic error: {0}")]
