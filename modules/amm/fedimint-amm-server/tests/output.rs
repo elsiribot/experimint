@@ -10,7 +10,7 @@ use fedimint_amm_common::math::{self, MINIMUM_LIQUIDITY};
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_amm_common::types::{AmmOutput, AmmOutputError};
 use fedimint_amm_server::Amm;
-use fedimint_amm_server::db::{BalanceKey, LpPositionKey, Pool, PoolKey};
+use fedimint_amm_server::db::{BalanceEntry, BalanceKey, LpPositionKey, Pool, PoolKey};
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::AmountUnit;
@@ -456,11 +456,29 @@ async fn swap_with_identical_units_is_rejected() {
 }
 
 /// 8. `SwapV0` with a unit outside `units` returns `UnknownUnit`.
+///
+/// A `Pool` is seeded for `(unit(0), unit(99))` even though `unit(99)` is
+/// outside the config's allowlist — nothing stops a `Pool` DB record from
+/// existing for a unit pair the current config no longer lists, and seeding
+/// one here isolates the unit-allowlist check from `NoSuchPool`: since the
+/// I1/M9 shared-helper refactor, `quote_swap`'s admission checks (including
+/// this one) run AFTER the pool lookup, so an unseeded pool would report
+/// `NoSuchPool` first and never reach the check this test targets.
 #[tokio::test]
 async fn swap_with_unit_outside_allowlist_is_rejected() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
+    let pool = PoolId::new(unit(0), unit(99)).unwrap();
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo: Amount::from_msats(1_000_000),
+            reserve_hi: Amount::from_msats(1_000_000),
+            total_shares: 1_000_000,
+        },
+    )
+    .await;
 
     let output = AmmOutput::SwapV0 {
         unit_in: unit(0),
@@ -477,12 +495,25 @@ async fn swap_with_unit_outside_allowlist_is_rejected() {
 
 /// 8b. `SwapV0` with `unit_in` outside `units` returns `UnknownUnit`. Case 8
 ///     only covers an unknown `unit_out`; this exercises the separate
-///     `self.cfg.units.get(unit_in)` guard, which was otherwise untested.
+///     `cfg.units.get(unit_in)` guard, which was otherwise untested.
+///
+/// A `Pool` is seeded so `NoSuchPool` cannot pre-empt the check under test —
+/// see case 8's doc comment.
 #[tokio::test]
 async fn swap_with_unknown_unit_in_is_rejected() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
+    let pool = PoolId::new(unit(99), unit(0)).unwrap();
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo: Amount::from_msats(1_000_000),
+            reserve_hi: Amount::from_msats(1_000_000),
+            total_shares: 1_000_000,
+        },
+    )
+    .await;
 
     let output = AmmOutput::SwapV0 {
         unit_in: unit(99),
@@ -498,11 +529,24 @@ async fn swap_with_unknown_unit_in_is_rejected() {
 }
 
 /// 9. `SwapV0` with `amount_in` below `min_swap_in` returns `BelowMinSwapIn`.
+///
+/// A `Pool` is seeded so `NoSuchPool` cannot pre-empt the check under test —
+/// see case 8's doc comment.
 #[tokio::test]
 async fn swap_below_min_swap_in_is_rejected() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
+    let pool = pool01();
+    dbtx.insert_new_entry(
+        &PoolKey(pool),
+        &Pool {
+            reserve_lo: Amount::from_msats(1_000_000_000),
+            reserve_hi: Amount::from_msats(1_000_000),
+            total_shares: 1_000_000_000,
+        },
+    )
+    .await;
 
     let output = AmmOutput::SwapV0 {
         unit_in: unit(0),
@@ -600,6 +644,62 @@ async fn deposit_that_would_exceed_max_reserve_is_rejected() {
         .await
         .is_none()
     );
+}
+
+/// 10c. Finding I4: a `SwapV0` whose credit would push an existing
+///      `BalanceEntry.amount` above `MAX_RESERVE` is rejected with
+///      `ReserveCapExceeded`, and writes nothing — neither the pool nor the
+///      balance changes. Before the fix, this accumulation was only checked
+///      against `u64::MAX`, which made `audit`'s
+///      `.expect("bounded by MAX_RESERVE")` on `BalanceEntry.amount`
+///      unjustified: nothing in the code actually enforced that bound.
+#[tokio::test]
+async fn swap_that_would_push_balance_above_max_reserve_is_rejected() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    let reserve_lo = Amount::from_msats(1_000_000_000);
+    let reserve_hi = Amount::from_msats(1_000_000);
+    let seeded_pool = Pool {
+        reserve_lo,
+        reserve_hi,
+        total_shares: 1_000_000_000,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+
+    // Reference vector: this exact swap yields dy = 9_871 (see
+    // `swap_moves_reserves_and_credits_balance_by_the_same_dy`). Seed an
+    // existing balance just under MAX_RESERVE, close enough that adding
+    // 9_871 pushes it over.
+    let recipient = test_pubkey(18);
+    let seeded_balance = BalanceEntry {
+        amount: Amount::from_msats(math::MAX_RESERVE - 100),
+        tweak: [0x22u8; 16],
+    };
+    let bkey = BalanceKey {
+        owner: recipient,
+        unit: unit(1),
+    };
+    dbtx.insert_new_entry(&bkey, &seeded_balance).await;
+
+    let amount_in = Amount::from_msats(10_000_000);
+    let output = AmmOutput::SwapV0 {
+        unit_in: unit(0),
+        unit_out: unit(1),
+        amount_in,
+        min_out: Amount::ZERO,
+        recipient_pk: recipient,
+        tweak: [0x23u8; 16],
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::ReserveCapExceeded));
+
+    // Writes nothing: neither the pool nor the balance changed.
+    assert_eq!(dbtx.get_value(&PoolKey(pool)).await.unwrap(), seeded_pool);
+    assert_eq!(dbtx.get_value(&bkey).await.unwrap(), seeded_balance);
 }
 
 /// 11. A second `SwapV0` into an existing `(recipient_pk, unit)` ADDS to the

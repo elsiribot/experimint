@@ -14,8 +14,9 @@ use fedimint_amm_common::config::{
     AmmClientConfig, AmmConfig, AmmConfigConsensus, AmmConfigPrivate, UnitParams,
 };
 use fedimint_amm_common::endpoints::{
-    BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, LP_RECOVERY_ENDPOINT, LpRecoveryEntry,
-    POOLS_ENDPOINT, PoolSummary, QUOTE_ENDPOINT, QuoteRequest, QuoteResponse,
+    BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, BalanceRecoveryResponse, LP_RECOVERY_ENDPOINT,
+    LpRecoveryEntry, LpRecoveryResponse, MAX_RECOVERY_PAGE_SIZE, POOLS_ENDPOINT, PoolSummary,
+    QUOTE_ENDPOINT, QuoteRequest, QuoteResponse, RecoveryPageRequest,
 };
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_amm_common::types::{
@@ -249,6 +250,85 @@ fn map_curve_error_input(e: math::CurveError) -> AmmInputError {
     }
 }
 
+/// Output of [`quote_swap`]: the swap's computed output plus the orientation
+/// resolved to compute it. `process_output`'s `SwapV0` arm needs `in_is_lo`
+/// too (to write the reserves back on the correct side), so it is returned
+/// here rather than re-derived independently at the call site — finding I1
+/// was exactly that kind of hand-copy drifting out of sync.
+struct SwapQuote {
+    /// `amount_out` for this swap. Spec §7.4: this ONE binding must be used
+    /// for both the reserve debit and the balance credit — never recompute
+    /// it.
+    dy: u64,
+    /// Whether `unit_in` is `pool_id.lo()` (vs `.hi()`).
+    in_is_lo: bool,
+}
+
+/// Resolves orientation, applies every swap admission check, and computes
+/// the output via [`math::amount_out`] — the single function shared by
+/// `process_output`'s `SwapV0` arm and `QUOTE_ENDPOINT` (finding I1), so a
+/// quote can never disagree with settlement, and a client trusting a quote
+/// cannot build a transaction that settlement then rejects for a reason the
+/// quote never checked (finding M9: `min_swap_in`, the unit allowlist, and
+/// the `MAX_RESERVE` cap on `reserve_in + amount_in` are all enforced here,
+/// not just in `process_output`).
+///
+/// `unit_out` is not a separate parameter: `pool_id` must already have been
+/// constructed as `PoolId::new(unit_in, unit_out)` by the caller (both call
+/// sites do this), so `unit_out` is simply the side of `pool_id` that is not
+/// `unit_in`.
+fn quote_swap(
+    cfg: &AmmConfigConsensus,
+    pool: &Pool,
+    pool_id: PoolId,
+    unit_in: AmountUnit,
+    amount_in: Amount,
+) -> Result<SwapQuote, AmmOutputError> {
+    let params_in = cfg.units.get(&unit_in).ok_or(AmmOutputError::UnknownUnit)?;
+    let in_is_lo = unit_in == pool_id.lo();
+    let unit_out = if in_is_lo { pool_id.hi() } else { pool_id.lo() };
+    if !cfg.units.contains_key(&unit_out) {
+        return Err(AmmOutputError::UnknownUnit);
+    }
+    if amount_in < params_in.min_swap_in {
+        return Err(AmmOutputError::BelowMinSwapIn);
+    }
+
+    let (reserve_in, reserve_out) = if in_is_lo {
+        (pool.reserve_lo, pool.reserve_hi)
+    } else {
+        (pool.reserve_hi, pool.reserve_lo)
+    };
+
+    let fee = cfg.fee_for(pool_id);
+    // Computed ONCE (spec §7.4): this is the same `dy` the caller uses for
+    // both the reserve debit and the balance credit (settlement) or returns
+    // directly (quote) — never recomputed.
+    let dy = math::amount_out(reserve_in.msats, reserve_out.msats, amount_in.msats, fee)
+        .map_err(map_curve_error)?;
+
+    let reserve_in_new = reserve_in
+        .msats
+        .checked_add(amount_in.msats)
+        .ok_or(AmmOutputError::ReserveCapExceeded)?;
+    if reserve_in_new > math::MAX_RESERVE {
+        return Err(AmmOutputError::ReserveCapExceeded);
+    }
+
+    Ok(SwapQuote { dy, in_is_lo })
+}
+
+/// Clamps a client-requested recovery page size to `[1,
+/// MAX_RECOVERY_PAGE_SIZE]` (finding I2). `None` requests the maximum. The
+/// client-supplied value is never trusted directly — that would just move
+/// the unpaginated-dump amplification from "no limit field" to "limit field
+/// the server doesn't enforce".
+fn recovery_page_limit(requested: Option<u32>) -> usize {
+    requested
+        .unwrap_or(MAX_RECOVERY_PAGE_SIZE)
+        .clamp(1, MAX_RECOVERY_PAGE_SIZE) as usize
+}
+
 /// AMM module.
 #[derive(Debug)]
 pub struct Amm {
@@ -421,17 +501,6 @@ impl ServerModule for Amm {
                 if unit_in == unit_out {
                     return Err(AmmOutputError::IdenticalUnits);
                 }
-                let params_in = self
-                    .cfg
-                    .units
-                    .get(unit_in)
-                    .ok_or(AmmOutputError::UnknownUnit)?;
-                if !self.cfg.units.contains_key(unit_out) {
-                    return Err(AmmOutputError::UnknownUnit);
-                }
-                if *amount_in < params_in.min_swap_in {
-                    return Err(AmmOutputError::BelowMinSwapIn);
-                }
                 let pool_id =
                     PoolId::new(*unit_in, *unit_out).ok_or(AmmOutputError::IdenticalUnits)?;
                 let mut pool = dbtx
@@ -439,36 +508,37 @@ impl ServerModule for Amm {
                     .await
                     .ok_or(AmmOutputError::NoSuchPool)?;
 
-                // Orient reserves so `in` and `out` match the trader's
-                // direction. `PoolId` sorts its pair, so `unit_in` may be
-                // either `lo` or `hi` — determined once and used
-                // consistently for both the read and the write-back below.
-                let in_is_lo = *unit_in == pool_id.lo();
-                let (reserve_in, reserve_out) = if in_is_lo {
-                    (pool.reserve_lo, pool.reserve_hi)
-                } else {
-                    (pool.reserve_hi, pool.reserve_lo)
-                };
-
-                let fee = self.cfg.fee_for(pool_id);
-                // Computed ONCE. This one binding is used for the reserve
-                // debit AND the balance credit below — spec §7.4. Never
-                // recompute it.
-                let dy =
-                    math::amount_out(reserve_in.msats, reserve_out.msats, amount_in.msats, fee)
-                        .map_err(map_curve_error)?;
+                // Resolves orientation, the admission checks (unit
+                // allowlist, `min_swap_in`, `MAX_RESERVE`), and the curve
+                // call itself — the exact function `QUOTE_ENDPOINT` calls
+                // (finding I1), so a quote can never disagree with
+                // settlement.
+                let quote = quote_swap(&self.cfg, &pool, pool_id, *unit_in, *amount_in)?;
+                let dy = quote.dy;
 
                 if dy < min_out.msats {
                     return Err(AmmOutputError::SlippageExceeded);
                 }
 
+                let (reserve_in, reserve_out) = if quote.in_is_lo {
+                    (pool.reserve_lo, pool.reserve_hi)
+                } else {
+                    (pool.reserve_hi, pool.reserve_lo)
+                };
+
+                // `quote_swap` already proved `reserve_in.msats +
+                // amount_in.msats <= MAX_RESERVE` on these exact operands;
+                // this re-derives the same sum for the write below rather
+                // than threading a third field through `SwapQuote`. Unlike
+                // `dy`, a plain `checked_add` of two already-validated
+                // integers cannot diverge between two evaluations, so this
+                // is not the kind of "compute a value twice" spec §7.4
+                // forbids — the `ok_or` is a non-panicking
+                // belt-and-suspenders, not a reachable error path.
                 let reserve_in_new = reserve_in
                     .msats
                     .checked_add(amount_in.msats)
                     .ok_or(AmmOutputError::ReserveCapExceeded)?;
-                if reserve_in_new > math::MAX_RESERVE {
-                    return Err(AmmOutputError::ReserveCapExceeded);
-                }
                 // `amount_out` guarantees `dy < reserve_out`, so this never
                 // underflows.
                 let reserve_out_new = reserve_out.msats - dy;
@@ -489,10 +559,18 @@ impl ServerModule for Amm {
                 // saturating clamp here would silently under-credit the
                 // recipient while the reserve was already debited by the
                 // full `dy`, breaking the §7.4 balance-sheet identity under
-                // an adversarial accumulation. u64::MAX msats is far beyond
-                // any single swap's `MAX_RESERVE`-bounded `dy`, so this is
-                // not reachable in practice, but we still refuse to lose the
-                // difference silently.
+                // an adversarial accumulation.
+                //
+                // Finding I4: bounded against `MAX_RESERVE`, not just
+                // `u64::MAX`. `audit()`'s `.expect` on `BalanceEntry.amount`
+                // asserts it never exceeds `i64::MAX`, and `MAX_RESERVE <
+                // i64::MAX` is the only cap this module enforces anywhere —
+                // so THIS is the check that makes that `.expect` true rather
+                // than aspirational. Rejecting here (an ordinary consensus
+                // error) rather than clamping is required: `audit`'s
+                // `net_assets` sums every item behind its own `.expect`
+                // (spec §9.2), so a saturating clamp would not avoid the
+                // panic, only relocate it into the sum.
                 //
                 // `recipient_pk` and `tweak` are both unverified wire
                 // fields — the server has no way to check that a pubkey was
@@ -509,28 +587,36 @@ impl ServerModule for Amm {
                 // same tweak (the pubkey is derived from it), so this is a
                 // no-op for honest use.
                 //
-                // This is computed BEFORE any write below: `checked_add` here
-                // can still fail, and nothing may hit the database until
-                // every fallible step — including this one — has succeeded.
+                // This is computed BEFORE any write below: both the
+                // `checked_add` and the `MAX_RESERVE` check can still fail,
+                // and nothing may hit the database until every fallible step
+                // — including this one — has succeeded.
                 let bkey = BalanceKey {
                     owner: *recipient_pk,
                     unit: *unit_out,
                 };
                 let existing = dbtx.get_value(&bkey).await;
                 let (credited, stored_tweak) = match existing {
-                    Some(entry) => (
-                        entry
+                    Some(entry) => {
+                        let credited = entry
                             .amount
                             .msats
                             .checked_add(dy)
-                            .ok_or_else(|| AmmOutputError::Curve("balance overflow".to_string()))?,
-                        entry.tweak,
-                    ),
+                            .ok_or(AmmOutputError::ReserveCapExceeded)?;
+                        if credited > math::MAX_RESERVE {
+                            return Err(AmmOutputError::ReserveCapExceeded);
+                        }
+                        (credited, entry.tweak)
+                    }
+                    // `dy < reserve_out <= MAX_RESERVE` (guaranteed by
+                    // `amount_out` plus the `MAX_RESERVE` cap already
+                    // enforced on every stored reserve), so a fresh record's
+                    // amount is bounded without a separate check.
                     None => (dy, *tweak),
                 };
 
                 // All checks passed: now, and only now, write.
-                if in_is_lo {
+                if quote.in_is_lo {
                     pool.reserve_lo = Amount::from_msats(reserve_in_new);
                     pool.reserve_hi = Amount::from_msats(reserve_out_new);
                 } else {
@@ -680,19 +766,19 @@ impl ServerModule for Amm {
     /// practice and the `.expect` is justified by a real, code-enforced
     /// invariant.
     ///
-    /// `Balance.amount`, by contrast, has no such cap: it accumulates via
-    /// `checked_add` against `u64::MAX` (see the `SwapV0` comment in
-    /// `process_output`), so it is only bounded by the total value that
-    /// could ever move through this pair over the federation's lifetime —
-    /// the same order-of-magnitude, supply-based argument that justifies
-    /// `MAX_RESERVE` itself (2^58 msats is ~2.88e6 BTC), not a hard
-    /// type-level guarantee. We still use the same `.expect` here, matching
-    /// spec §9.1 verbatim, because there is no total conversion that is
-    /// actually *safer*: `calculate_net_assets` sums every item with
-    /// `checked_add` behind its own `.expect`, so silently clamping an
-    /// out-of-range balance to `i64::MAX`/`i64::MIN` would not avoid a
-    /// panic, only move it into the sum — precisely the failure mode this
-    /// function must avoid. See the report for this task for more detail.
+    /// `Balance.amount` is bounded the same way (finding I4): `process_output`'s
+    /// `SwapV0` arm rejects any accumulation that would push a stored
+    /// balance's amount above `MAX_RESERVE`, returning
+    /// `AmmOutputError::ReserveCapExceeded` (a consensus-level rejection, not
+    /// a panic) rather than writing an out-of-range value. Before that fix
+    /// this comment claimed the same guarantee while the code only checked
+    /// against `u64::MAX` — the `.expect` below was consequently unjustified
+    /// (true in practice, not true by construction). It is now enforced at
+    /// the one place that ever writes `BalanceEntry.amount`, so both
+    /// `.expect`s below rest on an equally real, code-enforced invariant, and
+    /// neither is a saturating clamp: `calculate_net_assets` sums every item
+    /// with `checked_add` behind its own `.expect` (spec §9.2), so a clamp
+    /// here would not avoid a panic, only relocate it into the sum.
     async fn audit(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
@@ -701,12 +787,14 @@ impl ServerModule for Amm {
     ) {
         audit
             .add_items(dbtx, module_instance_id, &PoolPrefix, |_, pool: Pool| {
-                -i64::try_from(pool.reserve_lo.msats).expect("bounded by MAX_RESERVE (spec §7.1)")
+                -i64::try_from(pool.reserve_lo.msats)
+                    .expect("Pool.reserve_lo is bounded by MAX_RESERVE (spec §7.1)")
             })
             .await;
         audit
             .add_items(dbtx, module_instance_id, &PoolPrefix, |_, pool: Pool| {
-                -i64::try_from(pool.reserve_hi.msats).expect("bounded by MAX_RESERVE (spec §7.1)")
+                -i64::try_from(pool.reserve_hi.msats)
+                    .expect("Pool.reserve_hi is bounded by MAX_RESERVE (spec §7.1)")
             })
             .await;
         audit
@@ -715,8 +803,10 @@ impl ServerModule for Amm {
                 module_instance_id,
                 &BalancePrefix,
                 |_, balance: BalanceEntry| {
-                    -i64::try_from(balance.amount.msats)
-                        .expect("bounded by MAX_RESERVE (spec §9.1)")
+                    -i64::try_from(balance.amount.msats).expect(
+                        "BalanceEntry.amount is bounded by MAX_RESERVE: process_output's SwapV0 \
+                         arm rejects any credit that would exceed it (finding I4)",
+                    )
                 },
             )
             .await;
@@ -760,33 +850,27 @@ impl ServerModule for Amm {
                         .await
                         .ok_or_else(|| ApiError::not_found("no such pool".to_string()))?;
 
-                    let in_is_lo = unit_in == pool_id.lo();
-                    let (reserve_in, reserve_out) = if in_is_lo {
+                    // The exact function `process_output`'s `SwapV0` arm
+                    // settles with (finding I1): orientation, the admission
+                    // checks, and the curve call cannot drift apart between
+                    // quote and settlement (finding M9).
+                    let quote = quote_swap(&module.cfg, &pool, pool_id, unit_in, amount_in)
+                        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    let (reserve_in, reserve_out) = if quote.in_is_lo {
                         (pool.reserve_lo, pool.reserve_hi)
                     } else {
                         (pool.reserve_hi, pool.reserve_lo)
                     };
-
-                    let fee = module.cfg.fee_for(pool_id);
-                    // The same function `process_output` settles with (spec
-                    // §12): a quote can never disagree with settlement.
-                    let amount_out = math::amount_out(
-                        reserve_in.msats,
-                        reserve_out.msats,
-                        amount_in.msats,
-                        fee,
-                    )
-                    .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
                     let price_impact_per_mille = math::price_impact_per_mille(
                         reserve_in.msats,
                         reserve_out.msats,
                         amount_in.msats,
-                        amount_out,
+                        quote.dy,
                     );
 
                     Ok(QuoteResponse {
-                        amount_out: Amount::from_msats(amount_out),
+                        amount_out: Amount::from_msats(quote.dy),
                         price_impact_per_mille,
                     })
                 }
@@ -794,39 +878,80 @@ impl ServerModule for Amm {
             public_api_endpoint! {
                 BALANCE_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |_module: &Amm, context, _params: ()| -> Vec<BalanceRecoveryEntry> {
+                async |_module: &Amm, context, request: RecoveryPageRequest| -> BalanceRecoveryResponse {
                     let db = context.db();
                     let mut dbtx = db.begin_transaction_nc().await;
-                    let entries: Vec<_> =
-                        dbtx.find_by_prefix(&BalancePrefix).await.collect().await;
-                    Ok(entries
-                        .into_iter()
-                        .map(|(key, entry)| BalanceRecoveryEntry {
-                            tweak: entry.tweak,
-                            pubkey: key.owner,
-                            unit: key.unit,
-                            amount: entry.amount,
-                        })
-                        .collect())
+                    let limit = recovery_page_limit(request.limit);
+
+                    // Finding I2: bounded to `limit + 1` rows regardless of
+                    // table size, so one request can never amplify into an
+                    // O(live rows) scan, allocation and response — even
+                    // though `Balance` rows are attacker-creatable for one
+                    // `min_swap_in` each and never garbage-collected (spec
+                    // §9.2). The `+1` lets us tell whether more rows remain
+                    // without a separate count query.
+                    let mut rows: Vec<_> = dbtx
+                        .find_by_prefix(&BalancePrefix)
+                        .await
+                        .skip(request.cursor as usize)
+                        .take(limit + 1)
+                        .collect()
+                        .await;
+
+                    let next_cursor = (rows.len() > limit).then(|| {
+                        rows.truncate(limit);
+                        request.cursor + limit as u64
+                    });
+
+                    Ok(BalanceRecoveryResponse {
+                        entries: rows
+                            .into_iter()
+                            .map(|(key, entry)| BalanceRecoveryEntry {
+                                tweak: entry.tweak,
+                                pubkey: key.owner,
+                                unit: key.unit,
+                                amount: entry.amount,
+                            })
+                            .collect(),
+                        next_cursor,
+                    })
                 }
             },
             public_api_endpoint! {
                 LP_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |_module: &Amm, context, _params: ()| -> Vec<LpRecoveryEntry> {
+                async |_module: &Amm, context, request: RecoveryPageRequest| -> LpRecoveryResponse {
                     let db = context.db();
                     let mut dbtx = db.begin_transaction_nc().await;
-                    let entries: Vec<_> =
-                        dbtx.find_by_prefix(&LpPositionPrefix).await.collect().await;
-                    Ok(entries
-                        .into_iter()
-                        .map(|(key, position)| LpRecoveryEntry {
-                            tweak: position.tweak,
-                            pool: key.pool,
-                            pubkey: key.owner,
-                            shares: position.shares,
-                        })
-                        .collect())
+                    let limit = recovery_page_limit(request.limit);
+
+                    // Finding I2: see `BALANCE_RECOVERY_ENDPOINT` above —
+                    // same bounded-page reasoning, mirrored for `LpPosition`.
+                    let mut rows: Vec<_> = dbtx
+                        .find_by_prefix(&LpPositionPrefix)
+                        .await
+                        .skip(request.cursor as usize)
+                        .take(limit + 1)
+                        .collect()
+                        .await;
+
+                    let next_cursor = (rows.len() > limit).then(|| {
+                        rows.truncate(limit);
+                        request.cursor + limit as u64
+                    });
+
+                    Ok(LpRecoveryResponse {
+                        entries: rows
+                            .into_iter()
+                            .map(|(key, position)| LpRecoveryEntry {
+                                tweak: position.tweak,
+                                pool: key.pool,
+                                pubkey: key.owner,
+                                shares: position.shares,
+                            })
+                            .collect(),
+                        next_cursor,
+                    })
                 }
             },
         ]

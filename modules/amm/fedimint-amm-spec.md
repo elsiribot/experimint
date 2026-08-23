@@ -528,14 +528,14 @@ Units are declared client-side (P10) and `ClientModule` is unit-parameterised th
 **API endpoints** (server)
 
 - `POOLS_ENDPOINT` → every `PoolId` with reserves, `total_shares`, effective fee.
-- `QUOTE_ENDPOINT(unit_in, unit_out, amount_in)` → `{ amount_out, effective_price, price_impact_per_mille }`, computed with the same `common` function the server settles with.
-- `BALANCE_RECOVERY_ENDPOINT` → stream of `(tweak, pubkey, unit, amount)`.
-- `LP_RECOVERY_ENDPOINT` → stream of `(tweak, pool, pubkey, shares)`.
+- `QUOTE_ENDPOINT(unit_in, unit_out, amount_in)` → `{ amount_out, price_impact_per_mille }`, computed with the same `common` function the server settles with. `effective_price` is deliberately omitted (finding M5): it is a ratio with no exact integer representation, and the client can compute it exactly itself from `amount_out` and the `amount_in` it already knows.
+- `BALANCE_RECOVERY_ENDPOINT` → paginated stream of `(tweak, pubkey, unit, amount)` (finding I2: cursor + limit, server-enforced max page size — `Balance` rows are attacker-creatable for one `min_swap_in` each and never garbage-collected, §9.2, so an unpaginated dump is a single-request amplification).
+- `LP_RECOVERY_ENDPOINT` → paginated stream of `(tweak, pool, pubkey, shares)`, same pagination as above.
 
 ### 12.1 Documented limitations
 
 - **A swap is two transactions.** The client hides this behind one `OperationId`, but it is user-visible as two confirmations, and the UI should say so rather than appear stalled.
-- **LP positions are keyed by pubkey and fully visible to guardians**, including size and pool. Bearer shares would fix it and are not planned (§15). State this plainly in user docs.
+- **LP positions are keyed by pubkey and publicly readable**, including size and pool (finding I3): `LP_RECOVERY_ENDPOINT` is `public_api_endpoint!`, so this is not merely guardian visibility — any anonymous, unauthenticated caller can enumerate every position. Bearer shares would fix it and are not planned (§15). State this plainly in user docs.
 - **Unbalanced deposits donate the excess** to existing LPs (§7.2).
 
 ---
@@ -574,7 +574,7 @@ The draft's proposed quantisation ladder on `amount_in` is **dropped**. Its rati
 
 What remains binding:
 
-- **`recipient_pk` must be freshly ground per swap** (§8). It is the one persistent-identity handle in the transaction and must never be derived from, or reused across, LP positions, other swaps, or any wallet identity key. This is a correctness requirement of the client, and it is tested.
+- **`recipient_pk` must be freshly ground per swap** (§8). It is the one persistent-identity handle in the transaction and must never be derived from, or reused across, LP positions, other swaps, or any wallet identity key. This is a correctness requirement of the client, and it is tested. `BALANCE_RECOVERY_ENDPOINT` is likewise `public_api_endpoint!` (finding I3), so `recipient_pk` — together with the pending amount behind it — is publicly readable by any anonymous caller for the lifetime of an unclaimed balance, not merely visible to guardians. §12.1 states the same scope limitation for LP positions.
 - **Reserves are a public accumulator.** Unlike the mint and LN modules, this module must expose reserves so clients can quote. Anyone polling `POOLS_ENDPOINT` can infer the size and direction of every swap. That is inherent — a quotable curve cannot hide its own state — and it leaks trade sizes to the public rather than to guardians alone. It identifies no one, but it should be stated rather than discovered.
 - **Client note handling.** Reissue swap proceeds into the wallet's general note pool rather than holding them as an isolated bundle.
 

@@ -17,14 +17,35 @@ pub const POOLS_ENDPOINT: &str = "amm_pools";
 /// quote can never disagree with settlement.
 pub const QUOTE_ENDPOINT: &str = "amm_quote";
 
-/// Streams `(tweak, pubkey, unit, amount)` for every stored `Balance`, so
-/// client recovery is a table scan rather than a session-history replay
-/// (spec §8.2).
+/// Streams `(tweak, pubkey, unit, amount)` for every stored `Balance`, one
+/// page at a time (finding I2: `Balance` rows are attacker-creatable for one
+/// `min_swap_in` each and are never garbage-collected, so an unpaginated dump
+/// lets a single tiny request amplify into an O(live rows) scan, allocation
+/// and response — spec §8.2, §9.2, §12).
 pub const BALANCE_RECOVERY_ENDPOINT: &str = "amm_balance_recovery";
 
-/// Streams `(tweak, pool, pubkey, shares)` for every stored `LpPosition`,
-/// mirroring [`BALANCE_RECOVERY_ENDPOINT`] for LP positions.
+/// Streams `(tweak, pool, pubkey, shares)` for every stored `LpPosition`, one
+/// page at a time, mirroring [`BALANCE_RECOVERY_ENDPOINT`] for LP positions.
 pub const LP_RECOVERY_ENDPOINT: &str = "amm_lp_recovery";
+
+/// Server-enforced ceiling on a recovery page's size (finding I2). The
+/// client-supplied `limit` in [`RecoveryPageRequest`] is clamped to this —
+/// never trusted directly, since an unbounded client-chosen limit would
+/// reintroduce the exact full-table-dump amplification pagination exists to
+/// remove.
+pub const MAX_RECOVERY_PAGE_SIZE: u32 = 500;
+
+/// Request shared by both recovery endpoints (finding I2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RecoveryPageRequest {
+    /// Resume point: rows already returned by earlier pages are skipped.
+    /// `0` (the default) starts from the beginning.
+    pub cursor: u64,
+    /// Requested page size. `None` requests the maximum. Always clamped
+    /// server-side to `[1, MAX_RECOVERY_PAGE_SIZE]` — a client cannot ask
+    /// for an unbounded page.
+    pub limit: Option<u32>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolSummary {
@@ -60,10 +81,28 @@ pub struct BalanceRecoveryEntry {
     pub amount: Amount,
 }
 
+/// One page of [`BalanceRecoveryEntry`] rows (finding I2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BalanceRecoveryResponse {
+    pub entries: Vec<BalanceRecoveryEntry>,
+    /// `Some(cursor)` to pass as the next [`RecoveryPageRequest::cursor`]
+    /// iff more rows remain; `None` means this was the last page.
+    pub next_cursor: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LpRecoveryEntry {
     pub tweak: [u8; 16],
     pub pool: PoolId,
     pub pubkey: secp256k1::PublicKey,
     pub shares: u64,
+}
+
+/// One page of [`LpRecoveryEntry`] rows (finding I2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LpRecoveryResponse {
+    pub entries: Vec<LpRecoveryEntry>,
+    /// `Some(cursor)` to pass as the next [`RecoveryPageRequest::cursor`]
+    /// iff more rows remain; `None` means this was the last page.
+    pub next_cursor: Option<u64>,
 }

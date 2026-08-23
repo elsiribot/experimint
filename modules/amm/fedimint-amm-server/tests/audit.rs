@@ -4,9 +4,12 @@
 //! every guardian if the reported balance sheet goes negative (spec §9,
 //! `fedimint-server/src/consensus/engine.rs:1032-1058`). This drives a full
 //! lifecycle — deposit, deposit at a shifted ratio, swap A->B, swap B->A,
-//! partial withdraw, full withdraw — and checks after EVERY step that the
-//! module's total reported liability matches a value tracked independently
-//! by the test.
+//! claim the A->B balance, partial withdraw, full withdraw — and checks
+//! after EVERY step that the module's total reported liability matches a
+//! value tracked independently by the test. The claim step (finding M7)
+//! means all four of spec §9.1's conservation table rows (`SwapV0`,
+//! `ClaimBalanceV0`, `DepositV0`, `WithdrawV0`) are exercised, not just
+//! three of them.
 //!
 //! "Independently" means: never call `math::mint_shares` / `burn_shares` /
 //! `amount_out` in this file to predict what the module *should* report,
@@ -248,6 +251,26 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
         "after swap B->A"
     );
 
+    // --- Step 4b: claim the balance created by swap A->B (M7: spec §9.1's
+    // `ClaimBalanceV0` conservation row was otherwise never exercised by this
+    // lifecycle). `process_input`'s own returned amount is used, exactly
+    // like the withdrawal steps below -- never re-read from the stored
+    // `BalanceEntry`.
+    let claim = AmmInput::ClaimBalanceV0 {
+        pubkey: swap_recipient_a,
+        unit: unit(1),
+    };
+    let claim_meta = module
+        .process_input(&mut dbtx, &claim, in_point())
+        .await
+        .expect("claiming swap A->B's balance must succeed");
+    expected -= total_msats(&claim_meta.amount.amounts);
+    assert_eq!(
+        total_liability(&module, &mut dbtx).await,
+        expected,
+        "after claiming swap A->B's balance"
+    );
+
     // --- Step 5: partial withdraw. ---
     // `owner1_shares` is known exactly (see above); split it so both a
     // partial and a full withdrawal are exercised.
@@ -414,6 +437,18 @@ async fn audit_liability_tracks_lifecycle_at_a_million_to_one_ratio() {
         .await
         .expect("swap B->A must succeed");
     expected += total_msats(&swap2_outcome.amounts);
+    assert_eq!(total_liability(&module, &mut dbtx).await, expected);
+
+    // Step 4b: claim the balance created by swap A->B (M7).
+    let claim = AmmInput::ClaimBalanceV0 {
+        pubkey: swap_recipient_a,
+        unit: unit(1),
+    };
+    let claim_meta = module
+        .process_input(&mut dbtx, &claim, in_point())
+        .await
+        .expect("claiming swap A->B's balance must succeed");
+    expected -= total_msats(&claim_meta.amount.amounts);
     assert_eq!(total_liability(&module, &mut dbtx).await, expected);
 
     // Step 5: partial withdraw.
