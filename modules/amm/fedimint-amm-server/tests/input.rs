@@ -180,6 +180,8 @@ async fn withdraw_from_unknown_pool_fails() {
         shares: 100,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
@@ -210,6 +212,8 @@ async fn withdraw_with_unknown_position_fails() {
         shares: 100,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
@@ -249,6 +253,8 @@ async fn withdraw_more_shares_than_held_fails() {
         shares: 101,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
@@ -295,6 +301,8 @@ async fn partial_withdraw_debits_reserves_and_keeps_position() {
         shares: 500,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module
@@ -364,6 +372,8 @@ async fn full_withdraw_deletes_position() {
         shares: 1_000,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     module
@@ -416,6 +426,8 @@ async fn withdraw_below_min_lo_hi_fails_and_writes_nothing() {
         shares: 500,
         min_lo: Amount::from_msats(expected.da + 1),
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
@@ -465,6 +477,8 @@ async fn withdraw_that_floors_to_zero_on_both_legs_is_rejected() {
         shares: 1,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
@@ -527,6 +541,8 @@ async fn zero_leg_is_omitted_from_amounts() {
         shares: 1,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module
@@ -608,6 +624,8 @@ async fn total_shares_never_reaches_zero_after_full_withdrawal() {
         shares: owner_shares,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     module
@@ -671,6 +689,8 @@ async fn withdraw_below_min_hi_only_fails_and_writes_nothing() {
         shares: 500,
         min_lo: Amount::ZERO,
         min_hi: Amount::from_msats(expected.db + 1),
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
@@ -740,6 +760,8 @@ async fn withdraw_zero_shares_fails() {
         shares: 0,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
 
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
@@ -748,5 +770,118 @@ async fn withdraw_zero_shares_fails() {
         Err(AmmInputError::Curve(
             math::CurveError::ZeroAmount.to_string()
         ))
+    );
+}
+
+/// 16. `WithdrawV0` whose payout EXCEEDS `max_lo` returns `SlippageExceeded`
+///     and writes nothing (fix pass 4, Important 3). Before `max_lo`/
+///     `max_hi` existed, a payout above the client's preview passed this
+///     check silently — this pins that a reserve move that raises the payout
+///     above what the client declared is now rejected just as loudly as one
+///     that lowers it.
+#[tokio::test]
+async fn withdraw_above_max_lo_hi_fails_and_writes_nothing() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+    let owner = test_pubkey(15);
+
+    let seeded_pool = Pool {
+        reserve_lo: Amount::from_msats(1_001_000),
+        reserve_hi: Amount::from_msats(1_001_000),
+        total_shares: 1_000_000,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+    let seeded_position = LpPosition {
+        shares: 1_000,
+        tweak: [15u8; 16],
+    };
+    dbtx.insert_new_entry(&LpPositionKey { pool, owner }, &seeded_position)
+        .await;
+
+    let expected = math::burn_shares(
+        seeded_pool.reserve_lo.msats,
+        seeded_pool.reserve_hi.msats,
+        seeded_pool.total_shares,
+        500,
+    )
+    .unwrap();
+
+    let input = AmmInput::WithdrawV0 {
+        pool,
+        owner_pk: owner,
+        shares: 500,
+        min_lo: Amount::ZERO,
+        min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(expected.da - 1),
+        max_hi: Amount::from_msats(u64::MAX),
+    };
+
+    let result = module.process_input(&mut dbtx, &input, in_point()).await;
+    assert_eq!(result, Err(AmmInputError::SlippageExceeded));
+
+    assert_eq!(dbtx.get_value(&PoolKey(pool)).await.unwrap(), seeded_pool);
+    assert_eq!(
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .unwrap(),
+        seeded_position
+    );
+}
+
+/// 17. `WithdrawV0` whose payout exceeds `max_hi` ONLY (`max_lo` is
+///     permissive) still returns `SlippageExceeded` and writes nothing —
+///     mirrors case 13's `min_hi`-only coverage, pinning the second operand
+///     of `outcome.db > max_hi.msats` so a mutant that mispairs it (e.g.
+///     checking `outcome.db > max_lo.msats`) fails the suite.
+#[tokio::test]
+async fn withdraw_above_max_hi_only_fails_and_writes_nothing() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+    let owner = test_pubkey(16);
+
+    let seeded_pool = Pool {
+        reserve_lo: Amount::from_msats(1_001_000),
+        reserve_hi: Amount::from_msats(1_001_000),
+        total_shares: 1_000_000,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+    let seeded_position = LpPosition {
+        shares: 1_000,
+        tweak: [16u8; 16],
+    };
+    dbtx.insert_new_entry(&LpPositionKey { pool, owner }, &seeded_position)
+        .await;
+
+    let expected = math::burn_shares(
+        seeded_pool.reserve_lo.msats,
+        seeded_pool.reserve_hi.msats,
+        seeded_pool.total_shares,
+        500,
+    )
+    .unwrap();
+
+    let input = AmmInput::WithdrawV0 {
+        pool,
+        owner_pk: owner,
+        shares: 500,
+        min_lo: Amount::ZERO,
+        min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(expected.db - 1),
+    };
+
+    let result = module.process_input(&mut dbtx, &input, in_point()).await;
+    assert_eq!(result, Err(AmmInputError::SlippageExceeded));
+
+    assert_eq!(dbtx.get_value(&PoolKey(pool)).await.unwrap(), seeded_pool);
+    assert_eq!(
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .unwrap(),
+        seeded_position
     );
 }

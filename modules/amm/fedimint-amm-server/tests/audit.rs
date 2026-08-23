@@ -285,6 +285,8 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
         shares: partial_shares,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
     let partial_meta = module
         .process_input(&mut dbtx, &withdraw_partial, in_point())
@@ -305,6 +307,8 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
         shares: remaining_shares,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
     let full_meta = module
         .process_input(&mut dbtx, &withdraw_full, in_point())
@@ -459,6 +463,8 @@ async fn audit_liability_tracks_lifecycle_at_a_million_to_one_ratio() {
         shares: partial_shares,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
     let partial_meta = module
         .process_input(&mut dbtx, &withdraw_partial, in_point())
@@ -475,6 +481,8 @@ async fn audit_liability_tracks_lifecycle_at_a_million_to_one_ratio() {
         shares: remaining_shares,
         min_lo: Amount::ZERO,
         min_hi: Amount::ZERO,
+        max_lo: Amount::from_msats(u64::MAX),
+        max_hi: Amount::from_msats(u64::MAX),
     };
     let full_meta = module
         .process_input(&mut dbtx, &withdraw_full, in_point())

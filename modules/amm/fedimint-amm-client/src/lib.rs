@@ -28,8 +28,14 @@
 //! `min_shares` is a genuine tolerance bound, same as `swap`'s `min_out`.
 //! `min_lo`/`min_hi` are not (fix pass 3, Important 6): `withdraw` sets them
 //! equal to the preview's exact amounts, making a withdrawal exact-or-reject
-//! rather than tolerance-banded — see that method's doc comment for why a
-//! tolerance band there could never actually bind.
+//! on the "settled below preview" side — see that method's doc comment for
+//! why a tolerance band there could never actually bind. `max_lo`/`max_hi`
+//! (fix pass 4, Important 3) close the other side of that same gap: without
+//! them, settlement *above* the preview passed silently while the client's
+//! declared transaction outputs stayed pinned at the (now stale) preview
+//! amount, forfeiting the surplus under core's overpay rule. Both bounds set
+//! to the exact preview make a withdrawal genuinely exact-or-reject in both
+//! directions, not just the one a comment used to claim was covered.
 
 pub mod api;
 pub mod db;
@@ -67,6 +73,8 @@ use fedimint_core::module::{
     AmountUnit, Amounts, ApiVersion, ModuleCommon, ModuleInit, MultiApiVersion,
 };
 use fedimint_core::secp256k1::PublicKey;
+use fedimint_core::task::TaskGroup;
+use fedimint_core::util::backoff_util::background_backoff;
 use fedimint_core::{Amount, apply, async_trait_maybe_send, push_db_pair_items};
 use fedimint_derive_secret::DerivableSecret;
 use futures::StreamExt;
@@ -75,7 +83,10 @@ use strum::IntoEnumIterator;
 use thiserror::Error;
 
 use crate::api::{AmmFederationApi, for_each_balance_recovery_entry, for_each_lp_recovery_entry};
-use crate::db::{DbKeyPrefix, LpPositionKey, LpPositionPrefixAll, LpPositionRecord};
+use crate::db::{
+    DbKeyPrefix, LpPositionKey, LpPositionPrefixAll, LpPositionRecord, RecoveredBalanceKey,
+    RecoveredBalancePrefixAll, RecoveredBalanceRecord,
+};
 use crate::derivation::{
     CHILD_LP, CHILD_SWAP, check_tweak, derive_keypair, grind_tweak, tweak_filter,
 };
@@ -201,13 +212,17 @@ pub fn min_after_slippage(amount: u64, max_slippage_bps: u64) -> Result<u64, Sli
     // `amount <= u64::MAX` and `retained_bps <= 10_000 < 2^14`, so the
     // product is well under u128::MAX; the floored quotient is `<= amount <=
     // u64::MAX`, so the final cast is total and `unwrap_or` never actually
-    // fires. `unwrap_or(0)`, not `unwrap_or(amount)` (fix pass 3, Minor): if
-    // this ever were somehow reached, `0` is the fail-safe direction for a
-    // slippage floor — it can only make the caller's transaction more likely
-    // to be rejected as underfunded, never accept a worse deal than
-    // requested, which `unwrap_or(amount)` (no floor at all) could.
+    // fires. `unwrap_or(amount)`, not `unwrap_or(0)` (fix pass 4, Important
+    // 4 — reverting fix pass 3's choice here, which had the direction
+    // backwards: this return value is `min_out`/`min_shares`, a *minimum
+    // acceptable output*, so `0` means no floor at all — the caller would
+    // accept any output, including a near-total loss — while `amount` is the
+    // strictest possible floor, rejecting on any slippage whatsoever. If this
+    // branch were ever somehow reached despite being unreachable by
+    // construction, failing toward "reject the trade" is the safe direction,
+    // not failing toward "accept anything".
     let min = u128::from(amount) * retained_bps / 10_000;
-    Ok(u64::try_from(min).unwrap_or(0))
+    Ok(u64::try_from(min).unwrap_or(amount))
 }
 
 /// Fetches a quote via `fetch_quote` and derives `min_out` from it and
@@ -290,6 +305,13 @@ pub struct AmmClientModule {
     client_ctx: ClientContext<Self>,
     module_api: DynModuleApi,
     root_secret: DerivableSecret,
+    /// Used by [`Self::start`] to spawn the background sweep that claims
+    /// balances [`recover_with`] persisted (fix pass 4, Critical 1) — mirrors
+    /// `fedimint-wallet-client`'s `WalletClientModule` (its peg-in monitor is
+    /// spawned the same way, from `start`, for the same reason: `init` runs
+    /// too early for `ClientContext` to be usable).
+    task_group: TaskGroup,
+    client_span: tracing::Span,
 }
 
 impl std::fmt::Debug for AmmClientModule {
@@ -345,6 +367,77 @@ impl ClientModule for AmmClientModule {
     /// spelled out here so the design choice is visible rather than implicit.
     fn supports_being_primary(&self) -> PrimaryModuleSupport {
         PrimaryModuleSupport::None
+    }
+
+    /// Drains [`RecoveredBalanceKey`] rows a [`recover_with`] scan has
+    /// persisted (fix pass 4, Critical 1).
+    ///
+    /// **Why here, and not from `ClientModuleInit::recover` directly.**
+    /// `recover` runs before this module is registered in the client's
+    /// module registry: pinned `fedimint-client/src/client/builder.rs`
+    /// (`build_stopped`) only calls `modules.register_module(..)` on the
+    /// non-recovering branch — a recovering module's instance id instead
+    /// goes into `module_recoveries` and is never inserted into the
+    /// registry for the remainder of that client process's life (confirmed
+    /// by `client.rs:2076-2077`'s own comment: "modules currently being recovered
+    /// are not yet initialized in the registry"). Submitting a transaction
+    /// from `recover` would call `finalize_and_submit_transaction` ->
+    /// `Client::transaction_builder_get_balance` -> `Client::get_module`,
+    /// which is `.expect("Module instance not found")` on exactly this
+    /// registry — a guaranteed panic in the "module recoveries" background
+    /// task the very first time a restored seed owns any unclaimed
+    /// `Balance`. This is not merely theoretical: it is the whole point of
+    /// running `recover` in the first place.
+    ///
+    /// `start`, by contrast, is documented (`ClientModule::start`'s own doc
+    /// comment on the pinned trait) as running "after `ClientContext` is
+    /// fully initialized" — and, mechanically, the client builder only calls
+    /// `module.start()` on modules already present in `client_arc.modules`
+    /// (`builder.rs`: `for (_, _, module) in client_arc.modules.iter_modules()
+    /// { module.start().await; }`), which happens after every non-recovering
+    /// module has been registered. So by the time this runs, the module IS
+    /// in the registry and transaction submission is safe. This is also true
+    /// on the very next client open after a seed restore completes: at that
+    /// point the module is no longer "recovering" (its `ClientModuleRecovery`
+    /// progress is persisted as done), so it goes through the normal `init`
+    /// + `register_module` + `start` path like any other module — which is
+    /// exactly when this sweep picks up whatever `recover` persisted.
+    ///
+    /// Retries forever rather than trying once and giving up: a `Balance` is
+    /// permanently claimable with no refund path (spec §6.3), so a transient
+    /// failure here (a network error, or a race lost to some other claimant)
+    /// must not be the last attempt. `background_backoff()` (`max_retries_or:
+    /// None`, growing from 1s to a bounded plateau — see `swap::retry_delay`'s
+    /// doc comment for why that plateau is closer to 90s than the nominal
+    /// 60s) both prevents a hot loop against the federation and never
+    /// exhausts, mirroring
+    /// [`swap::SwapStateMachine`]'s own unbounded Tx2 retry (fix pass 4,
+    /// Critical 2) for the identical underlying reason.
+    async fn start(&self) {
+        let db = self.db.clone();
+        let module_api = self.module_api.clone();
+        let root_secret = self.root_secret.clone();
+        let client_ctx = self.client_ctx.clone();
+        self.task_group.spawn_cancellable_with_span(
+            self.client_span.clone(),
+            "amm recovered-balance claim sweep",
+            async move {
+                let mut backoff = background_backoff();
+                loop {
+                    let (claimed, errors) =
+                        claim_pending_balances(&db, &module_api, &root_secret, &client_ctx).await;
+                    if claimed > 0 || !errors.is_empty() {
+                        tracing::info!(
+                            claimed,
+                            errors = errors.len(),
+                            "AMM recovered-balance claim sweep"
+                        );
+                    }
+                    let delay = backoff.next().unwrap_or(std::time::Duration::from_secs(60));
+                    fedimint_core::runtime::sleep(delay).await;
+                }
+            },
+        );
     }
 }
 
@@ -573,28 +666,42 @@ impl AmmClientModule {
 
     /// Burns `shares` of the local LP position keyed by `(pool, owner_pk)`.
     ///
-    /// **Exact-or-reject, not slippage-tolerant** (fix pass 3, Important 6).
-    /// There used to be a `max_slippage_bps` parameter here, but it could
-    /// never be the binding constraint: this method declares the
-    /// transaction's output amounts as the preview computed below, while
-    /// `min_lo`/`min_hi` were set to a tolerance *under* that same preview.
-    /// The server settles `WithdrawV0` at the pool's reserves at settlement
-    /// time, not at preview time — so if any concurrent operation on this
-    /// pool (most commonly a swap) moves reserves between the preview above
-    /// and settlement, one of two things happened: settlement below the
-    /// preview on either leg made `input < output` for that unit, and core
-    /// rejects the whole transaction with an opaque `UnbalancedTransaction`
-    /// regardless of what `min_lo`/`min_hi` said (spec P5); settlement above
-    /// the preview instead silently forfeited the surplus, since the
-    /// declared output amounts — not the tolerance band — are what the
-    /// client actually asks core to mint back. Either way the tolerance
-    /// parameter did nothing.
+    /// **Exact-or-reject, not slippage-tolerant** (fix pass 3, Important 6;
+    /// completed in fix pass 4, Important 3). There used to be a
+    /// `max_slippage_bps` parameter here, but it could never be the binding
+    /// constraint: this method declares the transaction's output amounts as
+    /// the preview computed below, while `min_lo`/`min_hi` were set to a
+    /// tolerance *under* that same preview. The server settles `WithdrawV0`
+    /// at the pool's reserves at settlement time, not at preview time — so if
+    /// any concurrent operation on this pool (most commonly a swap) moves
+    /// reserves between the preview above and settlement, one of two things
+    /// happens: settlement below the preview on either leg makes
+    /// `input < output` for that unit, and core rejects the whole transaction
+    /// with an opaque `UnbalancedTransaction` regardless of what
+    /// `min_lo`/`min_hi` said (spec P5); settlement above the preview instead
+    /// passes core's checks fine, but the declared output amounts — not any
+    /// tolerance band — are what the client actually asks core to mint back,
+    /// so the surplus on the "above preview" side was silently forfeited
+    /// under P5/P6's overpay rule. A `min_lo`/`min_hi`-only tolerance band
+    /// can never be the binding constraint on either side of that gap: it is
+    /// strictly *below* the declared amount, so it never fires before core's
+    /// own `UnbalancedTransaction` check on the low side, and it says nothing
+    /// at all about the high side.
     ///
-    /// So `min_lo`/`min_hi` are set equal to the declared amounts here: a
-    /// reserve move before settlement is rejected up front with a clear
-    /// `SlippageExceeded` (spec §7.3) instead of an opaque
-    /// `UnbalancedTransaction` from core, and nothing is ever silently
-    /// under- or over-paid. Spec §12.1 documents this: a withdrawal that
+    /// `min_lo`/`min_hi` were set equal to the declared amounts to close the
+    /// low side: a reserve move that would have settled below the preview
+    /// is now rejected up front with a clear `SlippageExceeded` (spec §7.3)
+    /// instead of an opaque `UnbalancedTransaction` from core. `max_lo`/
+    /// `max_hi` (fix pass 4, Important 3 — added to `AmmInput::WithdrawV0`
+    /// and checked in `process_input`, not merely documented, since the
+    /// module's consensus version is `0.0` and unreleased: a wire change
+    /// costs nothing right now) close the high side the same way, checked
+    /// server-side against the same `outcome` `min_lo`/`min_hi` are: a
+    /// reserve move that would settle above the preview is now also rejected
+    /// with `SlippageExceeded`, rather than silently minting the surplus away
+    /// under the overpay rule. With both bounds set to the exact preview,
+    /// a withdrawal really is exact-or-reject on both sides now, not just
+    /// documented as such. Spec §12.1 documents this: a withdrawal that
     /// loses this race should simply be retried against a fresh preview.
     pub async fn withdraw(
         &self,
@@ -629,9 +736,12 @@ impl AmmClientModule {
             shares,
         )?;
         // Exact, not tolerance-reduced (see this method's doc comment): a
-        // withdrawal is exact-or-reject.
+        // withdrawal is exact-or-reject in both directions, so `min_*` and
+        // `max_*` are both pinned to the same preview.
         let min_lo = Amount::from_msats(preview.da);
         let min_hi = Amount::from_msats(preview.db);
+        let max_lo = min_lo;
+        let max_hi = min_hi;
 
         let input = AmmInput::WithdrawV0 {
             pool,
@@ -639,6 +749,8 @@ impl AmmClientModule {
             shares,
             min_lo,
             min_hi,
+            max_lo,
+            max_hi,
         };
 
         let amounts = Amounts::ZERO
@@ -690,6 +802,14 @@ impl AmmClientModule {
     }
 
     /// Waits for a [`Self::swap`] operation to reach a terminal state.
+    ///
+    /// **`Tx1Rejected` is the only terminal failure state.** Tx2 has none
+    /// (fix pass 4, Critical 2): a `SwapStateMachine` retries a failed or
+    /// rejected Tx2 forever rather than ever giving up on a balance that is
+    /// permanently claimable (spec §6.3), so this only ever returns for a
+    /// swap that is still retrying, never bails out on its behalf. A caller
+    /// that needs to stop waiting should apply its own timeout around this
+    /// call rather than expect it to resolve to an error on Tx2's account.
     pub async fn await_swap(&self, operation_id: OperationId) -> anyhow::Result<()> {
         let mut stream = self.notifier.subscribe(operation_id).await;
         while let Some(state) = stream.next().await {
@@ -699,7 +819,6 @@ impl AmmClientModule {
             match sm.state {
                 SwapState::Done => return Ok(()),
                 SwapState::Tx1Rejected(error) => anyhow::bail!("Tx1 rejected: {error}"),
-                SwapState::Tx2Rejected(error) => anyhow::bail!("Tx2 rejected: {error}"),
                 SwapState::Tx1Submitted { .. }
                 | SwapState::Tx1Accepted { .. }
                 | SwapState::Tx2Failed { .. }
@@ -752,7 +871,13 @@ impl AmmClientModule {
 
     /// Scans both recovery endpoints (spec §8.2, §12: "Recovery is a table
     /// scan, not a history replay"), restores every LP position this seed
-    /// owns into the local cache, and claims every balance this seed owns.
+    /// owns into the local cache, persists every balance this seed owns for
+    /// [`Self::start`]'s background sweep to claim, and — since this method
+    /// runs on an already-started module, where transaction submission is
+    /// safe (see [`ClientModule::start`]'s doc comment on this type for why
+    /// that is NOT true from [`AmmClientInit::recover`]) — immediately tries
+    /// to claim them too, so an on-demand rescan reports real claim results
+    /// rather than making the caller wait for the next background sweep.
     ///
     /// For each row, [`check_tweak`] runs first as a cheap prefilter; only
     /// the ~1-in-65536 tweaks that pass it pay for a real key derivation
@@ -760,8 +885,10 @@ impl AmmClientModule {
     ///
     /// This inherent method and [`AmmClientInit::recover`] (the framework's
     /// seed-restore hook, fix pass 3, Important 4) both delegate to
-    /// [`recover_with`], so restoring from seed through either path runs the
-    /// identical logic.
+    /// [`recover_with`] for the scan-and-persist step, so restoring from seed
+    /// through either path discovers and stores the identical rows — they
+    /// only differ in whether claiming happens immediately afterward (fix
+    /// pass 4, Critical 1).
     ///
     /// **Racing an in-flight swap is benign.** If a `SwapStateMachine` on
     /// this same client is concurrently claiming a balance this scan also
@@ -772,30 +899,41 @@ impl AmmClientModule {
     /// not as a lost balance — the swap state machine's own claim, or this
     /// call's, whichever won, still completes the transfer.
     pub async fn recover(&self) -> anyhow::Result<AmmRecoverySummary> {
-        recover_with(
+        let scanned = recover_with(&self.db, &self.module_api, &self.root_secret).await?;
+        let (balances_claimed, claim_errors) = claim_pending_balances(
             &self.db,
             &self.module_api,
             &self.root_secret,
             &self.client_ctx,
         )
-        .await
+        .await;
+        Ok(AmmRecoverySummary {
+            balances_found: scanned.balances_found,
+            balances_claimed,
+            positions_restored: scanned.positions_restored,
+            claim_errors,
+        })
     }
 }
 
-/// Shared body of [`AmmClientModule::recover`] and
-/// [`AmmClientInit::recover`] (fix pass 3, Important 4): free-standing and
-/// parameterized rather than an inherent method, since
-/// `ClientModuleInit::recover` runs from [`fedimint_client_module::module::
-/// init::ClientModuleRecoverArgs`] and has no constructed [`AmmClientModule`]
-/// to call methods on — only the pieces of it that `ClientModuleRecoverArgs`
-/// exposes (`db()`, `module_api()`, `module_root_secret()`, `context()`,
-/// documented as usable immediately), which is exactly this function's
-/// parameter list.
+/// Shared scan-and-persist body of [`AmmClientModule::recover`] and
+/// [`AmmClientInit::recover`] (fix pass 3, Important 4; narrowed in fix pass
+/// 4, Critical 1 to persistence only — see [`ClientModule::start`]'s doc
+/// comment on [`AmmClientModule`] for why claiming can never safely happen
+/// here). Free-standing and parameterized rather than an inherent method,
+/// since `ClientModuleInit::recover` runs from
+/// [`fedimint_client_module::module::init::ClientModuleRecoverArgs`] and has
+/// no constructed [`AmmClientModule`] to call methods on — only the pieces of
+/// it that `ClientModuleRecoverArgs` exposes (`db()`, `module_api()`,
+/// `module_root_secret()`), which is exactly this function's parameter list.
+///
+/// Takes no `ClientContext` and submits no transaction: every `Balance` this
+/// scan finds is written to [`RecoveredBalanceKey`] and left there for
+/// [`claim_pending_balances`] to claim once it is safe to do so.
 async fn recover_with(
     db: &Database,
     module_api: &DynModuleApi,
     root_secret: &DerivableSecret,
-    client_ctx: &ClientContext<AmmClientModule>,
 ) -> anyhow::Result<AmmRecoverySummary> {
     let filter = tweak_filter(root_secret);
 
@@ -821,8 +959,10 @@ async fn recover_with(
     )
     .await?;
 
-    // Restore LP positions first: even if a subsequent claim below fails,
-    // positions found so far are not lost.
+    // Both restored in the same dbtx: neither is more foundational than the
+    // other now that persisting a balance is not itself a fallible network
+    // call (unlike the old claim-inline design, there is nothing here that
+    // can fail partway through).
     {
         let mut dbtx = db.begin_transaction().await;
         for entry in &own_positions {
@@ -838,58 +978,106 @@ async fn recover_with(
             )
             .await;
         }
-        dbtx.commit_tx().await;
-    }
-
-    let mut balances_claimed = 0usize;
-    let mut claim_errors = Vec::new();
-    for entry in &own_balances {
-        // Re-read immediately before claiming (fix pass 3, Minor), via the
-        // point-lookup endpoint (Important 5) rather than the scan-time
-        // `entry.amount`: that amount was read as long ago as one full
-        // paginated scan, during which a gift credited to this pubkey (spec
-        // §6.1: anyone may credit anyone's balance) would otherwise be
-        // forfeited. `Ok(None)` means the balance is already gone — most
-        // likely an in-flight `SwapStateMachine`'s own Tx2 won a race against
-        // this scan, which is benign (see this function's doc comment) — so
-        // it is skipped rather than attempted or reported as an error.
-        match module_api
-            .amm_balance(BalanceRequest {
-                pubkey: entry.pubkey,
-                unit: entry.unit,
-            })
-            .await
-        {
-            Ok(None) => {}
-            Ok(Some(amount)) => {
-                match claim_recovered_balance(
-                    client_ctx,
-                    root_secret,
-                    entry.tweak,
-                    entry.unit,
-                    amount,
-                )
-                .await
-                {
-                    Ok(()) => balances_claimed += 1,
-                    Err(error) => {
-                        claim_errors.push(format!("{:?}/{:?}: {error}", entry.pubkey, entry.unit));
-                    }
-                }
-            }
-            Err(error) => claim_errors.push(format!(
-                "{:?}/{:?}: failed to re-read balance before claiming: {error}",
-                entry.pubkey, entry.unit
-            )),
+        for entry in &own_balances {
+            dbtx.insert_entry(
+                &RecoveredBalanceKey {
+                    pubkey: entry.pubkey,
+                    unit: entry.unit,
+                },
+                &RecoveredBalanceRecord { tweak: entry.tweak },
+            )
+            .await;
         }
+        dbtx.commit_tx().await;
     }
 
     Ok(AmmRecoverySummary {
         balances_found: own_balances.len(),
-        balances_claimed,
+        balances_claimed: 0,
         positions_restored: own_positions.len(),
-        claim_errors,
+        claim_errors: Vec::new(),
     })
+}
+
+/// Attempts to claim every [`RecoveredBalanceKey`] row currently persisted
+/// (fix pass 4, Critical 1): called from [`AmmClientModule::recover`] for an
+/// immediate on-demand attempt, and from [`ClientModule::start`]'s background
+/// sweep (on [`AmmClientModule`]) to pick up whatever a prior
+/// [`AmmClientInit::recover`] run (or a previous, partially-failed call to
+/// this same function) left behind.
+///
+/// Re-reads each balance immediately before claiming (spec §6.1, same
+/// reasoning as [`swap::await_own_balance`]): a gift credited after the
+/// scan that found this row must be captured, not forfeited. `Ok(None)`
+/// means the balance is already gone — most likely an in-flight
+/// `SwapStateMachine`'s own Tx2 won a race against the scan (see
+/// [`AmmClientModule::recover`]'s doc comment), which is benign — so the row
+/// is removed without being counted as an error. A row whose claim itself
+/// fails (a transient network error, or the claim transaction being
+/// rejected) is left in place for the next call to retry: nothing here ever
+/// gives up permanently on a balance, for the same reason
+/// [`swap::SwapStateMachine`]'s Tx2 retry no longer does (fix pass 4,
+/// Critical 2) — a `Balance` is permanently claimable with no refund path
+/// (spec §6.3).
+async fn claim_pending_balances(
+    db: &Database,
+    module_api: &DynModuleApi,
+    root_secret: &DerivableSecret,
+    client_ctx: &ClientContext<AmmClientModule>,
+) -> (usize, Vec<String>) {
+    let pending: Vec<(RecoveredBalanceKey, RecoveredBalanceRecord)> = {
+        let mut dbtx = db.begin_transaction_nc().await;
+        dbtx.find_by_prefix(&RecoveredBalancePrefixAll)
+            .await
+            .collect()
+            .await
+    };
+
+    let mut claimed = 0usize;
+    let mut errors = Vec::new();
+
+    for (key, record) in pending {
+        match module_api
+            .amm_balance(BalanceRequest {
+                pubkey: key.pubkey,
+                unit: key.unit,
+            })
+            .await
+        {
+            Ok(None) => {
+                let mut dbtx = db.begin_transaction().await;
+                dbtx.remove_entry(&key).await;
+                dbtx.commit_tx().await;
+            }
+            Ok(Some(amount)) => {
+                match claim_recovered_balance(
+                    client_ctx,
+                    root_secret,
+                    record.tweak,
+                    key.unit,
+                    amount,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        let mut dbtx = db.begin_transaction().await;
+                        dbtx.remove_entry(&key).await;
+                        dbtx.commit_tx().await;
+                        claimed += 1;
+                    }
+                    Err(error) => {
+                        errors.push(format!("{:?}/{:?}: {error}", key.pubkey, key.unit));
+                    }
+                }
+            }
+            Err(error) => errors.push(format!(
+                "{:?}/{:?}: failed to re-read balance before claiming: {error}",
+                key.pubkey, key.unit
+            )),
+        }
+    }
+
+    (claimed, errors)
 }
 
 /// Claims a single balance found by [`recover_with`]. Unlike
@@ -964,6 +1152,16 @@ impl ModuleInit for AmmClientInit {
                         "Amm LP Position"
                     );
                 }
+                DbKeyPrefix::RecoveredBalance => {
+                    push_db_pair_items!(
+                        dbtx,
+                        RecoveredBalancePrefixAll,
+                        RecoveredBalanceKey,
+                        RecoveredBalanceRecord,
+                        items,
+                        "Amm Recovered Balance"
+                    );
+                }
                 DbKeyPrefix::ExternalReservedStart
                 | DbKeyPrefix::CoreInternalReservedStart
                 | DbKeyPrefix::CoreInternalReservedEnd => {}
@@ -1001,6 +1199,8 @@ impl ClientModuleInit for AmmClientInit {
             client_ctx: args.context(),
             module_api: args.module_api().clone(),
             root_secret: args.module_root_secret().clone(),
+            task_group: args.task_group().clone(),
+            client_span: args.client_span().clone(),
         })
     }
 
@@ -1011,9 +1211,33 @@ impl ClientModuleInit for AmmClientInit {
     /// (`fedimint-client-module/src/module/init.rs:392-403`, verified against
     /// the pinned source) — so every seed restore
     /// (`fedimint-client/src/client/builder.rs:830-856`) silently recovered
-    /// nothing from this module. [`AmmClientModule::recover`] is kept as a
-    /// public method too (e.g. for an already-running client to re-scan on
-    /// demand), and both now share [`recover_with`].
+    /// nothing from this module.
+    ///
+    /// **Persists only; never submits a transaction** (fix pass 4, Critical
+    /// 1 — the previous version of this method called all the way through to
+    /// [`ClientContext::finalize_and_submit_transaction`], which panics from
+    /// here). This module's instance id is not yet in the client's module
+    /// registry while this runs: pinned `fedimint-client/src/client/
+    /// builder.rs`'s `build_stopped` only calls `modules.register_module(..)`
+    /// on the branch that is NOT recovering, and `client.rs:2076-2077`'s own
+    /// comment confirms "modules currently being recovered are not yet
+    /// initialized in the registry". `ClientModuleRecoverArgs::context()` is
+    /// documented as "guaranteed usable immediately", but that guarantees
+    /// the `ClientContext` handle itself resolves — not that the module it
+    /// points at is registered. Submitting from here reaches
+    /// `Client::transaction_builder_get_balance` -> `Client::get_module` ->
+    /// `.expect("Module instance not found")`, and panics in the client's
+    /// "module recoveries" background task the first time a restored seed
+    /// owns any unclaimed `Balance`. LP positions are unaffected (restoring
+    /// one is a plain DB write, not a transaction), so they are restored here
+    /// exactly as before; only balance claiming moved to
+    /// [`AmmClientModule::start`], which is documented (on that method) as
+    /// running only once this module is actually registered.
+    ///
+    /// [`AmmClientModule::recover`] is kept as a public method too (e.g. for
+    /// an already-running client to re-scan on demand); it also claims
+    /// immediately afterward, since by the time it can be called the module
+    /// is already registered and submission is safe.
     ///
     /// `Backup = NoModuleBackup` (see [`ClientModule`] impl above), so
     /// `_snapshot` is always `None` here and carries no information this
@@ -1024,20 +1248,12 @@ impl ClientModuleInit for AmmClientInit {
         args: &ClientModuleRecoverArgs<Self>,
         _snapshot: Option<&NoModuleBackup>,
     ) -> anyhow::Result<Option<Amount>> {
-        let summary = recover_with(
-            args.db(),
-            args.module_api(),
-            args.module_root_secret(),
-            &args.context(),
-        )
-        .await?;
+        let summary = recover_with(args.db(), args.module_api(), args.module_root_secret()).await?;
 
         tracing::info!(
             balances_found = summary.balances_found,
-            balances_claimed = summary.balances_claimed,
             positions_restored = summary.positions_restored,
-            claim_errors = summary.claim_errors.len(),
-            "AMM module recovery complete",
+            "AMM module recovery scan complete; balances will be claimed once the module starts",
         );
 
         // Unlike a single-denomination module (e.g. mintv2's notes), this
@@ -1046,7 +1262,10 @@ impl ClientModuleInit for AmmClientInit {
         // there is no single native unit to sum them into one `Amount`, so
         // `None` is the honest answer the trait's own doc comment
         // anticipates ("`None` for modules that can't determine the amount
-        // at recovery-completion time"), not a placeholder.
+        // at recovery-completion time"), not a placeholder. It is also, now,
+        // the only honest answer for a second reason: this method no longer
+        // claims anything itself, so it has no claimed amount to report even
+        // in principle.
         Ok(None)
     }
 

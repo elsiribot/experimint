@@ -494,6 +494,8 @@ impl ServerModule for Amm {
                 shares,
                 min_lo,
                 min_hi,
+                max_lo,
+                max_hi,
             } => {
                 let mut db_pool = dbtx
                     .get_value(&PoolKey(*pool))
@@ -528,7 +530,18 @@ impl ServerModule for Amm {
                 )
                 .map_err(map_curve_error_input)?;
 
-                if outcome.da < min_lo.msats || outcome.db < min_hi.msats {
+                // Two-sided (fix pass 4, Important 3): below `min_lo`/
+                // `min_hi` catches settlement worse than the client's
+                // preview; above `max_lo`/`max_hi` catches settlement better
+                // than the preview, which core's overpay rule (P5/P6) would
+                // otherwise let through and silently forfeit, since the
+                // client's declared transaction outputs are fixed at the
+                // preview regardless of what actually settles here.
+                if outcome.da < min_lo.msats
+                    || outcome.db < min_hi.msats
+                    || outcome.da > max_lo.msats
+                    || outcome.db > max_hi.msats
+                {
                     return Err(AmmInputError::SlippageExceeded);
                 }
 

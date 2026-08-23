@@ -18,6 +18,7 @@
 
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_core::encoding::{Decodable, Encodable};
+use fedimint_core::module::AmountUnit;
 use fedimint_core::secp256k1;
 use serde::Serialize;
 use strum_macros::EnumIter;
@@ -29,6 +30,8 @@ use strum_macros::EnumIter;
 #[derive(Clone, Debug, EnumIter)]
 pub enum DbKeyPrefix {
     LpPosition = 0x01,
+    /// See [`RecoveredBalanceKey`] (fix pass 4, Critical 1).
+    RecoveredBalance = 0x02,
     /// Prefixes between 0xb0..=0xcf shall all be considered allocated for
     /// historical and future external use
     ExternalReservedStart = 0xb0,
@@ -88,6 +91,50 @@ fedimint_core::impl_db_record!(
     db_prefix = DbKeyPrefix::LpPosition,
 );
 fedimint_core::impl_db_lookup!(key = LpPositionKey, query_prefix = LpPositionPrefixAll);
+
+/// A balance discovered by a [`crate::recover_with`] table scan (spec §8.2)
+/// but not yet claimed (fix pass 4, Critical 1).
+///
+/// `ClientModuleInit::recover` — the framework's seed-restore hook — runs
+/// *before* this module is registered in the client's module registry
+/// (pinned `fedimint-client/src/client/builder.rs`: `register_module` is
+/// only called on the non-recovering branch; a recovering module's instance
+/// id is instead recorded in `module_recoveries` and only ever gains a
+/// `ClientContext` handle, never a registry entry, for the remainder of that
+/// client process's lifetime). Submitting a `ClaimBalanceV0` transaction from
+/// inside `recover` therefore reaches `Client::get_module` — `.expect("Module
+/// instance not found")` — and panics. So `recover` only ever writes this
+/// marker; the actual claim happens later, once the module is registered and
+/// [`crate::AmmClientModule::start`] runs (see that method's doc comment for
+/// why `start` is the right place).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct RecoveredBalanceKey {
+    pub pubkey: secp256k1::PublicKey,
+    pub unit: AmountUnit,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Encodable, Decodable)]
+pub struct RecoveredBalancePrefixAll;
+
+/// The tweak `RecoveredBalanceKey::pubkey` was ground from (spec §8), needed
+/// to re-derive the claiming keypair. No amount is stored here: the claim
+/// path always re-reads the current balance immediately before claiming
+/// (spec §6.1), the same reasoning [`crate::swap::await_own_balance`]
+/// documents for the in-flight-swap case.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct RecoveredBalanceRecord {
+    pub tweak: [u8; 16],
+}
+
+fedimint_core::impl_db_record!(
+    key = RecoveredBalanceKey,
+    value = RecoveredBalanceRecord,
+    db_prefix = DbKeyPrefix::RecoveredBalance,
+);
+fedimint_core::impl_db_lookup!(
+    key = RecoveredBalanceKey,
+    query_prefix = RecoveredBalancePrefixAll
+);
 
 #[cfg(test)]
 mod tests {
@@ -156,6 +203,57 @@ mod tests {
             .collect()
             .await;
         assert_eq!(all.len(), 3);
+        dbtx.commit_tx().await;
+    }
+
+    #[tokio::test]
+    async fn recovered_balance_round_trips() {
+        let db = db();
+        let mut dbtx = db.begin_transaction().await;
+        let key = RecoveredBalanceKey {
+            pubkey: test_pubkey(20),
+            unit: AmountUnit::new_custom(1),
+        };
+        let record = RecoveredBalanceRecord { tweak: [11u8; 16] };
+        dbtx.insert_new_entry(&key, &record).await;
+        assert_eq!(dbtx.get_value(&key).await, Some(record));
+        dbtx.commit_tx().await;
+    }
+
+    #[tokio::test]
+    async fn recovered_balances_enumerate_under_prefix_and_are_removable() {
+        let db = db();
+        let mut dbtx = db.begin_transaction().await;
+
+        for seed in [21u8, 22, 23] {
+            dbtx.insert_new_entry(
+                &RecoveredBalanceKey {
+                    pubkey: test_pubkey(seed),
+                    unit: AmountUnit::new_custom(0),
+                },
+                &RecoveredBalanceRecord { tweak: [seed; 16] },
+            )
+            .await;
+        }
+
+        let all: Vec<_> = dbtx
+            .find_by_prefix(&RecoveredBalancePrefixAll)
+            .await
+            .collect()
+            .await;
+        assert_eq!(all.len(), 3);
+
+        // The claim sweep removes an entry once it is claimed (or found
+        // already gone) — pin that the key round-trips through removal, not
+        // just insertion/lookup.
+        let (removed_key, _) = all[0];
+        dbtx.remove_entry(&removed_key).await;
+        let remaining: Vec<_> = dbtx
+            .find_by_prefix(&RecoveredBalancePrefixAll)
+            .await
+            .collect()
+            .await;
+        assert_eq!(remaining.len(), 2);
         dbtx.commit_tx().await;
     }
 }

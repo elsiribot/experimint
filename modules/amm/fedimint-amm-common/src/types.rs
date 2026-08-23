@@ -94,6 +94,19 @@ pub enum AmmInput {
         min_lo: Amount,
         /// Router-equivalent `amountBMin`.
         min_hi: Amount,
+        /// Upper bound on the `lo`-side payout (fix pass 4, Important 3).
+        /// Has no Uniswap V2 router equivalent — a router's caller declares
+        /// exact output amounts up front and a mismatch simply fails to
+        /// balance, where here the client instead declares a preview and the
+        /// server settles at current reserves, so an upper bound is needed
+        /// to catch settlement *above* the preview: without it, the surplus
+        /// passes core's checks fine and is silently forfeited under the
+        /// overpay rule (P5/P6), since the client's declared transaction
+        /// outputs are fixed at the preview regardless. See
+        /// `fedimint-amm-client`'s `AmmClientModule::withdraw` doc comment.
+        max_lo: Amount,
+        /// Upper bound on the `hi`-side payout. See `max_lo`.
+        max_hi: Amount,
     },
     #[encodable_default]
     Default { variant: u64, bytes: Vec<u8> },
@@ -261,6 +274,8 @@ mod tests {
             shares: 500,
             min_lo: Amount::from_msats(1),
             min_hi: Amount::from_msats(1),
+            max_lo: Amount::from_msats(2),
+            max_hi: Amount::from_msats(2),
         };
         let bytes = inp.consensus_encode_to_vec();
         let back =
