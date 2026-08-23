@@ -3,7 +3,7 @@
 **Status:** v1, implementation-ready · **Date:** 2026-08-22
 **Target:** fedimint master, pinned at `4794ee166afc191e0125c092893bd8f080939b53` (2026-08-22, workspace `0.13.0-alpha`, edition 2024)
 **Supersedes:** `fedimint-amm-module-spec.md` (draft v0.1)
-**Prerequisite:** one `mintv2` instance per tradable unit
+**Prerequisite:** one issuing module instance per tradable unit, each of a **distinct `ModuleKind`** — see §3.2
 
 ---
 
@@ -66,7 +66,9 @@ All verified against the pinned rev. Re-verify on any bump.
 | P10 | Server modules have **no** `AmountUnit` API; units are declared client-side via `PrimaryModuleSupport` | `fedimint-server-core/src/lib.rs`, `fedimint-client-module/src/module/mod.rs:924-934` | §11 |
 | P11 | `ClientInput { input, keys, amounts }` — amount is client-side, not wire | `fedimint-client-module/src/transaction/builder.rs:31-35` | §6.1 |
 | P12 | `verify_input_submission` / `verify_output_submission` receive a dbtx, run in Submission mode only | `transaction.rs:53-64, 85-95` | §6.4 |
-| P13 | `mintv2` carries one `amount_unit` per instance and rejects all others | `modules/fedimint-mintv2-common/src/config.rs:36,49`; `-client/src/lib.rs:417,432,517` | One mint instance per tradable unit |
+| P13 | `mintv2` carries one `amount_unit` per instance and rejects all others | `modules/fedimint-mintv2-common/src/config.rs:36,49`; `-client/src/lib.rs:417,432,517` | One issuing instance per tradable unit |
+| P15 | `ModuleInitRegistry` is keyed by `ModuleKind` with a hard `assert!` against duplicates, and `ConfigGenParams.enabled_modules` is a `BTreeSet<ModuleKind>` | `fedimint-core/src/config.rs:540,616-625`; `fedimint-server/src/config/mod.rs:251` | **At most one instance per module kind, per federation** — §3.2 |
+| P16 | `ConfigGenModuleArgs` is `{ network, disable_base_fees }`; no per-module config-gen params channel exists | `fedimint-server-core/src/init.rs:49-54` | `mintv2` hardcodes `amount_unit: AmountUnit::BITCOIN` (`mintv2-server/src/lib.rs:199,255`) — §3.2 |
 | P14 | `module_root_secret` is namespaced per module instance | `fedimint-client-module/src/module/init.rs:114` | §8 |
 
 **`fedimint-swap-*` does not exist on master**, and there is no AMM, DEX or liquidity-pool code anywhere in the tree. The draft's structural precedent is gone; `fedimint-mintv2-*` and `fedimint-lnv2-*` are the models to follow.
@@ -80,6 +82,17 @@ Core processes **all inputs, then signatures, then all outputs** (P1). An input 
 Violating this gives an input that mints value on the strength of a sibling output which runs afterwards and may simply be absent — the pool pays out for free, and nothing in core catches it.
 
 This is why the draft's single-input swap needed the `fees` channel as a "consume" channel, and why, having rejected that (D1 rationale), the swap must span two transactions.
+
+### 3.2 Where a second unit actually comes from
+
+Core's multi-unit machinery is complete (P2–P5), but on the pinned rev **a federation cannot issue two units through `mintv2`**, for two independent reasons:
+
+1. **One instance per module kind.** `ModuleInitRegistry` is a `BTreeMap<ModuleKind, _>` whose `attach` carries a hard `assert!(… is_none(), "Can't insert module of same kind twice")` (`fedimint-core/src/config.rs:540,616-625`), and `ConfigGenParams.enabled_modules` is a `BTreeSet<ModuleKind>` that config generation enumerates one instance per (`fedimint-server/src/config/mod.rs:251,501,663`). A second `mintv2` cannot be registered at all.
+2. **No per-module config-gen params.** `ConfigGenModuleArgs` is `{ network, disable_base_fees }` (`fedimint-server-core/src/init.rs:49-54`), with no channel for structured operator input — so `mintv2` hardcodes `amount_unit: AmountUnit::BITCOIN` (`mintv2-server/src/lib.rs:199,255`). Even if (1) were solved, both instances would be BITCOIN, and `PoolId::new` rejects `lo == hi`.
+
+**Consequence for this module.** It is entirely unit-generic and does not care which module issues a unit — but its counterparties must be issuing modules of **distinct `ModuleKind`s**. A BTC↔USD pool needs `mintv2` for BTC and some *other* module kind issuing USD. "One `mintv2` per unit", as the draft assumed, is not achievable at any effort short of rekeying the module registry and the DKG wire format.
+
+This is the binding platform constraint on deploying this module, and it is why §14's integration tests use a purpose-built test-only issuing module under its own kind rather than a second `mintv2`. Fixing (2) is the additive change §16 records as an upstream ask; fixing (1) is a much larger architectural one.
 
 ---
 
@@ -503,9 +516,9 @@ pub struct AmmConfigPrivate;  // empty — this module holds no key material
 
 **DKG validation.** `units` non-empty; every fee `< 1000`; every `min_swap_in` non-zero; every `PoolId` in `fee_overrides` canonical (§5.1) with both units in `units`. The federation must additionally run a `mintv2` instance per listed unit, which this module cannot check — surface it as a guardian-UI setup checklist item.
 
-**Adding units** requires a `mintv2` DKG plus an `AmmConfigConsensus` change, i.e. a coordinated federation upgrade. Adding *pairs* over existing units requires nothing.
+**Adding units** requires standing up an issuing module of a **new `ModuleKind`** plus an `AmmConfigConsensus` change, i.e. a coordinated federation upgrade (§3.2 — a second `mintv2` is not an option). Adding *pairs* over existing units requires nothing.
 
-Because `AmmConfigPrivate` is empty, this module holds no key material and pools are ordinary database records — which is why one instance can host many pools while a `mintv2` instance hosts exactly one unit (P13).
+Because `AmmConfigPrivate` is empty, this module holds no key material and pools are ordinary database records — which is why one instance can host many pools while a `mintv2` instance hosts exactly one unit (P13) and cannot be stood up twice (P15).
 
 **Consensus version** starts at `0.0`. Any change to the encoded shape of an input, output or stored record requires a bump plus a `get_database_migrations` entry.
 
