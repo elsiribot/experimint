@@ -4,9 +4,11 @@ use std::cmp::Ordering;
 use std::io::{Error, Read, Write};
 
 use fedimint_core::encoding::{Decodable, DecodeError, Encodable};
-use fedimint_core::module::AmountUnit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
-use serde::{Deserialize, Serialize};
+use fedimint_core::module::{AmountUnit, serde_json};
+use serde::de::Error as SerdeDeError;
+use serde::ser::Error as SerdeSerError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A pool over an unordered pair of units, stored sorted so that `(A, B)` and
 /// `(B, A)` resolve to the same record.
@@ -14,7 +16,16 @@ use serde::{Deserialize, Serialize};
 /// Fields are private and the `Decodable` impl is hand-written: a
 /// non-canonical encoding (`lo >= hi`) MUST be rejected, or one unit pair
 /// yields two distinct `Pool` records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// `Serialize`/`Deserialize` are also hand-written, independently of
+/// `Encodable`/`Decodable`: `PoolId` is used as a `BTreeMap` key in configs
+/// that are distributed to clients as JSON, and `serde_json` rejects any map
+/// key that isn't a string. So `PoolId` serialises to (and parses from) the
+/// string `"<lo>:<hi>"`, e.g. `"0:7"`. `Deserialize` re-validates
+/// canonicality (`lo < hi`) exactly as `Decodable` does, for the same reason
+/// (spec §5.1) — a deserialiser that accepted `"7:0"` would reintroduce the
+/// split-pool bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PoolId {
     lo: AmountUnit,
     hi: AmountUnit,
@@ -51,6 +62,63 @@ impl PoolId {
             None
         }
     }
+}
+
+impl Serialize for PoolId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let lo = amount_unit_to_u64(self.lo).map_err(SerdeSerError::custom)?;
+        let hi = amount_unit_to_u64(self.hi).map_err(SerdeSerError::custom)?;
+        serializer.collect_str(&format_args!("{lo}:{hi}"))
+    }
+}
+
+impl<'de> Deserialize<'de> for PoolId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+
+        let (lo_str, hi_str) = s.split_once(':').ok_or_else(|| {
+            SerdeDeError::custom(format!("invalid PoolId {s:?}: expected \"lo:hi\""))
+        })?;
+        // `split_once` only splits on the first `:`, so `"1:2:3"` would
+        // otherwise silently parse `hi_str` as `"2:3"`.
+        if hi_str.contains(':') {
+            return Err(SerdeDeError::custom(format!(
+                "invalid PoolId {s:?}: too many ':' separators"
+            )));
+        }
+        let lo: u64 = lo_str.parse().map_err(|_| {
+            SerdeDeError::custom(format!("invalid PoolId {s:?}: lo is not a valid u64"))
+        })?;
+        let hi: u64 = hi_str.parse().map_err(|_| {
+            SerdeDeError::custom(format!("invalid PoolId {s:?}: hi is not a valid u64"))
+        })?;
+
+        // Same canonicality rule as `Decodable`: reject `lo >= hi` so a
+        // non-canonical string can't reintroduce the split-pool bug (spec
+        // §5.1).
+        if lo >= hi {
+            return Err(SerdeDeError::custom(format!(
+                "PoolId must be canonical: lo < hi, got {lo}:{hi}"
+            )));
+        }
+
+        Ok(PoolId {
+            lo: AmountUnit::new_custom(lo),
+            hi: AmountUnit::new_custom(hi),
+        })
+    }
+}
+
+/// `AmountUnit`'s field is private with no accessor, so the only way to read
+/// its numeric id back out is through its own (derived) `Serialize` impl,
+/// which forwards transparently to a plain `u64`. `fedimint_core` already
+/// re-exports `serde_json` (`fedimint_core::module::serde_json`) for exactly
+/// this kind of use, so this adds no dependency of our own.
+fn amount_unit_to_u64(unit: AmountUnit) -> Result<u64, String> {
+    let encoded = serde_json::to_string(&unit).map_err(|e| e.to_string())?;
+    encoded
+        .parse::<u64>()
+        .map_err(|_| format!("AmountUnit did not serialise to a plain integer: {encoded:?}"))
 }
 
 impl Encodable for PoolId {
@@ -127,5 +195,37 @@ mod tests {
         assert!(
             PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err()
         );
+    }
+
+    #[test]
+    fn serde_round_trips_through_json_as_lo_hi_string() {
+        let id = PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(7)).unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"0:7\"");
+        let decoded: PoolId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    /// Mirrors `rejects_non_canonical_encoding` for the serde representation
+    /// — see spec §5.1.
+    #[test]
+    fn deserialize_rejects_non_canonical_string() {
+        assert!(serde_json::from_str::<PoolId>("\"7:0\"").is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_equal_units_in_string() {
+        assert!(serde_json::from_str::<PoolId>("\"4:4\"").is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_malformed_strings() {
+        for bad in ["abc", "1", "1:2:3", ""] {
+            let json = format!("{bad:?}");
+            assert!(
+                serde_json::from_str::<PoolId>(&json).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
     }
 }

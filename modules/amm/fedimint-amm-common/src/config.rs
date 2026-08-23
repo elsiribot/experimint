@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use fedimint_core::Amount;
 use fedimint_core::encoding::{Decodable, Encodable};
-use fedimint_core::module::AmountUnit;
+use fedimint_core::module::{AmountUnit, serde_json};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -214,5 +214,57 @@ mod tests {
         assert_eq!(c.fee_for(pool), 3);
         c.fee_overrides.insert(pool, 1);
         assert_eq!(c.fee_for(pool), 1);
+    }
+
+    /// Regression test for the AMM config JSON-serialisation bug: `PoolId`
+    /// used to derive struct-shaped serde, which `serde_json` rejects as a
+    /// map key ("key must be a string") once `fee_overrides` is non-empty.
+    /// This is how fedimint distributes client config, so this must succeed.
+    #[test]
+    fn client_config_serialises_to_json_with_fee_overrides() {
+        let pool = PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap();
+        let mut c = AmmClientConfig {
+            units: units(),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::new(),
+        };
+        c.fee_overrides.insert(pool, 1);
+
+        let json = fedimint_core::module::serde_json::to_string(&c)
+            .expect("client config with fee_overrides must serialise to JSON");
+        let round_tripped: AmmClientConfig =
+            fedimint_core::module::serde_json::from_str(&json).expect("must deserialise back");
+        assert_eq!(c, round_tripped);
+    }
+
+    /// `AmmConfigConsensus` mirrors `AmmClientConfig` and must serialise the
+    /// same way.
+    #[test]
+    fn consensus_config_serialises_to_json_with_fee_overrides() {
+        let pool = PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap();
+        let mut c = cfg();
+        c.fee_overrides.insert(pool, 1);
+
+        let json = fedimint_core::module::serde_json::to_string(&c)
+            .expect("consensus config with fee_overrides must serialise to JSON");
+        let round_tripped: AmmConfigConsensus =
+            fedimint_core::module::serde_json::from_str(&json).expect("must deserialise back");
+        assert_eq!(c, round_tripped);
+    }
+
+    /// The `Display` impl for `AmmClientConfig` goes through JSON
+    /// serialisation internally; it must not panic (or return an `Err` that
+    /// callers commonly `.expect()` on) for a non-empty `fee_overrides`.
+    #[test]
+    fn client_config_display_does_not_panic_with_fee_overrides() {
+        let pool = PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap();
+        let mut c = AmmClientConfig {
+            units: units(),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::new(),
+        };
+        c.fee_overrides.insert(pool, 1);
+
+        let _ = c.to_string();
     }
 }
