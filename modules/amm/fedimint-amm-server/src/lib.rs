@@ -14,20 +14,21 @@ use async_trait::async_trait;
 use fedimint_amm_common::config::{
     AmmClientConfig, AmmConfig, AmmConfigConsensus, AmmConfigPrivate, UnitParams,
 };
+use fedimint_amm_common::pool_id::PoolId;
 use fedimint_amm_common::types::{
     AmmConsensusItem, AmmInput, AmmInputError, AmmOutput, AmmOutputError, AmmOutputOutcome,
 };
-use fedimint_amm_common::{AmmCommonInit, AmmModuleTypes, MODULE_CONSENSUS_VERSION};
+use fedimint_amm_common::{AmmCommonInit, AmmModuleTypes, MODULE_CONSENSUS_VERSION, math};
 use fedimint_core::config::{
     ServerModuleConfig, ServerModuleConsensusConfig, TypedServerModuleConfig,
     TypedServerModuleConsensusConfig,
 };
 use fedimint_core::core::ModuleInstanceId;
-use fedimint_core::db::{DatabaseTransaction, DatabaseVersion};
+use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
-    AmountUnit, ApiEndpoint, CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
-    TransactionItemAmounts,
+    AmountUnit, Amounts, ApiEndpoint, CoreConsensusVersion, InputMeta, ModuleConsensusVersion,
+    ModuleInit, TransactionItemAmounts,
 };
 use fedimint_core::{Amount, InPoint, OutPoint, PeerId, push_db_pair_items};
 use fedimint_server_core::config::PeerHandleOps;
@@ -39,7 +40,8 @@ use futures::StreamExt;
 use strum::IntoEnumIterator;
 
 use crate::db::{
-    BalanceEntry, BalancePrefix, DbKeyPrefix, LpPosition, LpPositionPrefix, Pool, PoolPrefix,
+    BalanceEntry, BalanceKey, BalancePrefix, DbKeyPrefix, LpPosition, LpPositionKey,
+    LpPositionPrefix, Pool, PoolKey, PoolPrefix,
 };
 
 /// This module has no per-federation setup parameters exposed through
@@ -272,12 +274,219 @@ impl ServerModule for Amm {
 
     async fn process_output<'a, 'b>(
         &'a self,
-        _dbtx: &mut DatabaseTransaction<'b>,
-        _output: &'a AmmOutput,
+        dbtx: &mut DatabaseTransaction<'b>,
+        output: &'a AmmOutput,
         _out_point: OutPoint,
     ) -> Result<TransactionItemAmounts, AmmOutputError> {
-        // Stub for this task: Task 8 implements `SwapV0`/`DepositV0`.
-        Err(AmmOutputError::UnknownVariant)
+        match output {
+            AmmOutput::SwapV0 {
+                unit_in,
+                unit_out,
+                amount_in,
+                min_out,
+                recipient_pk,
+                tweak,
+            } => {
+                if unit_in == unit_out {
+                    return Err(AmmOutputError::IdenticalUnits);
+                }
+                let params_in = self
+                    .cfg
+                    .units
+                    .get(unit_in)
+                    .ok_or(AmmOutputError::UnknownUnit)?;
+                if !self.cfg.units.contains_key(unit_out) {
+                    return Err(AmmOutputError::UnknownUnit);
+                }
+                if *amount_in < params_in.min_swap_in {
+                    return Err(AmmOutputError::BelowMinSwapIn);
+                }
+                let pool_id =
+                    PoolId::new(*unit_in, *unit_out).ok_or(AmmOutputError::IdenticalUnits)?;
+                let mut pool = dbtx
+                    .get_value(&PoolKey(pool_id))
+                    .await
+                    .ok_or(AmmOutputError::NoSuchPool)?;
+
+                // Orient reserves so `in` and `out` match the trader's
+                // direction. `PoolId` sorts its pair, so `unit_in` may be
+                // either `lo` or `hi` — determined once and used
+                // consistently for both the read and the write-back below.
+                let in_is_lo = *unit_in == pool_id.lo();
+                let (reserve_in, reserve_out) = if in_is_lo {
+                    (pool.reserve_lo, pool.reserve_hi)
+                } else {
+                    (pool.reserve_hi, pool.reserve_lo)
+                };
+
+                let fee = self.cfg.fee_for(pool_id);
+                // Computed ONCE. This one binding is used for the reserve
+                // debit AND the balance credit below — spec §7.4. Never
+                // recompute it.
+                let dy =
+                    math::amount_out(reserve_in.msats, reserve_out.msats, amount_in.msats, fee)
+                        .map_err(|e| AmmOutputError::Curve(e.to_string()))?;
+
+                if dy < min_out.msats {
+                    return Err(AmmOutputError::SlippageExceeded);
+                }
+
+                let reserve_in_new = reserve_in
+                    .msats
+                    .checked_add(amount_in.msats)
+                    .ok_or(AmmOutputError::ReserveCapExceeded)?;
+                if reserve_in_new > math::MAX_RESERVE {
+                    return Err(AmmOutputError::ReserveCapExceeded);
+                }
+                // `amount_out` guarantees `dy < reserve_out`, so this never
+                // underflows.
+                let reserve_out_new = reserve_out.msats - dy;
+
+                if !math::k_non_decreasing(
+                    reserve_in.msats,
+                    reserve_out.msats,
+                    reserve_in_new,
+                    reserve_out_new,
+                ) {
+                    return Err(AmmOutputError::KInvariantViolated);
+                }
+
+                // All checks passed: now, and only now, write.
+                if in_is_lo {
+                    pool.reserve_lo = Amount::from_msats(reserve_in_new);
+                    pool.reserve_hi = Amount::from_msats(reserve_out_new);
+                } else {
+                    pool.reserve_hi = Amount::from_msats(reserve_in_new);
+                    pool.reserve_lo = Amount::from_msats(reserve_out_new);
+                }
+                dbtx.insert_entry(&PoolKey(pool_id), &pool).await;
+
+                // A second SwapV0 into an existing (recipient_pk, unit_out)
+                // ADDS to the balance rather than replacing it: anyone may
+                // credit anyone's balance, so this must accumulate, not
+                // overwrite. `checked_add` (not `saturating_add`): a
+                // saturating clamp here would silently under-credit the
+                // recipient while the reserve was already debited by the
+                // full `dy`, breaking the §7.4 balance-sheet identity under
+                // an adversarial accumulation. u64::MAX msats is far beyond
+                // any single swap's `MAX_RESERVE`-bounded `dy`, so this is
+                // not reachable in practice, but we still refuse to lose the
+                // difference silently.
+                let bkey = BalanceKey {
+                    owner: *recipient_pk,
+                    unit: *unit_out,
+                };
+                let existing = dbtx.get_value(&bkey).await;
+                let credited = match existing {
+                    Some(entry) => entry
+                        .amount
+                        .msats
+                        .checked_add(dy)
+                        .ok_or_else(|| AmmOutputError::Curve("balance overflow".to_string()))?,
+                    None => dy,
+                };
+                dbtx.insert_entry(
+                    &bkey,
+                    &BalanceEntry {
+                        amount: Amount::from_msats(credited),
+                        tweak: *tweak,
+                    },
+                )
+                .await;
+
+                Ok(TransactionItemAmounts {
+                    amounts: Amounts::new_custom(*unit_in, *amount_in),
+                    fees: Amounts::ZERO,
+                })
+            }
+            AmmOutput::DepositV0 {
+                pool,
+                amount_lo,
+                amount_hi,
+                min_shares,
+                owner_pk,
+                tweak,
+            } => {
+                if !self.cfg.units.contains_key(&pool.lo())
+                    || !self.cfg.units.contains_key(&pool.hi())
+                {
+                    return Err(AmmOutputError::UnknownUnit);
+                }
+
+                // Load or default: `total_shares == 0` on a fresh pool is
+                // exactly the pool-creation branch `mint_shares` handles.
+                let mut db_pool = dbtx.get_value(&PoolKey(*pool)).await.unwrap_or(Pool {
+                    reserve_lo: Amount::ZERO,
+                    reserve_hi: Amount::ZERO,
+                    total_shares: 0,
+                });
+
+                let outcome = math::mint_shares(
+                    db_pool.reserve_lo.msats,
+                    db_pool.reserve_hi.msats,
+                    db_pool.total_shares,
+                    amount_lo.msats,
+                    amount_hi.msats,
+                )
+                .map_err(|e| AmmOutputError::Curve(e.to_string()))?;
+
+                if outcome.to_owner < *min_shares {
+                    return Err(AmmOutputError::SlippageExceeded);
+                }
+
+                // All checks passed: now, and only now, write.
+                // `mint_shares` already verified reserve_{lo,hi} + amount_{lo,hi}
+                // <= MAX_RESERVE, so these `checked_add`s cannot fail; the
+                // `ok_or` is a non-panicking belt-and-suspenders rather than
+                // a reachable error path.
+                db_pool.reserve_lo = db_pool
+                    .reserve_lo
+                    .checked_add(*amount_lo)
+                    .ok_or(AmmOutputError::ReserveCapExceeded)?;
+                db_pool.reserve_hi = db_pool
+                    .reserve_hi
+                    .checked_add(*amount_hi)
+                    .ok_or(AmmOutputError::ReserveCapExceeded)?;
+                db_pool.total_shares = outcome.new_total_shares;
+                dbtx.insert_entry(&PoolKey(*pool), &db_pool).await;
+
+                // An `owner_pk` is expected to be freshly ground per deposit
+                // (spec §8.3), so this should never collide — but `owner_pk`
+                // is an attacker-controlled wire value with no freshness
+                // enforced here. Accumulating shares (rather than
+                // `insert_new_entry`, which would panic on a collision, or
+                // overwriting, which would erase an existing depositor's
+                // claim) keeps this path panic-free and loses no one's
+                // funds regardless of input.
+                let lp_key = LpPositionKey {
+                    pool: *pool,
+                    owner: *owner_pk,
+                };
+                let existing_shares = dbtx.get_value(&lp_key).await.map_or(0, |p| p.shares);
+                let shares = existing_shares
+                    .checked_add(outcome.to_owner)
+                    .ok_or_else(|| AmmOutputError::Curve("share overflow".to_string()))?;
+                dbtx.insert_entry(
+                    &lp_key,
+                    &LpPosition {
+                        shares,
+                        tweak: *tweak,
+                    },
+                )
+                .await;
+
+                let amounts = Amounts::ZERO
+                    .checked_add_unit(*amount_lo, pool.lo())
+                    .and_then(|a| a.checked_add_unit(*amount_hi, pool.hi()))
+                    .ok_or(AmmOutputError::ReserveCapExceeded)?;
+
+                Ok(TransactionItemAmounts {
+                    amounts,
+                    fees: Amounts::ZERO,
+                })
+            }
+            AmmOutput::Default { .. } => Err(AmmOutputError::UnknownVariant),
+        }
     }
 
     async fn output_status(
