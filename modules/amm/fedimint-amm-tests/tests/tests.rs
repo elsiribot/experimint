@@ -79,7 +79,10 @@ async fn issue_btc(client: &ClientHandleArc, amount: Amount) -> anyhow::Result<(
 /// Mints `amount` of `faucet_unit()` into `client`'s wallet via the test
 /// faucet's bootstrap entry point.
 async fn issue_faucet_unit(client: &ClientHandleArc, amount: Amount) -> anyhow::Result<()> {
-    client.get_first_module::<FaucetClientModule>()?.mint(amount).await
+    client
+        .get_first_module::<FaucetClientModule>()?
+        .mint(amount)
+        .await
 }
 
 /// Funds `client` with both units and deposits into [`pool_id`], creating it
@@ -146,7 +149,11 @@ where
     I: IntoDynInstance<DynType = DynInput> + 'static,
 {
     let bundle: ClientInputBundle<I, NeverClientStateMachine> =
-        ClientInputBundle::new_no_sm(vec![ClientInput { input, keys, amounts }]);
+        ClientInputBundle::new_no_sm(vec![ClientInput {
+            input,
+            keys,
+            amounts,
+        }]);
     let dyn_bundle = bundle.into_dyn(instance_id);
     let tx_builder = TransactionBuilder::new().with_inputs(dyn_bundle);
     let operation_id = OperationId::new_random();
@@ -281,6 +288,25 @@ fn dust_free_sats(sats: u64) -> Amount {
     Amount::from_sats(sats.next_multiple_of(MIN_SAT_MULTIPLE))
 }
 
+/// Mirrors [`dust_free_sats`]'s reasoning, but for the receive side and in
+/// msats directly: floors `amount` down to the nearest multiple of
+/// `mintv2`'s smallest client-held note denomination (`2^9 = 512` msat,
+/// `fedimint-mintv2-common::config::client_denominations`, `9..42`). A swap's
+/// settled `dy` is produced by integer AMM curve math
+/// (`fedimint-amm-common::math::amount_out`) with no reason to land on that
+/// grid, so crediting a wallet with an unaligned `dy` in BITCOIN forfeits its
+/// remainder on reissue exactly as [`dust_free_sats`] describes for
+/// issuance — this is what a test asserting `balance_after - balance_before
+/// == dy` must account for whenever the swap settles into BITCOIN, since
+/// (unlike [`dust_free_sats`]'s callers) the test does not control `dy`
+/// directly.
+fn mintv2_representable_floor(amount: Amount) -> Amount {
+    const MINTV2_MIN_DENOMINATION_MSATS: u64 = 512;
+    Amount::from_msats(
+        (amount.msats / MINTV2_MIN_DENOMINATION_MSATS) * MINTV2_MIN_DENOMINATION_MSATS,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // 1. Deposit creates a pool; POOLS_ENDPOINT reflects reserves and shares.
 // ---------------------------------------------------------------------------
@@ -359,6 +385,63 @@ async fn swap_round_trip_settles_and_matches_the_prior_quote() -> anyhow::Result
 }
 
 // ---------------------------------------------------------------------------
+// 2b. A successful swap settling into real, mintv2-verified BITCOIN notes
+//     (review Important 2). Every other successful swap in this suite trades
+//     BITCOIN -> faucet_unit(), so `unit_out` is always the free-minting
+//     faucet's own unit and no successful Tx2 ever exercises mintv2's own
+//     `create_final_inputs_and_outputs`/`process_output` funding path. This
+//     is the one swap that does.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn swap_into_bitcoin_settles_real_mintv2_notes() -> anyhow::Result<()> {
+    let fed = fedimint_amm_tests::fixtures::new_federation().await;
+
+    let lp = fed.new_client().await;
+    create_pool(
+        &lp,
+        Amount::from_sats(10_000_000),
+        Amount::from_sats(10_000_000),
+    )
+    .await?;
+
+    let trader = fed.new_client().await;
+    let amount_in = Amount::from_sats(100_000);
+    issue_faucet_unit(&trader, amount_in).await?;
+    trader.wait_for_all_active_state_machines().await?;
+
+    let amm = trader.get_first_module::<AmmClientModule>()?;
+    let quote = amm
+        .quote(faucet_unit(), AmountUnit::BITCOIN, amount_in)
+        .await?;
+    ensure!(quote.amount_out > Amount::ZERO, "quote must be non-zero");
+
+    let balance_before = trader.get_balance_for_btc().await?;
+
+    let operation_id = amm
+        .swap(faucet_unit(), AmountUnit::BITCOIN, amount_in, 0)
+        .await?;
+    amm.await_swap(operation_id).await?;
+    trader.wait_for_all_active_state_machines().await?;
+
+    let balance_after = trader.get_balance_for_btc().await?;
+
+    // The settled `dy` is real, consensus-verified BITCOIN — reissued into
+    // spendable `mintv2` notes exactly like any other BTC receive — but only
+    // the portion of it aligned to mintv2's 512-msat denomination floor
+    // survives reissue (`mintv2_representable_floor`'s doc comment); asserting
+    // equality against the raw quote would be wrong for the same reason
+    // `dust_free_sats` exists on the issuance side.
+    assert_eq!(
+        balance_after - balance_before,
+        mintv2_representable_floor(quote.amount_out),
+        "the wallet must gain exactly the mintv2-representable portion of the settled dy"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // 4. `min_out` violation: Tx1 rejected, wallet unchanged.
 // ---------------------------------------------------------------------------
 
@@ -413,21 +496,26 @@ async fn min_out_violation_rejects_tx1_and_leaves_the_wallet_unchanged() -> anyh
     )
     .await?;
 
-    let result = trader
+    let error = trader
         .transaction_updates(operation_id)
         .await
         .await_tx_accepted(range.txid())
-        .await;
+        .await
+        .expect_err("a swap whose min_out no real pool could ever pay must be rejected");
     assert!(
-        result.is_err(),
-        "a swap whose min_out no real pool could ever pay must be rejected"
+        error.contains("min_out"),
+        "expected rejection to name AmmOutputError::SlippageExceeded (\"output below \
+         min_out, or shares below min_shares\"), got: {error}"
     );
 
     // The wallet's optimistic debit (made when the transaction was built)
     // must be refunded once the rejection is observed.
     trader.wait_for_all_active_state_machines().await?;
     let balance_after = trader.get_balance_for_unit(faucet_unit()).await?;
-    assert_eq!(balance_before, balance_after, "a rejected Tx1 must not change the wallet's balance");
+    assert_eq!(
+        balance_before, balance_after,
+        "a rejected Tx1 must not change the wallet's balance"
+    );
 
     Ok(())
 }
@@ -464,14 +552,16 @@ async fn claim_for_a_non_existent_balance_is_rejected() -> anyhow::Result<()> {
     )
     .await?;
 
-    let result = client
+    let error = client
         .transaction_updates(operation_id)
         .await
         .await_tx_accepted(range.txid())
-        .await;
+        .await
+        .expect_err("claiming a balance that was never credited must be rejected");
     assert!(
-        result.is_err(),
-        "claiming a balance that was never credited must be rejected (AmmInputError::NoSuchBalance)"
+        error.contains("no balance for this key and unit"),
+        "expected rejection to name AmmInputError::NoSuchBalance (\"no balance for this key \
+         and unit\"), got: {error}"
     );
 
     Ok(())
@@ -498,25 +588,57 @@ async fn withdraw_returns_both_legs_as_spendable_value() -> anyhow::Result<()> {
         .next()
         .expect("the deposit above created exactly one LP position");
 
+    // `lp` holds the pool's only position, so what it withdraws must be
+    // reflected exactly in how far the pool's own reserves fall — a 1-msat-
+    // per-leg withdraw would still pass `> before`, but not this.
+    let pools_before = amm.pools().await?;
+    let pool_before = pools_before
+        .iter()
+        .find(|p| p.pool == pool_id())
+        .expect("pool exists");
+    let reserve_lo_before_pool = pool_before.reserve_lo;
+    let reserve_hi_before_pool = pool_before.reserve_hi;
+
     let btc_before = lp.get_balance_for_btc().await?;
     let unit1_before = lp.get_balance_for_unit(faucet_unit()).await?;
 
-    let operation_id = amm
-        .withdraw(key.pool, key.owner_pk, record.shares)
-        .await?;
+    let operation_id = amm.withdraw(key.pool, key.owner_pk, record.shares).await?;
     amm.await_withdraw(operation_id).await?;
     lp.wait_for_all_active_state_machines().await?;
 
     let btc_after = lp.get_balance_for_btc().await?;
     let unit1_after = lp.get_balance_for_unit(faucet_unit()).await?;
 
-    assert!(
-        btc_after > btc_before,
-        "withdrawing the whole position must return spendable BITCOIN"
+    // `MINIMUM_LIQUIDITY` shares are permanently burned on pool creation
+    // (spec §7.1), so even the sole LP withdrawing every share it owns
+    // leaves a tiny residual behind — the pool still exists afterward, just
+    // with smaller reserves.
+    let pools_after = amm.pools().await?;
+    let pool_after = pools_after
+        .iter()
+        .find(|p| p.pool == pool_id())
+        .expect("MINIMUM_LIQUIDITY keeps the pool alive after a sole LP's full withdrawal");
+    let reserve_lo_after_pool = pool_after.reserve_lo;
+    let reserve_hi_after_pool = pool_after.reserve_hi;
+
+    // The BTC leg is reissued into spendable `mintv2` notes exactly like a
+    // swap settling into BITCOIN would (see
+    // `mintv2_representable_floor`'s doc comment): only the portion of what
+    // left the pool that is aligned to the 512-msat denomination floor
+    // survives reissue. `MINIMUM_LIQUIDITY`'s rounding makes the raw
+    // withdrawn amount essentially never land on that grid, so comparing
+    // against the unfloored reserve delta fails even though nothing is
+    // wrong — it must be floored the same way here.
+    assert_eq!(
+        btc_after - btc_before,
+        mintv2_representable_floor(reserve_lo_before_pool - reserve_lo_after_pool),
+        "the BITCOIN credited to the wallet must equal exactly the mintv2-representable \
+         portion of what left the pool's reserve_lo"
     );
-    assert!(
-        unit1_after > unit1_before,
-        "withdrawing the whole position must return spendable faucet_unit()"
+    assert_eq!(
+        unit1_after - unit1_before,
+        reserve_hi_before_pool - reserve_hi_after_pool,
+        "the faucet_unit() credited to the wallet must equal exactly what left the pool's reserve_hi"
     );
 
     Ok(())
@@ -653,7 +775,7 @@ async fn overpay_between_tx1_and_tx2_forfeits_only_the_surplus() -> anyhow::Resu
         vec![recipient],
         Amounts::new_custom(faucet_unit(), original_dy),
         faucet_instance_id,
-        fedimint_amm_tests::faucet::common::FaucetOutput {
+        fedimint_amm_tests::faucet::common::FaucetOutput::ReceiveV0 {
             amount: original_dy,
             pub_key: receiver.public_key(),
         },
@@ -800,9 +922,31 @@ async fn recovery_finds_and_claims_an_unclaimed_balance_and_an_lp_position() -> 
         "no claim should fail: {:?}",
         summary.claim_errors
     );
+
+    let recipient_pk = recipient_keypair.public_key();
+
+    // `summary.balances_found >= 1` alone is racy for exactly the reason
+    // `summary.balances_claimed` is (see below): `recover()`'s own scan runs
+    // against the live server, so if the background sweep already claimed
+    // this balance before that scan executed, the now-removed `Balance`
+    // record simply is not there to find, and `balances_found` legitimately
+    // reports `0` — not a sign recovery is broken. Distinguish the two cases
+    // the same way: a `0` here is only acceptable if the balance is
+    // independently confirmed gone (i.e. something — the scan or the
+    // background sweep, using only seed-derived material — must have found
+    // and claimed it already).
     assert!(
-        summary.balances_found >= 1,
-        "the unclaimed swap's Balance must be found by the recovery scan"
+        summary.balances_found >= 1
+            || amm
+                .api
+                .amm_balance(BalanceRequest {
+                    pubkey: recipient_pk,
+                    unit: faucet_unit(),
+                })
+                .await?
+                .is_none(),
+        "the unclaimed swap's Balance must be found by the recovery scan (or already claimed \
+         by a background sweep that itself only knows about it because an earlier scan found it)"
     );
 
     // `AmmClientModule::start`'s own background sweep and this explicit
@@ -822,7 +966,6 @@ async fn recovery_finds_and_claims_an_unclaimed_balance_and_an_lp_position() -> 
     // only material this seed can reconstruct), so poll for that directly
     // instead, bounded so a genuine regression still fails the test rather
     // than hanging.
-    let recipient_pk = recipient_keypair.public_key();
     let mut claimed = summary.balances_claimed >= 1;
     for _ in 0..50 {
         if claimed {
@@ -848,7 +991,16 @@ async fn recovery_finds_and_claims_an_unclaimed_balance_and_an_lp_position() -> 
 }
 
 // ---------------------------------------------------------------------------
-// 9. Concurrent clients on one seed: no key collision.
+// 9. Concurrent clients on one seed: smoke test against a real federation.
+//
+// `fedimint_amm_client::derivation::concurrent_clients_on_one_seed_do_not_
+// collide` (`derivation.rs:167-173`) already unit-tests the actual
+// non-collision property directly: 100 tweaks drawn from one seed via
+// `grind_tweak`, all distinct. This test does not add another proof of that
+// — two draws can't meaningfully raise confidence a 100-draw unit test
+// hasn't already established — it only exercises the same derivation
+// end-to-end against a real, consensus-driven federation with two real
+// client processes trading concurrently.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -884,12 +1036,16 @@ async fn concurrent_clients_on_one_seed_swap_without_colliding() -> anyhow::Resu
     issue_btc(&client_a, amount_in).await?;
     issue_btc(&client_b, amount_in).await?;
 
-    let pools_before = client_a.get_first_module::<AmmClientModule>()?.pools().await?;
-    let reserve_lo_before = pools_before
+    let pools_before = client_a
+        .get_first_module::<AmmClientModule>()?
+        .pools()
+        .await?;
+    let pool_before = pools_before
         .iter()
         .find(|p| p.pool == pool_id())
-        .expect("pool exists")
-        .reserve_lo;
+        .expect("pool exists");
+    let reserve_lo_before = pool_before.reserve_lo;
+    let reserve_hi_before = pool_before.reserve_hi;
 
     let amm_a = client_a.get_first_module::<AmmClientModule>()?;
     let amm_b = client_b.get_first_module::<AmmClientModule>()?;
@@ -908,32 +1064,85 @@ async fn concurrent_clients_on_one_seed_swap_without_colliding() -> anyhow::Resu
     // clients on one seed derive non-colliding recipient keys, not zero-slippage
     // pricing under concurrent load.
     let max_slippage_bps = 1_000;
-    let (op_a, op_b) = tokio::try_join!(
-        amm_a.swap(AmountUnit::BITCOIN, faucet_unit(), amount_in, max_slippage_bps),
-        amm_b.swap(AmountUnit::BITCOIN, faucet_unit(), amount_in, max_slippage_bps),
-    )?;
-    tokio::try_join!(amm_a.await_swap(op_a), amm_b.await_swap(op_b))?;
+
+    // Under a genuine `recipient_pk` collision the winner sweeps both
+    // `dy_a` and `dy_b`, and the loser's Tx2 — finding a balance that no
+    // longer matches what it expects — retries unboundedly, by design (spec
+    // §6.3: a `Balance` is permanently claimable, never abandoned). That
+    // would make the plain `try_join!` below hang forever rather than fail,
+    // so bound it: a timeout here is the collision failing loudly instead of
+    // the test suite stalling.
+    let collision_timeout = std::time::Duration::from_secs(60);
+    let (op_a, op_b) = tokio::time::timeout(collision_timeout, async {
+        tokio::try_join!(
+            amm_a.swap(
+                AmountUnit::BITCOIN,
+                faucet_unit(),
+                amount_in,
+                max_slippage_bps
+            ),
+            amm_b.swap(
+                AmountUnit::BITCOIN,
+                faucet_unit(),
+                amount_in,
+                max_slippage_bps
+            ),
+        )
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("Tx1 submission did not complete within {collision_timeout:?}")
+    })??;
+    tokio::time::timeout(collision_timeout, async {
+        tokio::try_join!(amm_a.await_swap(op_a), amm_b.await_swap(op_b))
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "swaps did not settle within {collision_timeout:?} — a real recipient-key \
+             collision manifests exactly this way (the loser's Tx2 retries unbounded), so \
+             treat this timeout as a collision, not a slow CI machine"
+        )
+    })??;
     client_a.wait_for_all_active_state_machines().await?;
     client_b.wait_for_all_active_state_machines().await?;
 
     let balance_a = client_a.get_balance_for_unit(faucet_unit()).await?;
     let balance_b = client_b.get_balance_for_unit(faucet_unit()).await?;
-    assert!(balance_a > Amount::ZERO, "client A's swap must have succeeded");
-    assert!(balance_b > Amount::ZERO, "client B's swap must have succeeded");
+    assert!(
+        balance_a > Amount::ZERO,
+        "client A's swap must have succeeded"
+    );
+    assert!(
+        balance_b > Amount::ZERO,
+        "client B's swap must have succeeded"
+    );
 
-    // Both trades landed independently — reserves moved by exactly both
-    // amounts, proving neither swap silently clobbered or was rejected on
-    // behalf of the other via a colliding key.
+    // Both trades landed independently. `reserve_lo` alone is not enough to
+    // rule out a collision: both Tx1s land regardless of `recipient_pk`, so
+    // `reserve_lo_after == before + 2 * amount_in` would hold even if the
+    // winner's Tx2 swept both `dy_a` and `dy_b` and the loser's Tx2 were
+    // still retrying. `reserve_hi` (the leg the swaps actually paid out from,
+    // via each client's own `recipient_pk`) is what distinguishes the two
+    // wallets genuinely having settled independently from one having
+    // silently absorbed the other's share.
     let pools_after = amm_a.pools().await?;
-    let reserve_lo_after = pools_after
+    let pool_after = pools_after
         .iter()
         .find(|p| p.pool == pool_id())
-        .expect("pool exists")
-        .reserve_lo;
+        .expect("pool exists");
+    let reserve_lo_after = pool_after.reserve_lo;
+    let reserve_hi_after = pool_after.reserve_hi;
     assert_eq!(
         reserve_lo_after,
         reserve_lo_before + amount_in + amount_in,
         "both swaps' BITCOIN legs must have landed"
+    );
+    assert_eq!(
+        reserve_hi_before - reserve_hi_after,
+        balance_a + balance_b,
+        "the faucet_unit() the pool paid out must equal exactly what both wallets received, \
+         not more collected by one wallet at the other's expense"
     );
 
     Ok(())
@@ -959,7 +1168,8 @@ async fn faucet_is_primary_for_its_unit_and_mintv2_for_bitcoin() -> anyhow::Resu
         .primary_module_for_unit(faucet_unit())
         .expect("a primary module for faucet_unit() must exist");
     ensure!(
-        Some(unit1_module_id) == client.get_first_instance(&fedimint_amm_tests::faucet::common::KIND),
+        Some(unit1_module_id)
+            == client.get_first_instance(&fedimint_amm_tests::faucet::common::KIND),
         "the test faucet must be primary for faucet_unit(), not dummy's wildcard match"
     );
 

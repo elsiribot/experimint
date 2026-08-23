@@ -24,8 +24,8 @@ pub mod db;
 mod input_sm;
 mod output_sm;
 
-use std::collections::BTreeMap;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fedimint_client_module::db::ClientModuleMigrationFn;
@@ -36,8 +36,8 @@ use fedimint_client_module::module::{
 };
 use fedimint_client_module::sm::{Context, DynState, ModuleNotifier, State, StateTransition};
 use fedimint_client_module::transaction::{
-    ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle, ClientOutputSM,
-    TransactionBuilder,
+    ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle,
+    ClientOutputSM, TransactionBuilder,
 };
 use fedimint_client_module::{DynGlobalClientContext, sm_enum_variant_translation};
 use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
@@ -53,7 +53,9 @@ use futures::StreamExt;
 use strum::IntoEnumIterator;
 use tokio::sync::watch;
 
-use crate::faucet::common::{FaucetCommonInit, FaucetInput, FaucetModuleTypes, FaucetOutput, faucet_unit};
+use crate::faucet::common::{
+    FaucetCommonInit, FaucetInput, FaucetModuleTypes, FaucetOutput, faucet_unit,
+};
 use db::{DbKeyPrefix, FaucetClientFundsKey, FaucetClientFundsPrefix};
 use input_sm::{FaucetInputSMCommon, FaucetInputSMState, FaucetInputStateMachine};
 use output_sm::{FaucetOutputSMCommon, FaucetOutputSMState, FaucetOutputStateMachine};
@@ -111,7 +113,8 @@ pub struct FaucetClientContext {
 
 impl std::fmt::Debug for FaucetClientContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FaucetClientContext").finish_non_exhaustive()
+        f.debug_struct("FaucetClientContext")
+            .finish_non_exhaustive()
     }
 }
 
@@ -248,7 +251,7 @@ impl ClientModule for FaucetClientModule {
                 let missing_output_amount = input_amount.saturating_sub(output_amount);
 
                 let output = ClientOutput {
-                    output: FaucetOutput {
+                    output: FaucetOutput::ReceiveV0 {
                         amount: missing_output_amount,
                         pub_key: self.key.public_key(),
                     },
@@ -337,10 +340,10 @@ impl FaucetClientModule {
     /// `issue_ecash` (`fedimint_dummy_client::DummyClientModule::
     /// create_input`).
     ///
-    /// Builds the mint output directly (bypassing
+    /// Builds a [`FaucetOutput::MintV0`] output directly (bypassing
     /// `create_final_inputs_and_outputs`) with `amounts: Amounts::ZERO`, for
-    /// the same reason `server.rs`'s `process_output` declares no backing:
-    /// if this call instead declared the real amount, `finalize_transaction`
+    /// the same reason `server.rs`'s `process_output` declares no backing for
+    /// that variant: if this call instead declared the real amount, `finalize_transaction`
     /// would see an apparent imbalance for `faucet_unit()` and re-enter this
     /// same module's own `create_final_inputs_and_outputs` to "fix" it —
     /// which would try to *spend* `amount` from a wallet that, before this
@@ -364,7 +367,7 @@ impl FaucetClientModule {
         let pub_key = self.key.public_key();
 
         let client_output = ClientOutput {
-            output: FaucetOutput { amount, pub_key },
+            output: FaucetOutput::MintV0 { amount, pub_key },
             amounts: Amounts::ZERO,
         };
 
@@ -392,7 +395,12 @@ impl FaucetClientModule {
             ));
 
         self.client_ctx
-            .finalize_and_submit_transaction(operation_id, "ammfaucet mint", move |_| (), tx_builder)
+            .finalize_and_submit_transaction(
+                operation_id,
+                "ammfaucet mint",
+                move |_| (),
+                tx_builder,
+            )
             .await?;
 
         let mut stream = self.notifier.subscribe(operation_id).await;

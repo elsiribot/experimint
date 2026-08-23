@@ -30,33 +30,45 @@
 //! The fix, verified against `fedimint-dummy-server`'s own audit
 //! (`DummyInputAuditKey`/`DummyOutputAuditKey`, `+asset`/`-liability`,
 //! `fedimint-dummy-server/src/lib.rs:237-256`): keep a **permanent**,
-//! never-decremented record of every amount ever minted
-//! ([`MintedAuditKey`], one row per `OutPoint`, reported as a **positive**
-//! item), separate from the **live**, mutable spendable balance
-//! ([`BalanceKey`], credited by [`FaucetOutput`] and debited by
-//! [`FaucetInput`], reported as a **negative** item). Immediately after a
-//! mint of `X`, the two cancel: `+X` (permanent) `- X` (still fully unspent)
-//! `= 0`. Once that `X` is spent via a [`FaucetInput`] to fund some other
-//! module's output (e.g. an `amm` `DepositV0` leg, which records its own new
-//! liability `-X` the moment the reserve grows), this module's own
-//! contribution becomes `+X` (permanent, unchanged) `- 0` (balance now empty)
-//! `= +X`, exactly offsetting the `-X` that appeared elsewhere. Net effect:
-//! zero, always, regardless of how much is minted or when it is spent — the
-//! same invariant spec §7.4/§9.1 describes for `amm` itself ("never compute a
+//! never-decremented record of every amount ever minted for free
+//! ([`MintedAuditKey`], one row per `OutPoint`, written only by
+//! [`FaucetOutput::MintV0`], reported as a **positive** item), separate from
+//! the **live**, mutable spendable balance ([`BalanceKey`], credited by
+//! either [`FaucetOutput`] variant and debited by [`FaucetInput`], reported
+//! as a **negative** item). Immediately after a mint of `X` via `MintV0`, the
+//! two cancel: `+X` (permanent) `- X` (still fully unspent) `= 0`. Once that
+//! `X` is spent via a [`FaucetInput`] to fund some other module's output
+//! (e.g. an `amm` `DepositV0` leg, which records its own new liability `-X`
+//! the moment the reserve grows), this module's own contribution becomes `+X`
+//! (permanent, unchanged) `- 0` (balance now empty) `= +X`, exactly
+//! offsetting the `-X` that appeared elsewhere.
+//!
+//! [`FaucetOutput::ReceiveV0`] — the ordinary receive/change output
+//! `create_final_inputs_and_outputs` builds — needs none of this: it declares
+//! its real amount to core (`Amounts::new_custom(faucet_unit(), amount)`), so
+//! by construction it only ever lands in a transaction whose matching input
+//! or other-module output already funds it (P1, spec §3.1). It writes **no**
+//! [`MintedAuditKey`] row; its `+amount` liability recorded by [`BalanceKey`]
+//! is exactly offset by the `-amount` (or equivalent) that the transaction's
+//! funding side records elsewhere, the same way any two-sided module balances
+//! under the audit. Net effect: zero, always, regardless of how much is
+//! minted via `MintV0` or when it is spent, and zero for every `ReceiveV0`
+//! credit too, since those are never free in the first place — the same
+//! invariant spec §7.4/§9.1 describes for `amm` itself ("never compute a
 //! value twice"; here, "never let a credit disappear from the books without
 //! either staying live or having been consumed by a matching liability
 //! elsewhere").
 //!
-//! This mirrors `fedimint-dummy-server` exactly in spirit — dummy's
-//! `DummyInput` is *itself* an unconditional, unchecked "mint from nothing"
-//! (`process_input` never checks a balance at all, see the pinned source),
-//! permanently recorded as an asset. The only structural difference is which
-//! side does the free minting: dummy's input creates from nothing (fine for
-//! dummy, since nothing else in that module is a checked, persisted, spendable
-//! ledger); this module's spec-mandated shape needs a genuinely
-//! debit-checked, persisted balance, so the free side has to be the output
-//! instead (P1, spec §3.1: "anything that creates a record must be an
-//! output"), with the audit design above making that safe.
+//! This mirrors `fedimint-dummy-server` exactly in spirit for the `MintV0`
+//! case — dummy's `DummyInput` is *itself* an unconditional, unchecked "mint
+//! from nothing" (`process_input` never checks a balance at all, see the
+//! pinned source), permanently recorded as an asset. The only structural
+//! difference is which side does the free minting: dummy's input creates
+//! from nothing (fine for dummy, since nothing else in that module is a
+//! checked, persisted, spendable ledger); this module's spec-mandated shape
+//! needs a genuinely debit-checked, persisted balance, so the free side has
+//! to be an output instead (P1, spec §3.1: "anything that creates a record
+//! must be an output"), with the audit design above making that safe.
 
 pub mod db;
 
@@ -74,7 +86,9 @@ use fedimint_core::module::{
     Amounts, ApiEndpoint, CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
     TransactionItemAmounts,
 };
-use fedimint_core::{Amount, InPoint, OutPoint, PeerId, plugin_types_trait_impl_config, push_db_pair_items};
+use fedimint_core::{
+    Amount, InPoint, OutPoint, PeerId, plugin_types_trait_impl_config, push_db_pair_items,
+};
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::migration::ServerModuleDbMigrationFn;
 use fedimint_server_core::{
@@ -285,34 +299,51 @@ impl ServerModule for Faucet {
         })
     }
 
-    /// Unconditionally credits `output.pub_key`'s stored balance by
-    /// `output.amount` — this IS the faucet (see [`FaucetOutput`]'s doc
-    /// comment). Declares **no** backing to core: see this file's module doc
-    /// comment for why that stays solvent under the global audit assert.
+    /// Unconditionally credits `pub_key`'s stored balance by `amount` — this
+    /// IS the faucet (see [`FaucetOutput`]'s doc comment). [`FaucetOutput::
+    /// MintV0`] declares **no** backing to core and writes a permanent
+    /// [`MintedAuditKey`] row; [`FaucetOutput::ReceiveV0`] declares real
+    /// backing and writes none. See this file's module doc comment for why
+    /// both stay solvent under the global audit assert.
     async fn process_output<'a, 'b>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'b>,
         output: &'a FaucetOutput,
         out_point: OutPoint,
     ) -> Result<TransactionItemAmounts, FaucetOutputError> {
-        let key = BalanceKey(output.pub_key);
+        let (amount, pub_key, declared) = match output {
+            FaucetOutput::MintV0 { amount, pub_key } => (*amount, *pub_key, Amounts::ZERO),
+            FaucetOutput::ReceiveV0 { amount, pub_key } => (
+                *amount,
+                *pub_key,
+                Amounts::new_custom(faucet_unit(), *amount),
+            ),
+            FaucetOutput::Default { .. } => return Err(FaucetOutputError::UnknownVariant),
+        };
+
+        let key = BalanceKey(pub_key);
         let balance = dbtx.get_value(&key).await.unwrap_or(Amount::ZERO);
 
         let credited = balance
-            .checked_add(output.amount)
+            .checked_add(amount)
             .ok_or(FaucetOutputError::BalanceOverflow)?;
 
-        // Permanent record first (see module doc comment): both writes must
-        // land together, but if only one could, recording the permanent
-        // asset without the live balance would merely make this module look
-        // solvent-and-then-some, never insolvent — the safe direction to err
-        // in, though in practice `dbtx` here commits both or neither.
-        dbtx.insert_entry(&MintedAuditKey(out_point), &output.amount)
-            .await;
+        // Permanent record first (see module doc comment), `MintV0` only:
+        // both writes must land together, but if only one could, recording
+        // the permanent asset without the live balance would merely make
+        // this module look solvent-and-then-some, never insolvent — the safe
+        // direction to err in, though in practice `dbtx` here commits both or
+        // neither. `ReceiveV0` never writes this table at all — it declares
+        // real backing instead, so adding a permanent unbacked-asset row for
+        // it would double-count the same value the funding side already
+        // accounts for.
+        if let FaucetOutput::MintV0 { .. } = output {
+            dbtx.insert_entry(&MintedAuditKey(out_point), &amount).await;
+        }
         dbtx.insert_entry(&key, &credited).await;
 
         Ok(TransactionItemAmounts {
-            amounts: Amounts::ZERO,
+            amounts: declared,
             fees: Amounts::ZERO,
         })
     }
@@ -338,9 +369,12 @@ impl ServerModule for Faucet {
         module_instance_id: ModuleInstanceId,
     ) {
         audit
-            .add_items(dbtx, module_instance_id, &MintedAuditPrefix, |_, v: Amount| {
-                v.msats as i64
-            })
+            .add_items(
+                dbtx,
+                module_instance_id,
+                &MintedAuditPrefix,
+                |_, v: Amount| v.msats as i64,
+            )
             .await;
         audit
             .add_items(dbtx, module_instance_id, &BalancePrefix, |_, v: Amount| {

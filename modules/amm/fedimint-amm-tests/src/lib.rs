@@ -5,8 +5,9 @@
 //! §3.2) — see `faucet`'s module doc comment for why it exists and why it
 //! must never be linked into a real federation.
 //!
-//! `fixtures` builds the three-module `Fixtures` (`mintv2` + `faucet` +
-//! `amm`) the integration tests in `tests/` share.
+//! `fixtures` builds the four-module `Fixtures` (`mintv2`, `faucet`, `amm`,
+//! `dummy`) the integration tests in `tests/` share — see `fixtures`'s own
+//! doc comment for why `dummy` is there too.
 
 pub mod faucet;
 pub mod fixtures;

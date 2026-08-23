@@ -13,8 +13,21 @@
 //! federation gets BITCOIN from Lightning or an on-chain peg-in, neither of
 //! which `fedimint-testing`'s in-process federation runs. `dummy`'s presence
 //! here has nothing to do with the "second unit" problem `faucet` solves —
-//! it only ever mints `AmountUnit::BITCOIN`, and is not registered as
-//! primary for anything.
+//! it only ever mints `AmountUnit::BITCOIN`.
+//!
+//! `dummy` *is* registered as a primary-module candidate for every unit —
+//! `DummyClientInit::supports_being_primary` returns `PrimaryModuleSupport::
+//! Any { priority: LOW }` (`fedimint-dummy-client/src/lib.rs:154-158`), a
+//! wildcard match at the lowest priority. It never actually wins that role
+//! here, though: `mintv2` and `faucet` both register a `Selected` match for
+//! their own unit at the same `LOW` priority, and
+//! `ClientBuilder::primary_modules_for_unit` orders wildcard candidates after
+//! specific ones within a priority tier (`fedimint-client/src/client.rs`'s
+//! own comment: "within same priority, wildcard matches come last") — see
+//! this crate's own
+//! `faucet_is_primary_for_its_unit_and_mintv2_for_bitcoin` test, which
+//! asserts exactly this ordering rather than dummy's absence from
+//! consideration.
 
 use fedimint_amm_client::AmmClientInit;
 use fedimint_amm_server::AmmInit;
@@ -44,10 +57,22 @@ pub fn fixtures() -> Fixtures {
 /// over-funds by a margin before spending exactly a smaller, round amount.
 /// This module's tests instead disable the fee outright
 /// (`FederationTestBuilder::disable_mint_fees`), so a mint/deposit/swap of
-/// exactly `X` really leaves the wallet and the pool holding exactly `X` —
-/// the arithmetic these tests assert on. This affects only `mintv2`'s BTC
-/// leg; the test faucet charges no fee either way (spec-mandated: "no
-/// cryptography" — there is nothing to a base fee here to disable).
+/// exactly `X` sats charges no *fee* on the BTC leg. That alone does not
+/// make `X` leave the wallet and the pool holding exactly `X`, though:
+/// `mintv2`'s client-held notes still bottom out at a 512-msat denomination
+/// floor regardless of this setting
+/// (`fedimint-mintv2-common::config::client_denominations`, `9..42`), so an
+/// `X` not aligned to that grid silently forfeits its remainder on issuance
+/// or reissue independent of any fee — see the `dust_free_sats` helper in
+/// `tests/tests.rs`, which exists precisely to keep every BTC amount these
+/// tests assert on exactly representable. This affects only `mintv2`'s BTC
+/// leg; the test faucet charges no fee either way and has no
+/// note-denomination concept at all (spec-mandated: "no cryptography" —
+/// balances are a plain per-key `Amount`, not a set of fixed-size notes).
 pub async fn new_federation() -> FederationTest {
-    fixtures().new_fed_builder(0).disable_mint_fees().build().await
+    fixtures()
+        .new_fed_builder(0)
+        .disable_mint_fees()
+        .build()
+        .await
 }

@@ -29,14 +29,20 @@ pub struct BalanceKey(pub PublicKey);
 #[derive(Debug, Encodable, Decodable)]
 pub struct BalancePrefix;
 
-impl_db_record!(key = BalanceKey, value = Amount, db_prefix = DbKeyPrefix::Balance,);
+impl_db_record!(
+    key = BalanceKey,
+    value = Amount,
+    db_prefix = DbKeyPrefix::Balance,
+);
 impl_db_lookup!(key = BalanceKey, query_prefix = BalancePrefix);
 
 /// A permanent, per-`OutPoint` record of every amount this module has ever
-/// minted via [`super::FaucetOutput`]. Never removed or decremented — see
-/// `server.rs`'s module doc comment for why this table, reported as a
-/// positive audit item, is what keeps the global balance-sheet audit
-/// non-negative despite this module creating value from nothing.
+/// minted for free via [`super::FaucetOutput::MintV0`] — never written for
+/// [`super::FaucetOutput::ReceiveV0`], which declares real backing to core
+/// instead. Never removed or decremented — see `server.rs`'s module doc
+/// comment for why this table, reported as a positive audit item, is what
+/// keeps the global balance-sheet audit non-negative despite `MintV0`
+/// creating value from nothing.
 #[derive(Debug, Clone, Copy, Encodable, Decodable, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct MintedAuditKey(pub OutPoint);
 

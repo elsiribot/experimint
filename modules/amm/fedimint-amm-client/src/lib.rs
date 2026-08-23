@@ -290,6 +290,15 @@ pub fn matches_own_key(
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct AmmRecoverySummary {
     pub balances_found: usize,
+    /// Count of balances *this call* actually claimed. Silently under-reports
+    /// relative to the number of balances that existed and are now gone: on
+    /// the benign race `claim_pending_balances` documents (another claimant —
+    /// this module's own background sweep, or a second client process on the
+    /// same seed — lands its own `ClaimBalanceV0` first), the pending row is
+    /// simply dropped without incrementing this counter. Do not use this
+    /// field to assert "N balances were claimable"; poll the relevant
+    /// `BALANCE_ENDPOINT` entry for absence instead, as
+    /// `fedimint-amm-tests/tests/tests.rs`'s recovery test does.
     pub balances_claimed: usize,
     pub positions_restored: usize,
     /// One entry per balance whose claim failed, formatted for logging/

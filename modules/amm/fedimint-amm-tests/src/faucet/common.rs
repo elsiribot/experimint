@@ -59,24 +59,51 @@ pub struct FaucetInput {
 }
 
 /// Credits `amount` to `pub_key`'s server-side balance (spec-mandated shape:
-/// "an output that credits a pubkey-keyed balance"), unconditionally — this
-/// IS the faucet: anyone may mint any amount to any key for free. Safe only
-/// because this module is test-only and never runs in a real federation.
+/// "an output that credits a pubkey-keyed balance"). Split into two variants
+/// (fix pass: review Important 1) so this module tells core the truth about
+/// how much value each output really represents, rather than always
+/// declaring nothing:
 ///
-/// Declares **no** backing to core (`TransactionItemAmounts::amounts` is
-/// always empty — see `server.rs`'s `process_output`), exactly mirroring how
-/// `fedimint-amm-server`'s own `SwapV0` credits a `Balance` without
-/// declaring `unit_out` (spec §7.4, §9.1): the credit is real (written to
-/// this module's own database) but invisible to core's per-unit funding
-/// check, which is what makes minting from nothing possible in the first
-/// place — a real input can't be conjured for a mint transaction that has
-/// nothing to spend. See `server.rs`'s module doc comment for why this stays
-/// solvent under the global audit assert (`fedimint-server/src/consensus/
-/// engine.rs:1058-1067`) despite creating value with no backing input.
+/// - [`FaucetOutput::MintV0`] is the deliberate free-minting bootstrap path —
+///   only ever built by [`crate::faucet::client::FaucetClientModule::mint`],
+///   this module's one "give me money" entry point. It credits `amount` to
+///   `pub_key` unconditionally, for free: this IS the faucet, safe only
+///   because the module is test-only and never runs in a real federation.
+///   Declares **no** backing to core (`TransactionItemAmounts::amounts` is
+///   always empty — see `server.rs`'s `process_output`): there genuinely is
+///   nothing real behind it, since it is the one place this module invents
+///   value from nothing rather than moving value already accounted for
+///   elsewhere in the same transaction. See `server.rs`'s module doc comment
+///   for why that stays solvent under the global audit assert
+///   (`fedimint-server/src/consensus/engine.rs:1058-1067`) despite creating
+///   value with no backing input.
+/// - [`FaucetOutput::ReceiveV0`] is what
+///   [`crate::faucet::client::FaucetClientModule::create_final_inputs_and_outputs`]
+///   builds for the ordinary receive/change branch — the credit a swap's
+///   `unit_out` leg lands in, or the change a spend leaves behind. It also
+///   credits `amount` to `pub_key`, but declares real backing to core
+///   (`Amounts::new_custom(faucet_unit(), amount)`), exactly like a `mintv2`
+///   receive output: by construction it only ever appears in a transaction
+///   whose matching input or other-module output funds it, so declaring the
+///   real amount is both truthful and required — see `server.rs`'s module doc
+///   comment for why the funding check needs this to be true for the AMM
+///   integration tests to actually exercise a real `mintv2`-equivalent
+///   funding check on this unit.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub struct FaucetOutput {
-    pub amount: Amount,
-    pub pub_key: PublicKey,
+pub enum FaucetOutput {
+    MintV0 {
+        amount: Amount,
+        pub_key: PublicKey,
+    },
+    ReceiveV0 {
+        amount: Amount,
+        pub_key: PublicKey,
+    },
+    #[encodable_default]
+    Default {
+        variant: u64,
+        bytes: Vec<u8>,
+    },
 }
 
 /// No information beyond acceptance is needed by the client — mirrors
@@ -148,7 +175,15 @@ impl fmt::Display for FaucetInput {
 
 impl fmt::Display for FaucetOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FaucetOutput {}", self.amount)
+        match self {
+            FaucetOutput::MintV0 { amount, .. } => write!(f, "FaucetOutput::MintV0 {amount}"),
+            FaucetOutput::ReceiveV0 { amount, .. } => write!(f, "FaucetOutput::ReceiveV0 {amount}"),
+            FaucetOutput::Default { variant, bytes } => write!(
+                f,
+                "FaucetOutput::Default variant={variant} bytes_len={}",
+                bytes.len()
+            ),
+        }
     }
 }
 
