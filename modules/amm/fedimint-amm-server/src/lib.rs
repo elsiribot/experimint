@@ -395,26 +395,45 @@ const MAX_RECOVERY_CURSOR_LEN: usize = 256;
 /// usable for these composite keys and `raw_find_by_range`'s untyped byte
 /// range is used instead.
 ///
-/// `start` is `cursor` — the exact bytes the previous page returned as
-/// `next_cursor`, themselves exactly what `DatabaseKeyPrefix::to_bytes`
-/// produces for a key of this table — with one extra `0x00` byte appended.
-/// Appending a byte to `X` always sorts strictly after `X` in
-/// byte-lexicographic order (a string that is a proper prefix of another
-/// always sorts first), and there is no real key strictly between the two:
-/// resuming here excludes exactly the cursor's own row and nothing else,
-/// independent of whether this table's key encoding is fixed- or
-/// variable-length. `None` starts from the first key in the table.
+/// `start` is normally `cursor` — the exact bytes the previous page
+/// returned as `next_cursor`, themselves exactly what
+/// `DatabaseKeyPrefix::to_bytes` produces for a key of this table — with
+/// one extra `0x00` byte appended. Appending a byte to `X` always sorts
+/// strictly after `X` in byte-lexicographic order (a string that is a
+/// proper prefix of another always sorts first), and there is no real key
+/// strictly between the two: resuming here excludes exactly the cursor's
+/// own row and nothing else, independent of whether this table's key
+/// encoding is fixed- or variable-length. `None` starts from the first key
+/// in the table.
+///
+/// BLOCKING SECURITY FIX: `cursor` is unauthenticated, attacker-controlled
+/// input — it is NOT guaranteed to already lie inside `[db_prefix,
+/// db_prefix + 1)`, and a prior version of this function trusted it
+/// completely. `cursor = Some(vec![])` produced `start = [0x00]`, below
+/// every real `DbKeyPrefix` (`Pool` 0x01, `LpPosition` 0x02, `Balance`
+/// 0x03), so the scan swept in rows from a lower-prefixed table; those
+/// then failed to decode as this table's key type and panicked the caller's
+/// `.expect()` on a zero-byte, unauthenticated request. `start` is
+/// therefore always clamped into `[prefix_start, prefix_end]` here,
+/// regardless of what `cursor` contains, so the returned range can never
+/// reach outside this table no matter what the client sends — the bounds
+/// come from `db_prefix` (server-controlled), never from `cursor` alone.
+/// Both `RECOVERY_ENDPOINT` handlers additionally reject a cursor that
+/// fails to decode as this table's own key type before ever calling this
+/// function, so in practice this clamp is defense in depth rather than the
+/// only thing standing between a bad cursor and a cross-table scan.
 fn recovery_range(db_prefix: u8, cursor: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
+    let prefix_start = vec![db_prefix];
+    let prefix_end = vec![db_prefix + 1];
     let start = match cursor {
         Some(last_key_bytes) => {
-            let mut start = last_key_bytes.to_vec();
-            start.push(0);
-            start
+            let mut candidate = last_key_bytes.to_vec();
+            candidate.push(0);
+            candidate.clamp(prefix_start.clone(), prefix_end.clone())
         }
-        None => vec![db_prefix],
+        None => prefix_start,
     };
-    let end = vec![db_prefix + 1];
-    (start, end)
+    (start, prefix_end)
 }
 
 /// AMM module.
@@ -1022,41 +1041,77 @@ impl ServerModule for Amm {
                     // `fedimint-rocksdb/src/lib.rs`) at the pinned rev —
                     // neither iterates from the start of the table, so
                     // per-request work is O(limit), not O(cursor).
+                    //
+                    // BLOCKING SECURITY FIX: `cursor` is unauthenticated
+                    // input and is validated BEFORE it is ever used as a
+                    // scan boundary — a cursor that does not decode as a
+                    // `BalanceKey` (garbage, an empty cursor, or one
+                    // recycled from `LP_RECOVERY_ENDPOINT`) is rejected
+                    // outright, rather than trusted to already lie inside
+                    // this table's byte range. `recovery_range` also
+                    // clamps the range server-side as defense in depth (see
+                    // its doc comment), but this check is what turns a bad
+                    // cursor into a clean 400 instead of a scan that could
+                    // otherwise return a wrong (if not out-of-range) page.
+                    let decoders = dbtx.decoders().clone();
+                    if let Some(cursor) = request.cursor.as_deref() {
+                        <BalanceKey as fedimint_core::db::DatabaseKey>::from_bytes(
+                            cursor, &decoders,
+                        )
+                        .map_err(|e| {
+                            ApiError::bad_request(format!("malformed recovery cursor: {e}"))
+                        })?;
+                    }
                     let (start, end) =
                         recovery_range(DbKeyPrefix::Balance as u8, request.cursor.as_deref());
-                    let decoders = dbtx.decoders().clone();
                     // Keeps the raw `key_bytes` alongside the decoded value,
                     // rather than decoding and later re-encoding a
                     // `BalanceKey` for `next_cursor`: `key_bytes` already
                     // *is* what `to_bytes()` would produce, since it came
                     // straight off the wire from `raw_find_by_range`.
-                    let mut rows: Vec<(Vec<u8>, BalanceKey, BalanceEntry)> = dbtx
+                    let raw_rows: Vec<(Vec<u8>, Vec<u8>)> = dbtx
                         .raw_find_by_range(start.as_slice()..end.as_slice())
-                        .await
-                        .expect("Unrecoverable error occurred while listing entries from the database")
+                        .await?
                         .take(limit + 1)
-                        .map(|(key_bytes, value_bytes)| {
-                            let key =
-                                <BalanceKey as fedimint_core::db::DatabaseKey>::from_bytes(
-                                    &key_bytes, &decoders,
-                                )
-                                .expect(
-                                    "raw_find_by_range over the Balance prefix only yields \
-                                     bytes this module itself wrote as BalanceKey",
-                                );
-                            let value =
-                                <BalanceEntry as fedimint_core::db::DatabaseValue>::from_bytes(
-                                    &value_bytes,
-                                    &decoders,
-                                )
-                                .expect(
-                                    "raw_find_by_range over the Balance prefix only yields \
-                                     bytes this module itself wrote as BalanceEntry",
-                                );
-                            (key_bytes, key, value)
-                        })
                         .collect()
                         .await;
+
+                    // Every row here came from the range above, which is
+                    // now clamped to the `Balance` prefix regardless of
+                    // what `cursor` was, so in the absence of a server bug
+                    // every row really was written by this module as a
+                    // `BalanceKey` -> `BalanceEntry` pair. A decode failure
+                    // is therefore a server-side invariant violation, not
+                    // something a client can trigger — but per this
+                    // module's hard rule against panicking on anything
+                    // reachable from a request, it still surfaces as a
+                    // clean API error rather than an `.expect()` panic (a
+                    // remote, unauthenticated caller reaching exactly this
+                    // panic was the blocking bug this code replaces).
+                    let mut rows: Vec<(Vec<u8>, BalanceKey, BalanceEntry)> =
+                        Vec::with_capacity(raw_rows.len());
+                    for (key_bytes, value_bytes) in raw_rows {
+                        let key =
+                            <BalanceKey as fedimint_core::db::DatabaseKey>::from_bytes(
+                                &key_bytes, &decoders,
+                            )
+                            .map_err(|e| {
+                                ApiError::server_error(format!(
+                                    "corrupt Balance key in database: {e}"
+                                ))
+                            })?;
+                        let value =
+                            <BalanceEntry as fedimint_core::db::DatabaseValue>::from_bytes(
+                                &value_bytes,
+                                &decoders,
+                            )
+                            .map_err(|e| {
+                                ApiError::server_error(format!(
+                                    "corrupt Balance value in database: {e}"
+                                ))
+                            })?;
+                        rows.push((key_bytes, key, value));
+                    }
 
                     let has_more = rows.len() > limit;
                     if has_more {
@@ -1095,37 +1150,52 @@ impl ServerModule for Amm {
 
                     // See `BALANCE_RECOVERY_ENDPOINT` above — same keyset
                     // cursor, mirrored for `LpPosition` (fix pass 2,
-                    // Important 2 and Important 3).
+                    // Important 2 and Important 3; blocking security fix:
+                    // the cursor is validated before use and every `.expect`
+                    // below is a clean API error instead, for the exact
+                    // same reasons as `BALANCE_RECOVERY_ENDPOINT`).
+                    let decoders = dbtx.decoders().clone();
+                    if let Some(cursor) = request.cursor.as_deref() {
+                        <LpPositionKey as fedimint_core::db::DatabaseKey>::from_bytes(
+                            cursor, &decoders,
+                        )
+                        .map_err(|e| {
+                            ApiError::bad_request(format!("malformed recovery cursor: {e}"))
+                        })?;
+                    }
                     let (start, end) =
                         recovery_range(DbKeyPrefix::LpPosition as u8, request.cursor.as_deref());
-                    let decoders = dbtx.decoders().clone();
-                    let mut rows: Vec<(Vec<u8>, LpPositionKey, LpPosition)> = dbtx
+                    let raw_rows: Vec<(Vec<u8>, Vec<u8>)> = dbtx
                         .raw_find_by_range(start.as_slice()..end.as_slice())
-                        .await
-                        .expect("Unrecoverable error occurred while listing entries from the database")
+                        .await?
                         .take(limit + 1)
-                        .map(|(key_bytes, value_bytes)| {
-                            let key =
-                                <LpPositionKey as fedimint_core::db::DatabaseKey>::from_bytes(
-                                    &key_bytes, &decoders,
-                                )
-                                .expect(
-                                    "raw_find_by_range over the LpPosition prefix only yields \
-                                     bytes this module itself wrote as LpPositionKey",
-                                );
-                            let value =
-                                <LpPosition as fedimint_core::db::DatabaseValue>::from_bytes(
-                                    &value_bytes,
-                                    &decoders,
-                                )
-                                .expect(
-                                    "raw_find_by_range over the LpPosition prefix only yields \
-                                     bytes this module itself wrote as LpPosition",
-                                );
-                            (key_bytes, key, value)
-                        })
                         .collect()
                         .await;
+
+                    let mut rows: Vec<(Vec<u8>, LpPositionKey, LpPosition)> =
+                        Vec::with_capacity(raw_rows.len());
+                    for (key_bytes, value_bytes) in raw_rows {
+                        let key =
+                            <LpPositionKey as fedimint_core::db::DatabaseKey>::from_bytes(
+                                &key_bytes, &decoders,
+                            )
+                            .map_err(|e| {
+                                ApiError::server_error(format!(
+                                    "corrupt LpPosition key in database: {e}"
+                                ))
+                            })?;
+                        let value =
+                            <LpPosition as fedimint_core::db::DatabaseValue>::from_bytes(
+                                &value_bytes,
+                                &decoders,
+                            )
+                            .map_err(|e| {
+                                ApiError::server_error(format!(
+                                    "corrupt LpPosition value in database: {e}"
+                                ))
+                            })?;
+                        rows.push((key_bytes, key, value));
+                    }
 
                     let has_more = rows.len() > limit;
                     if has_more {

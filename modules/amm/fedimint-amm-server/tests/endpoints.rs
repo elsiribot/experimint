@@ -601,3 +601,353 @@ async fn lp_recovery_paginates_every_row_exactly_once() {
     collected_pubkeys.sort();
     assert_eq!(collected_pubkeys, expected_pubkeys);
 }
+
+/// BLOCKING bug: an unauthenticated `cursor` used to be trusted to already
+/// lie inside the endpoint's own `DbKeyPrefix` byte range. It never was —
+/// `cursor` is exactly what the client sends on a recovery request, no
+/// authentication required — so a cursor of `vec![]`, one from the OTHER
+/// recovery endpoint, or one below/above/outside this table's prefix swept
+/// `raw_find_by_range` into a different table's rows (or an inverted
+/// range) and panicked the handler on `.expect()`/the range assertion. Each
+/// case below is reproduced against **both** recovery endpoints and must
+/// fail against current (pre-fix) code — as an internal `.expect()` panic
+/// for four of the five, and as a wrong-but-not-crashing empty response for
+/// the fifth (`..._cursor_above_prefix`; see its doc comment). Post-fix
+/// every one of them must come back as a clean `Err(ApiError)`, never a
+/// panic and never silently-wrong data.
+mod recovery_cursor_hardening {
+    use super::*;
+
+    fn pool_id() -> PoolId {
+        pool01()
+    }
+
+    /// Seeds one row of each table so a wrongly-unclamped scan has
+    /// something from a lower prefix to trip over: a `Pool` row (prefix
+    /// `0x01`) and an `LpPosition` row (prefix `0x02`). `BALANCE_RECOVERY`
+    /// tests need both lower prefixes covered; `LP_RECOVERY` tests need the
+    /// `Pool` row.
+    async fn seed_lower_prefix_rows(db: &Database) {
+        let pool = pool_id();
+        let mut dbtx = db.begin_transaction().await;
+        dbtx.insert_new_entry(
+            &PoolKey(pool),
+            &Pool {
+                reserve_lo: Amount::from_msats(1_000_000),
+                reserve_hi: Amount::from_msats(1_000_000),
+                total_shares: 1_000_000,
+            },
+        )
+        .await;
+        dbtx.insert_new_entry(
+            &LpPositionKey {
+                pool,
+                owner: test_owner_pubkey(),
+            },
+            &LpPosition {
+                shares: 1,
+                tweak: [0u8; 16],
+            },
+        )
+        .await;
+        dbtx.commit_tx().await;
+    }
+
+    fn test_owner_pubkey() -> fedimint_core::secp256k1::PublicKey {
+        Keypair::from_seckey_slice(SECP256K1, &[9u8; 32])
+            .expect("nonzero bytes are a valid secret key")
+            .public_key()
+    }
+
+    /// `cursor = Some(vec![])`: pre-fix, `start = [0x00]`, below every real
+    /// `DbKeyPrefix` (`Pool` 0x01, `LpPosition` 0x02, `Balance` 0x03), so
+    /// the scan sweeps in every table. Against `BALANCE_RECOVERY_ENDPOINT`
+    /// the first foreign row it hits (the seeded `Pool` row) fails to
+    /// decode as `BalanceKey` and panics.
+    #[tokio::test]
+    async fn balance_recovery_empty_cursor() {
+        let db = db();
+        seed_lower_prefix_rows(&db).await;
+        let module = amm();
+        let result: Result<BalanceRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            BALANCE_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an empty cursor must be rejected cleanly, not accepted"
+        );
+    }
+
+    /// `cursor` below the endpoint's own prefix: for `BALANCE_RECOVERY`
+    /// (prefix `0x03`), a one-byte cursor equal to `LpPosition`'s prefix
+    /// (`0x02`) makes `start = [0x02, 0x00]`, which still sits below
+    /// `Balance` and sweeps in the seeded `LpPosition` row, which fails to
+    /// decode as `BalanceKey`.
+    #[tokio::test]
+    async fn balance_recovery_cursor_below_prefix() {
+        let db = db();
+        seed_lower_prefix_rows(&db).await;
+        let module = amm();
+        let result: Result<BalanceRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            BALANCE_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0x02]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a cursor below this endpoint's own prefix must be rejected cleanly"
+        );
+    }
+
+    /// `cursor` above every real prefix (`0xFF`): `start = [0xFF, 0x00]`
+    /// sorts above `end = [0x04]` for `BALANCE_RECOVERY`, an inverted
+    /// range. Confirmed this does NOT panic against `MemDatabase`
+    /// specifically — its backing `imbl::OrdMap::range` tolerates an
+    /// inverted bound and just yields nothing, unlike
+    /// `std::collections::BTreeMap::range`, which panics on the identical
+    /// input once the map is non-empty (checked directly, outside this
+    /// module). Pre-fix this endpoint therefore silently returns an empty
+    /// page for a client-supplied cursor that makes no sense, instead of
+    /// rejecting it — still a real defect (wrong behaviour, masking a
+    /// malformed request as "no more results"), just not the crash the
+    /// other cases below reproduce. Included for completeness of the five
+    /// cursor-hardening cases; a real RocksDB backend's behaviour on an
+    /// inverted range is untested here.
+    #[tokio::test]
+    async fn balance_recovery_cursor_above_prefix() {
+        let db = db();
+        {
+            let mut dbtx = db.begin_transaction().await;
+            dbtx.insert_new_entry(
+                &BalanceKey {
+                    owner: test_owner_pubkey(),
+                    unit: unit(0),
+                },
+                &BalanceEntry {
+                    amount: Amount::from_msats(1),
+                    tweak: [0u8; 16],
+                },
+            )
+            .await;
+            dbtx.commit_tx().await;
+        }
+        let module = amm();
+        let result: Result<BalanceRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            BALANCE_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0xFF]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a cursor above every real prefix must be rejected cleanly, not panic the range scan"
+        );
+    }
+
+    /// Multi-byte garbage that is not any real cursor this module ever
+    /// handed out, chosen (like the empty-cursor case) to sort below every
+    /// real prefix so it sweeps in the seeded `Pool`/`LpPosition` rows.
+    #[tokio::test]
+    async fn balance_recovery_garbage_cursor() {
+        let db = db();
+        seed_lower_prefix_rows(&db).await;
+        let module = amm();
+        let result: Result<BalanceRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            BALANCE_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0x00, 0xDE, 0xAD, 0xBE, 0xEF]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "garbage cursor bytes must be rejected cleanly, not panic"
+        );
+    }
+
+    /// A cursor over `MAX_RECOVERY_CURSOR_LEN` (256) bytes. Unlike the four
+    /// cases above, this is already rejected pre-fix (the length check runs
+    /// before any range scan) — included for completeness of the "each of
+    /// the five" cursor-hardening cases, not because it demonstrates the
+    /// blocking bug.
+    #[tokio::test]
+    async fn balance_recovery_over_long_cursor() {
+        let db = db();
+        let module = amm();
+        let result: Result<BalanceRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            BALANCE_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0u8; 257]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an over-long cursor must be rejected cleanly"
+        );
+    }
+
+    // --- Same five, mirrored against LP_RECOVERY_ENDPOINT (prefix 0x02).
+    // The only real row available at a LOWER prefix is `Pool` (0x01), so
+    // these seed just that.
+
+    async fn seed_pool_row(db: &Database) {
+        let mut dbtx = db.begin_transaction().await;
+        dbtx.insert_new_entry(
+            &PoolKey(pool_id()),
+            &Pool {
+                reserve_lo: Amount::from_msats(1_000_000),
+                reserve_hi: Amount::from_msats(1_000_000),
+                total_shares: 1_000_000,
+            },
+        )
+        .await;
+        dbtx.commit_tx().await;
+    }
+
+    #[tokio::test]
+    async fn lp_recovery_empty_cursor() {
+        let db = db();
+        seed_pool_row(&db).await;
+        let module = amm();
+        let result: Result<LpRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            LP_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an empty cursor must be rejected cleanly, not accepted"
+        );
+    }
+
+    /// Below `LpPosition`'s own prefix (`0x02`): a one-byte cursor equal to
+    /// `Pool`'s prefix (`0x01`) makes `start = [0x01, 0x00]`, sweeping in
+    /// the seeded `Pool` row, which fails to decode as `LpPositionKey`.
+    #[tokio::test]
+    async fn lp_recovery_cursor_below_prefix() {
+        let db = db();
+        seed_pool_row(&db).await;
+        let module = amm();
+        let result: Result<LpRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            LP_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0x01]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a cursor below this endpoint's own prefix must be rejected cleanly"
+        );
+    }
+
+    /// Mirrors `balance_recovery_cursor_above_prefix`: against
+    /// `MemDatabase` this does not panic (silently returns an empty page
+    /// instead of rejecting the cursor) — included for completeness.
+    #[tokio::test]
+    async fn lp_recovery_cursor_above_prefix() {
+        let db = db();
+        {
+            let mut dbtx = db.begin_transaction().await;
+            dbtx.insert_new_entry(
+                &LpPositionKey {
+                    pool: pool_id(),
+                    owner: test_owner_pubkey(),
+                },
+                &LpPosition {
+                    shares: 1,
+                    tweak: [0u8; 16],
+                },
+            )
+            .await;
+            dbtx.commit_tx().await;
+        }
+        let module = amm();
+        let result: Result<LpRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            LP_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0xFF]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a cursor above every real prefix must be rejected cleanly, not panic the range scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn lp_recovery_garbage_cursor() {
+        let db = db();
+        seed_pool_row(&db).await;
+        let module = amm();
+        let result: Result<LpRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            LP_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0x00, 0xDE, 0xAD, 0xBE, 0xEF]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "garbage cursor bytes must be rejected cleanly, not panic"
+        );
+    }
+
+    #[tokio::test]
+    async fn lp_recovery_over_long_cursor() {
+        let db = db();
+        let module = amm();
+        let result: Result<LpRecoveryResponse, ApiError> = call(
+            &module,
+            &db,
+            LP_RECOVERY_ENDPOINT,
+            RecoveryPageRequest {
+                cursor: Some(vec![0u8; 257]),
+                limit: Some(10),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an over-long cursor must be rejected cleanly"
+        );
+    }
+}
