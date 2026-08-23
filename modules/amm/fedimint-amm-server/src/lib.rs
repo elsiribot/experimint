@@ -13,6 +13,10 @@ use async_trait::async_trait;
 use fedimint_amm_common::config::{
     AmmClientConfig, AmmConfig, AmmConfigConsensus, AmmConfigPrivate, UnitParams,
 };
+use fedimint_amm_common::endpoints::{
+    BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, LP_RECOVERY_ENDPOINT, LpRecoveryEntry,
+    POOLS_ENDPOINT, PoolSummary, QUOTE_ENDPOINT, QuoteRequest, QuoteResponse,
+};
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_amm_common::types::{
     AmmConsensusItem, AmmInput, AmmInputError, AmmOutput, AmmOutputError, AmmOutputOutcome,
@@ -26,8 +30,8 @@ use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
-    AmountUnit, Amounts, ApiEndpoint, CoreConsensusVersion, InputMeta, ModuleConsensusVersion,
-    ModuleInit, TransactionItemAmounts,
+    AmountUnit, Amounts, ApiEndpoint, ApiError, ApiVersion, CoreConsensusVersion, InputMeta,
+    ModuleConsensusVersion, ModuleInit, TransactionItemAmounts, public_api_endpoint,
 };
 use fedimint_core::{Amount, InPoint, OutPoint, PeerId, push_db_pair_items};
 use fedimint_server_core::config::PeerHandleOps;
@@ -661,18 +665,171 @@ impl ServerModule for Amm {
         None
     }
 
+    /// Spec §9.1. Reserves and outstanding balances are both liabilities —
+    /// obligations to hand notes back to someone — so each is reported as
+    /// its own negated item, one `add_items` call per quantity, so no
+    /// single item mixes units. `LpPosition` is deliberately NOT reported:
+    /// shares are a claim against reserves already counted above, and
+    /// reporting them too would double-count the same liability.
+    ///
+    /// This runs after every consensus item (P7) with its result feeding an
+    /// `assert!` that halts every guardian if it goes negative, so it must
+    /// never panic. `Pool.reserve_lo`/`reserve_hi` are provably `<=
+    /// MAX_RESERVE < i64::MAX` — Task 7 rejects any write that would push a
+    /// reserve past that cap — so `i64::try_from` on them is total in
+    /// practice and the `.expect` is justified by a real, code-enforced
+    /// invariant.
+    ///
+    /// `Balance.amount`, by contrast, has no such cap: it accumulates via
+    /// `checked_add` against `u64::MAX` (see the `SwapV0` comment in
+    /// `process_output`), so it is only bounded by the total value that
+    /// could ever move through this pair over the federation's lifetime —
+    /// the same order-of-magnitude, supply-based argument that justifies
+    /// `MAX_RESERVE` itself (2^58 msats is ~2.88e6 BTC), not a hard
+    /// type-level guarantee. We still use the same `.expect` here, matching
+    /// spec §9.1 verbatim, because there is no total conversion that is
+    /// actually *safer*: `calculate_net_assets` sums every item with
+    /// `checked_add` behind its own `.expect`, so silently clamping an
+    /// out-of-range balance to `i64::MAX`/`i64::MIN` would not avoid a
+    /// panic, only move it into the sum — precisely the failure mode this
+    /// function must avoid. See the report for this task for more detail.
     async fn audit(
         &self,
-        _dbtx: &mut DatabaseTransaction<'_>,
-        _audit: &mut Audit,
-        _module_instance_id: ModuleInstanceId,
+        dbtx: &mut DatabaseTransaction<'_>,
+        audit: &mut Audit,
+        module_instance_id: ModuleInstanceId,
     ) {
-        // Empty for this task: Task 9 reports reserves and balances.
+        audit
+            .add_items(dbtx, module_instance_id, &PoolPrefix, |_, pool: Pool| {
+                -i64::try_from(pool.reserve_lo.msats).expect("bounded by MAX_RESERVE (spec §7.1)")
+            })
+            .await;
+        audit
+            .add_items(dbtx, module_instance_id, &PoolPrefix, |_, pool: Pool| {
+                -i64::try_from(pool.reserve_hi.msats).expect("bounded by MAX_RESERVE (spec §7.1)")
+            })
+            .await;
+        audit
+            .add_items(
+                dbtx,
+                module_instance_id,
+                &BalancePrefix,
+                |_, balance: BalanceEntry| {
+                    -i64::try_from(balance.amount.msats)
+                        .expect("bounded by MAX_RESERVE (spec §9.1)")
+                },
+            )
+            .await;
     }
 
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
-        // Empty for this task: Task 9 adds endpoints.
-        Vec::new()
+        vec![
+            public_api_endpoint! {
+                POOLS_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Amm, context, _params: ()| -> Vec<PoolSummary> {
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let pools: Vec<_> = dbtx.find_by_prefix(&PoolPrefix).await.collect().await;
+                    Ok(pools
+                        .into_iter()
+                        .map(|(key, pool)| PoolSummary {
+                            pool: key.0,
+                            reserve_lo: pool.reserve_lo,
+                            reserve_hi: pool.reserve_hi,
+                            total_shares: pool.total_shares,
+                            fee_per_mille: module.cfg.fee_for(key.0),
+                        })
+                        .collect())
+                }
+            },
+            public_api_endpoint! {
+                QUOTE_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Amm, context, request: QuoteRequest| -> QuoteResponse {
+                    let QuoteRequest { unit_in, unit_out, amount_in } = request;
+
+                    let pool_id = PoolId::new(unit_in, unit_out).ok_or_else(|| {
+                        ApiError::bad_request("unit_in and unit_out must differ".to_string())
+                    })?;
+
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let pool = dbtx
+                        .get_value(&PoolKey(pool_id))
+                        .await
+                        .ok_or_else(|| ApiError::not_found("no such pool".to_string()))?;
+
+                    let in_is_lo = unit_in == pool_id.lo();
+                    let (reserve_in, reserve_out) = if in_is_lo {
+                        (pool.reserve_lo, pool.reserve_hi)
+                    } else {
+                        (pool.reserve_hi, pool.reserve_lo)
+                    };
+
+                    let fee = module.cfg.fee_for(pool_id);
+                    // The same function `process_output` settles with (spec
+                    // §12): a quote can never disagree with settlement.
+                    let amount_out = math::amount_out(
+                        reserve_in.msats,
+                        reserve_out.msats,
+                        amount_in.msats,
+                        fee,
+                    )
+                    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    let price_impact_per_mille = math::price_impact_per_mille(
+                        reserve_in.msats,
+                        reserve_out.msats,
+                        amount_in.msats,
+                        amount_out,
+                    );
+
+                    Ok(QuoteResponse {
+                        amount_out: Amount::from_msats(amount_out),
+                        price_impact_per_mille,
+                    })
+                }
+            },
+            public_api_endpoint! {
+                BALANCE_RECOVERY_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Amm, context, _params: ()| -> Vec<BalanceRecoveryEntry> {
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let entries: Vec<_> =
+                        dbtx.find_by_prefix(&BalancePrefix).await.collect().await;
+                    Ok(entries
+                        .into_iter()
+                        .map(|(key, entry)| BalanceRecoveryEntry {
+                            tweak: entry.tweak,
+                            pubkey: key.owner,
+                            unit: key.unit,
+                            amount: entry.amount,
+                        })
+                        .collect())
+                }
+            },
+            public_api_endpoint! {
+                LP_RECOVERY_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Amm, context, _params: ()| -> Vec<LpRecoveryEntry> {
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let entries: Vec<_> =
+                        dbtx.find_by_prefix(&LpPositionPrefix).await.collect().await;
+                    Ok(entries
+                        .into_iter()
+                        .map(|(key, position)| LpRecoveryEntry {
+                            tweak: position.tweak,
+                            pool: key.pool,
+                            pubkey: key.owner,
+                            shares: position.shares,
+                        })
+                        .collect())
+                }
+            },
+        ]
     }
 }
 

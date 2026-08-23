@@ -1,6 +1,7 @@
 //! Types shared between the AMM module's client and server.
 
 pub mod config;
+pub mod endpoints;
 pub mod math;
 pub mod pool_id;
 pub mod types;

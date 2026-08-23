@@ -195,6 +195,39 @@ pub fn k_non_decreasing(r_in_old: u64, r_out_old: u64, r_in_new: u64, r_out_new:
     new >= old
 }
 
+/// How much worse a swap's effective price (`amount_out / amount_in`) is
+/// than the pool's spot price (`reserve_out / reserve_in`) before the swap,
+/// in per-mille. Used only to annotate `QUOTE_ENDPOINT` (spec §12) — not
+/// part of consensus — but takes the exact `reserve_in`/`reserve_out`/
+/// `amount_in` fed to [`amount_out`] plus its result, so the two numbers can
+/// never tell a different story.
+///
+/// `ratio = (amount_out * reserve_in) / (amount_in * reserve_out)` is the
+/// effective price divided by the spot price; `1000 * (1 - ratio)` is the
+/// impact in per-mille. Every input is `<= MAX_RESERVE` (2^58), so the
+/// largest intermediate — `1000 * amount_out * reserve_in` — is
+/// `< 2^10 * 2^58 * 2^58 = 2^126`, comfortably inside `u128`.
+pub fn price_impact_per_mille(
+    reserve_in: u64,
+    reserve_out: u64,
+    amount_in: u64,
+    amount_out: u64,
+) -> u64 {
+    let denominator = u128::from(amount_in) * u128::from(reserve_out);
+    if denominator == 0 {
+        // Degenerate input (would already have been rejected by
+        // `amount_out` above); report "no impact" rather than divide by
+        // zero.
+        return 0;
+    }
+    let numerator = 1000u128 * u128::from(amount_out) * u128::from(reserve_in);
+    // Floors, so this is always <= 1000 for any swap that actually got worse
+    // (the normal case): `saturating_sub` only guards against rounding
+    // pushing a near-zero-impact swap's ratio a hair above 1000.
+    let ratio_per_mille = u64::try_from(numerator / denominator).unwrap_or(u64::MAX);
+    1000u64.saturating_sub(ratio_per_mille)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +326,49 @@ mod tests {
             burn_shares(10, 10, 1_000_000, 1),
             Err(CurveError::OutputRoundsToZero)
         );
+    }
+
+    /// Same worked example as `amount_out_matches_reference_vector`: 1%
+    /// swap of a 1000:1 pool at the reference 0.30% fee, expect ~1.3%
+    /// impact (fee + slippage).
+    #[test]
+    fn price_impact_matches_worked_example() {
+        let out = amount_out(1_000_000_000, 1_000_000, 10_000_000, 3).unwrap();
+        assert_eq!(out, 9_871);
+        assert_eq!(
+            price_impact_per_mille(1_000_000_000, 1_000_000, 10_000_000, out),
+            13
+        );
+    }
+
+    #[test]
+    fn price_impact_matches_a_hand_computed_exact_case() {
+        // fee = 0, and chosen so `amount_out`'s division is exact (no floor
+        // loss to muddy the check): out = 1 * 12 / (3 + 1) = 3.
+        let out = amount_out(3, 12, 1, 0).unwrap();
+        assert_eq!(out, 3);
+        // ratio = (out * r_in) / (amt * r_out) = (3 * 3) / (1 * 12) = 0.75
+        // impact = 1000 * (1 - 0.75) = 250
+        assert_eq!(price_impact_per_mille(3, 12, 1, out), 250);
+    }
+
+    proptest::proptest! {
+        /// Spec §12: the quote's impact figure must agree with what the same
+        /// swap would actually do — it can never claim less than the
+        /// reference fee's floor, and never exceed 1000 (never "worse than
+        /// getting nothing").
+        #[test]
+        fn price_impact_is_bounded(
+            r_in in 1u64..=MAX_RESERVE,
+            r_out in 1u64..=MAX_RESERVE,
+            amt in 1u64..=MAX_RESERVE,
+            fee in 0u16..1000,
+        ) {
+            if let Ok(out) = amount_out(r_in, r_out, amt, fee) {
+                let impact = price_impact_per_mille(r_in, r_out, amt, out);
+                proptest::prop_assert!(impact <= 1000);
+            }
+        }
     }
 
     proptest::proptest! {
