@@ -14,9 +14,10 @@ use fedimint_amm_common::config::{
     AmmClientConfig, AmmConfig, AmmConfigConsensus, AmmConfigPrivate, UnitParams,
 };
 use fedimint_amm_common::endpoints::{
-    BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, BalanceRecoveryResponse, LP_RECOVERY_ENDPOINT,
-    LpRecoveryEntry, LpRecoveryResponse, MAX_RECOVERY_PAGE_SIZE, POOLS_ENDPOINT, PoolSummary,
-    QUOTE_ENDPOINT, QuoteRequest, QuoteResponse, RecoveryPageRequest,
+    BALANCE_ENDPOINT, BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, BalanceRecoveryResponse,
+    BalanceRequest, LP_RECOVERY_ENDPOINT, LpRecoveryEntry, LpRecoveryResponse,
+    MAX_RECOVERY_PAGE_SIZE, POOLS_ENDPOINT, PoolSummary, QUOTE_ENDPOINT, QuoteRequest,
+    QuoteResponse, RecoveryPageRequest,
 };
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_amm_common::types::{
@@ -600,8 +601,14 @@ impl ServerModule for Amm {
                 // call itself — the exact function `QUOTE_ENDPOINT` calls
                 // (finding I1), so a quote can never disagree with
                 // settlement.
-                let quote =
-                    quote_swap(&self.cfg, &pool, pool_id, *unit_in, *amount_in, Some(*min_out))?;
+                let quote = quote_swap(
+                    &self.cfg,
+                    &pool,
+                    pool_id,
+                    *unit_in,
+                    *amount_in,
+                    Some(*min_out),
+                )?;
                 let dy = quote.dy;
 
                 // Findings Minor 4/5/6: orientation, `reserve_in_new`, and
@@ -939,6 +946,27 @@ impl ServerModule for Amm {
                         amount_out: Amount::from_msats(quote.dy),
                         price_impact_per_mille,
                     })
+                }
+            },
+            public_api_endpoint! {
+                BALANCE_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Amm, context, request: BalanceRequest| -> Option<Amount> {
+                    // Point lookup (fix pass 3, Important 5): a single
+                    // `get_value` on the exact key, not a paginated scan —
+                    // see `BALANCE_ENDPOINT`'s doc comment for why the scan
+                    // was the wrong tool for a caller that already knows
+                    // `(pubkey, unit)`.
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let balance = dbtx
+                        .get_value(&BalanceKey {
+                            owner: request.pubkey,
+                            unit: request.unit,
+                        })
+                        .await
+                        .map(|entry| entry.amount);
+                    Ok(balance)
                 }
             },
             public_api_endpoint! {

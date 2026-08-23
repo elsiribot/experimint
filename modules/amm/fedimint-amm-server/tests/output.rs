@@ -918,7 +918,10 @@ async fn lp_position_tweak_is_preserved_across_accumulation() {
         .expect("second deposit must succeed");
     assert!(!result.amounts.is_empty());
 
-    let position = dbtx.get_value(&LpPositionKey { pool, owner }).await.unwrap();
+    let position = dbtx
+        .get_value(&LpPositionKey { pool, owner })
+        .await
+        .unwrap();
     assert!(
         position.shares > shares_after_first,
         "shares must accumulate: {shares_after_first} -> {}",
@@ -979,7 +982,10 @@ async fn duplicate_owner_deposit_accumulates_without_panicking() {
         "duplicate-owner deposit must not error, got {result:?}"
     );
 
-    let position = dbtx.get_value(&LpPositionKey { pool, owner }).await.unwrap();
+    let position = dbtx
+        .get_value(&LpPositionKey { pool, owner })
+        .await
+        .unwrap();
     let expected_second_mint = math::mint_shares(
         pool_after_first.reserve_lo.msats,
         pool_after_first.reserve_hi.msats,

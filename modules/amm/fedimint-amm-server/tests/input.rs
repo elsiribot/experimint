@@ -372,7 +372,9 @@ async fn full_withdraw_deletes_position() {
         .expect("full withdraw must succeed");
 
     assert!(
-        dbtx.get_value(&LpPositionKey { pool, owner }).await.is_none(),
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .is_none(),
         "an emptied position must be deleted, not left as a zero-share record"
     );
 }
@@ -421,7 +423,9 @@ async fn withdraw_below_min_lo_hi_fails_and_writes_nothing() {
 
     assert_eq!(dbtx.get_value(&PoolKey(pool)).await.unwrap(), seeded_pool);
     assert_eq!(
-        dbtx.get_value(&LpPositionKey { pool, owner }).await.unwrap(),
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .unwrap(),
         seeded_position
     );
 }
@@ -619,7 +623,9 @@ async fn total_shares_never_reaches_zero_after_full_withdrawal() {
     assert!(stored_pool.total_shares > 0);
 
     assert!(
-        dbtx.get_value(&LpPositionKey { pool, owner }).await.is_none(),
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .is_none(),
         "the emptied position must be deleted"
     );
 }
@@ -672,7 +678,9 @@ async fn withdraw_below_min_hi_only_fails_and_writes_nothing() {
 
     assert_eq!(dbtx.get_value(&PoolKey(pool)).await.unwrap(), seeded_pool);
     assert_eq!(
-        dbtx.get_value(&LpPositionKey { pool, owner }).await.unwrap(),
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .unwrap(),
         seeded_position
     );
 }
@@ -737,6 +745,8 @@ async fn withdraw_zero_shares_fails() {
     let result = module.process_input(&mut dbtx, &input, in_point()).await;
     assert_eq!(
         result,
-        Err(AmmInputError::Curve(math::CurveError::ZeroAmount.to_string()))
+        Err(AmmInputError::Curve(
+            math::CurveError::ZeroAmount.to_string()
+        ))
     );
 }

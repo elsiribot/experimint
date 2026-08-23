@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 
 use fedimint_amm_common::config::{AmmConfigConsensus, UnitParams};
 use fedimint_amm_common::endpoints::{
-    BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryResponse, LP_RECOVERY_ENDPOINT, LpRecoveryResponse,
-    MAX_RECOVERY_PAGE_SIZE, QUOTE_ENDPOINT, QuoteRequest, QuoteResponse, RecoveryPageRequest,
+    BALANCE_ENDPOINT, BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryResponse, BalanceRequest,
+    LP_RECOVERY_ENDPOINT, LpRecoveryResponse, MAX_RECOVERY_PAGE_SIZE, QUOTE_ENDPOINT, QuoteRequest,
+    QuoteResponse, RecoveryPageRequest,
 };
 use fedimint_amm_common::math;
 use fedimint_amm_common::pool_id::PoolId;
@@ -230,6 +231,80 @@ async fn quote_endpoint_rejects_unit_not_in_allowlist() {
     .await;
     let err = result.expect_err("a quote naming a unit outside the allowlist must be rejected");
     assert_eq!(err.message, AmmOutputError::UnknownUnit.to_string());
+}
+
+/// Fix pass 3, Important 5: `BALANCE_ENDPOINT` is a point lookup — this
+/// checks it returns exactly the stored amount for a key that exists, `None`
+/// for one that doesn't, and does not confuse two different `(pubkey, unit)`
+/// keys with each other.
+#[tokio::test]
+async fn balance_endpoint_looks_up_a_single_stored_balance() {
+    let db = db();
+    let module = amm();
+
+    let pubkey = Keypair::from_seckey_slice(SECP256K1, &[7u8; 32])
+        .expect("nonzero bytes are a valid secret key")
+        .public_key();
+
+    {
+        let mut dbtx = db.begin_transaction().await;
+        dbtx.insert_new_entry(
+            &BalanceKey {
+                owner: pubkey,
+                unit: unit(0),
+            },
+            &BalanceEntry {
+                amount: Amount::from_msats(4_242),
+                tweak: [7u8; 16],
+            },
+        )
+        .await;
+        dbtx.commit_tx().await;
+    }
+
+    let found: Option<Amount> = call(
+        &module,
+        &db,
+        BALANCE_ENDPOINT,
+        BalanceRequest {
+            pubkey,
+            unit: unit(0),
+        },
+    )
+    .await
+    .expect("lookup itself must succeed");
+    assert_eq!(found, Some(Amount::from_msats(4_242)));
+
+    // Same pubkey, different unit: must not find the unit(0) balance.
+    let wrong_unit: Option<Amount> = call(
+        &module,
+        &db,
+        BALANCE_ENDPOINT,
+        BalanceRequest {
+            pubkey,
+            unit: unit(1),
+        },
+    )
+    .await
+    .expect("lookup itself must succeed");
+    assert_eq!(wrong_unit, None);
+
+    // A pubkey with no stored balance at all.
+    let other_pubkey = Keypair::from_seckey_slice(SECP256K1, &[8u8; 32])
+        .expect("nonzero bytes are a valid secret key")
+        .public_key();
+    let not_found: Option<Amount> = call(
+        &module,
+        &db,
+        BALANCE_ENDPOINT,
+        BalanceRequest {
+            pubkey: other_pubkey,
+            unit: unit(0),
+        },
+    )
+    .await
+    .expect("lookup itself must succeed");
+    assert_eq!(not_found, None);
 }
 
 /// Fix pass 2, Minor 7: `quote_swap` also enforces `MAX_RESERVE` on

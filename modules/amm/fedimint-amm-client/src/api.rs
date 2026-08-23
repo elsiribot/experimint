@@ -12,14 +12,14 @@
 use std::future::Future;
 
 use fedimint_amm_common::endpoints::{
-    BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, BalanceRecoveryResponse, LP_RECOVERY_ENDPOINT,
-    LpRecoveryEntry, LpRecoveryResponse, POOLS_ENDPOINT, PoolSummary, QUOTE_ENDPOINT, QuoteRequest,
-    QuoteResponse, RecoveryPageRequest,
+    BALANCE_ENDPOINT, BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, BalanceRecoveryResponse,
+    BalanceRequest, LP_RECOVERY_ENDPOINT, LpRecoveryEntry, LpRecoveryResponse, POOLS_ENDPOINT,
+    PoolSummary, QUOTE_ENDPOINT, QuoteRequest, QuoteResponse, RecoveryPageRequest,
 };
 use fedimint_api_client::api::{FederationApiExt, FederationResult, IModuleFederationApi};
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::task::{MaybeSend, MaybeSync};
-use fedimint_core::{apply, async_trait_maybe_send};
+use fedimint_core::{Amount, apply, async_trait_maybe_send};
 
 /// Typed access to this module's federation API endpoints, mirroring
 /// `fedimint-lnv2-client`'s `LightningFederationApi` (`api.rs`): a thin
@@ -31,6 +31,12 @@ pub trait AmmFederationApi {
     async fn amm_pools(&self) -> FederationResult<Vec<PoolSummary>>;
 
     async fn amm_quote(&self, request: QuoteRequest) -> FederationResult<QuoteResponse>;
+
+    /// Point lookup for a single stored `Balance` (fix pass 3, Important 5) —
+    /// use this, not a recovery-page scan, whenever the exact `(pubkey,
+    /// unit)` is already known. See [`BALANCE_ENDPOINT`]'s doc comment for
+    /// why the scan was the wrong tool for that case.
+    async fn amm_balance(&self, request: BalanceRequest) -> FederationResult<Option<Amount>>;
 
     async fn amm_balance_recovery_page(
         &self,
@@ -55,6 +61,11 @@ where
 
     async fn amm_quote(&self, request: QuoteRequest) -> FederationResult<QuoteResponse> {
         self.request_current_consensus(QUOTE_ENDPOINT.to_string(), ApiRequestErased::new(request))
+            .await
+    }
+
+    async fn amm_balance(&self, request: BalanceRequest) -> FederationResult<Option<Amount>> {
+        self.request_current_consensus(BALANCE_ENDPOINT.to_string(), ApiRequestErased::new(request))
             .await
     }
 
@@ -117,13 +128,14 @@ where
 /// matching `pred`, stopping as soon as one is found rather than paging
 /// through the rest of a (potentially large, spec §9.2) live table.
 ///
-/// This is what a swap's Tx1→Tx2 transition uses to re-read its own balance
-/// immediately before building the claim (spec §6.1): the caller already
-/// knows the exact `(pubkey, unit)` it is looking for, so an early exit is
-/// both correct (there is at most one row per key) and considerably cheaper
-/// than [`for_each_balance_recovery_entry`]'s full scan, which is reserved
-/// for [`crate::AmmClientModule::recover`] where every row must be
-/// considered.
+/// A swap's Tx1→Tx2 transition used to re-read its own balance this way, but
+/// no longer does (fix pass 3, Important 5): the caller there already knows
+/// the exact `(pubkey, unit)` it is looking for, so [`AmmFederationApi::
+/// amm_balance`]'s point lookup is both correct and considerably cheaper —
+/// see that endpoint's doc comment. This helper remains for the case that
+/// genuinely needs a predicate scan rather than an exact-key lookup (e.g.
+/// finding a balance by tweak-match with the pubkey not yet known), and its
+/// early-exit behavior is still covered by the tests below.
 pub async fn find_balance_recovery_entry<F, Fut, E>(
     mut fetch_page: F,
     pred: impl Fn(&BalanceRecoveryEntry) -> bool,
@@ -220,7 +232,10 @@ mod tests {
             }
         }
 
-        async fn fetch(&self, _req: RecoveryPageRequest) -> Result<BalanceRecoveryResponse, String> {
+        async fn fetch(
+            &self,
+            _req: RecoveryPageRequest,
+        ) -> Result<BalanceRecoveryResponse, String> {
             *self.calls.borrow_mut() += 1;
             self.pages
                 .borrow_mut()
@@ -254,13 +269,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(seen, vec![
-            test_pubkey(1),
-            test_pubkey(2),
-            test_pubkey(3),
-            test_pubkey(4),
-        ]);
-        assert_eq!(*pager.calls.borrow(), 3, "must consume every page exactly once");
+        assert_eq!(
+            seen,
+            vec![
+                test_pubkey(1),
+                test_pubkey(2),
+                test_pubkey(3),
+                test_pubkey(4),
+            ]
+        );
+        assert_eq!(
+            *pager.calls.borrow(),
+            3,
+            "must consume every page exactly once"
+        );
     }
 
     #[tokio::test]
@@ -288,7 +310,11 @@ mod tests {
         assert_eq!(found, Some(balance_entry(3, 300)));
         // The match is on page 2 of 3: a correct early exit fetches exactly
         // two pages, never the third.
-        assert_eq!(*pager.calls.borrow(), 2, "must not fetch pages past the match");
+        assert_eq!(
+            *pager.calls.borrow(),
+            2,
+            "must not fetch pages past the match"
+        );
     }
 
     #[tokio::test]
@@ -305,8 +331,7 @@ mod tests {
     #[tokio::test]
     async fn find_propagates_a_page_fetch_error() {
         let pager = FakePager::new(vec![]);
-        let result =
-            find_balance_recovery_entry(|req| pager.fetch(req), |_| true).await;
+        let result = find_balance_recovery_entry(|req| pager.fetch(req), |_| true).await;
         assert!(result.is_err());
     }
 

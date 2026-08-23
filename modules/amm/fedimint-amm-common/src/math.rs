@@ -236,7 +236,10 @@ mod tests {
     #[test]
     fn amount_out_matches_reference_vector() {
         // reserve_in 1_000_000_000, reserve_out 1_000_000, in 10_000_000, fee 3/1000
-        assert_eq!(amount_out(1_000_000_000, 1_000_000, 10_000_000, 3), Ok(9_871));
+        assert_eq!(
+            amount_out(1_000_000_000, 1_000_000, 10_000_000, 3),
+            Ok(9_871)
+        );
     }
 
     #[test]
@@ -244,7 +247,10 @@ mod tests {
         assert_eq!(amount_out(1_000, 1_000, 0, 3), Err(CurveError::ZeroAmount));
         assert_eq!(amount_out(0, 1_000, 10, 3), Err(CurveError::ZeroReserve));
         assert_eq!(amount_out(1_000, 0, 10, 3), Err(CurveError::ZeroReserve));
-        assert_eq!(amount_out(1_000, 1_000, 10, 1_000), Err(CurveError::InvalidFee));
+        assert_eq!(
+            amount_out(1_000, 1_000, 10, 1_000),
+            Err(CurveError::InvalidFee)
+        );
         assert_eq!(
             amount_out(MAX_RESERVE + 1, 1_000, 10, 3),
             Err(CurveError::ReserveCapExceeded)

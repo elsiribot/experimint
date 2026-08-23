@@ -187,21 +187,25 @@ mod tests {
     fn rejects_non_canonical_encoding() {
         // Hand-build the wire form with lo > hi.
         let mut bytes = Vec::new();
-        AmountUnit::new_custom(9).consensus_encode(&mut bytes).unwrap();
-        AmountUnit::new_custom(2).consensus_encode(&mut bytes).unwrap();
-        assert!(
-            PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err()
-        );
+        AmountUnit::new_custom(9)
+            .consensus_encode(&mut bytes)
+            .unwrap();
+        AmountUnit::new_custom(2)
+            .consensus_encode(&mut bytes)
+            .unwrap();
+        assert!(PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err());
     }
 
     #[test]
     fn rejects_equal_units_in_encoding() {
         let mut bytes = Vec::new();
-        AmountUnit::new_custom(4).consensus_encode(&mut bytes).unwrap();
-        AmountUnit::new_custom(4).consensus_encode(&mut bytes).unwrap();
-        assert!(
-            PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err()
-        );
+        AmountUnit::new_custom(4)
+            .consensus_encode(&mut bytes)
+            .unwrap();
+        AmountUnit::new_custom(4)
+            .consensus_encode(&mut bytes)
+            .unwrap();
+        assert!(PoolId::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err());
     }
 
     #[test]

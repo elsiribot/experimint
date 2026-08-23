@@ -26,7 +26,34 @@ pub const QUOTE_ENDPOINT: &str = "amm_quote";
 /// so a `Balance` deleted below the cursor between pages — which happens
 /// routinely in a live federation, since every completed swap deletes one —
 /// can never shift a later row into a skipped position.
+///
+/// [`BALANCE_ENDPOINT`] is the point lookup to use when the exact
+/// `(pubkey, unit)` is already known (fix pass 3, Important 5) — this
+/// endpoint remains for the case that needs a scan: finding balances by
+/// tweak-match during [`crate::endpoints`]-consumer recovery.
 pub const BALANCE_RECOVERY_ENDPOINT: &str = "amm_balance_recovery";
+
+/// `(pubkey, unit) -> Option<Amount>`, a point lookup for a single stored
+/// `Balance` (fix pass 3, Important 5). Added because
+/// [`BALANCE_RECOVERY_ENDPOINT`] was the only way to re-read a balance the
+/// caller already knows the key of (the swap Tx1→Tx2 re-read, spec §6.1),
+/// and that is worse than an O(rows) scan: `request_current_consensus` uses
+/// `ThresholdConsensus` (`fedimint-api-client/src/query.rs:120-135`), which
+/// requires threshold-many byte-identical responses **per page**, against a
+/// table that mutates on every swap in the federation. Since `Balance` rows
+/// are attacker-creatable for one `min_swap_in` each and are never
+/// garbage-collected (see [`BALANCE_RECOVERY_ENDPOINT`]'s doc comment), an
+/// attacker could otherwise permanently tax every swap's Tx2 re-read. This
+/// point lookup leaks nothing [`BALANCE_RECOVERY_ENDPOINT`] does not already
+/// expose publicly — both are `public_api_endpoint!` over the same table.
+pub const BALANCE_ENDPOINT: &str = "amm_balance";
+
+/// Request for [`BALANCE_ENDPOINT`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BalanceRequest {
+    pub pubkey: secp256k1::PublicKey,
+    pub unit: AmountUnit,
+}
 
 /// Streams `(tweak, pool, pubkey, shares)` for every stored `LpPosition`, one
 /// page at a time, mirroring [`BALANCE_RECOVERY_ENDPOINT`] for LP positions,

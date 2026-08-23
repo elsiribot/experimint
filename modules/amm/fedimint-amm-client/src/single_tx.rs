@@ -12,11 +12,11 @@
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_client_module::DynGlobalClientContext;
 use fedimint_client_module::sm::{ClientSMDatabaseTransaction, State, StateTransition};
+use fedimint_core::TransactionId;
 use fedimint_core::core::OperationId;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::secp256k1::PublicKey;
-use fedimint_core::TransactionId;
 
 use crate::AmmClientContext;
 use crate::db::{LpPositionKey, LpPositionRecord};
@@ -74,7 +74,9 @@ impl State for DepositStateMachine {
                 let global = global_context.clone();
                 vec![StateTransition::new(
                     async move { global.await_tx_accepted(txid).await },
-                    |dbtx, result, old_state| Box::pin(transition_submitted(dbtx, result, old_state)),
+                    |dbtx, result, old_state| {
+                        Box::pin(transition_submitted(dbtx, result, old_state))
+                    },
                 )]
             }
             DepositState::Accepted | DepositState::Rejected(_) => vec![],
@@ -203,13 +205,13 @@ async fn transition_withdraw_submitted(
 
 #[cfg(test)]
 mod tests {
+    use fedimint_core::BitcoinHash as _;
     use fedimint_core::db::mem_impl::MemDatabase;
     use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
     use fedimint_core::encoding::{Decodable, Encodable};
     use fedimint_core::module::AmountUnit;
     use fedimint_core::module::registry::ModuleDecoderRegistry;
     use fedimint_core::secp256k1::{Keypair, SECP256K1};
-    use fedimint_core::BitcoinHash as _;
 
     use super::*;
 
@@ -281,7 +283,8 @@ mod tests {
         };
 
         let next =
-            transition_submitted(&mut sm_dbtx, Err("rejected".to_string()), old_state.clone()).await;
+            transition_submitted(&mut sm_dbtx, Err("rejected".to_string()), old_state.clone())
+                .await;
         assert_eq!(next.state, DepositState::Rejected("rejected".to_string()));
 
         let record = sm_dbtx
@@ -396,7 +399,10 @@ mod tests {
         assert_eq!(next.state, WithdrawState::Accepted);
 
         let record = sm_dbtx.module_tx().get_value(&key).await;
-        assert_eq!(record, None, "a fully drained position must be removed, not left at 0");
+        assert_eq!(
+            record, None,
+            "a fully drained position must be removed, not left at 0"
+        );
     }
 
     #[test]

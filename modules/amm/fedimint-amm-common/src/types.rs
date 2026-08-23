@@ -55,7 +55,10 @@ impl fmt::Display for AmmOutput {
                 unit_out,
                 amount_in,
                 ..
-            } => write!(f, "AmmOutput::SwapV0 {amount_in} {unit_in:?} -> {unit_out:?}"),
+            } => write!(
+                f,
+                "AmmOutput::SwapV0 {amount_in} {unit_in:?} -> {unit_out:?}"
+            ),
             AmmOutput::DepositV0 {
                 pool,
                 amount_lo,
@@ -146,7 +149,9 @@ impl fmt::Display for AmmConsensusItem {
     }
 }
 
-#[derive(Debug, Error, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable, Hash)]
+#[derive(
+    Debug, Error, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable, Hash,
+)]
 pub enum AmmInputError {
     #[error("unknown input variant")]
     UnknownVariant,
@@ -164,7 +169,9 @@ pub enum AmmInputError {
     Curve(String),
 }
 
-#[derive(Debug, Error, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable, Hash)]
+#[derive(
+    Debug, Error, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable, Hash,
+)]
 pub enum AmmOutputError {
     #[error("unknown output variant")]
     UnknownVariant,
@@ -297,16 +304,18 @@ mod tests {
             bytes: vec![0xAB],
         };
         let bytes = unknown.consensus_encode_to_vec();
-        let back = AmmConsensusItem::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
-            .unwrap();
+        let back =
+            AmmConsensusItem::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+                .unwrap();
         assert_eq!(unknown, back);
     }
 
     #[test]
     fn output_outcome_round_trips() {
         let bytes = AmmOutputOutcome.consensus_encode_to_vec();
-        let back = AmmOutputOutcome::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
-            .unwrap();
+        let back =
+            AmmOutputOutcome::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+                .unwrap();
         assert_eq!(AmmOutputOutcome, back);
     }
 }
