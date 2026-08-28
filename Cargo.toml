@@ -4,6 +4,10 @@ members = [
     "modules/amm/fedimint-amm-common",
     "modules/amm/fedimint-amm-server",
     "modules/amm/fedimint-amm-tests",
+    "modules/usdt/fedimint-usdt-client",
+    "modules/usdt/fedimint-usdt-common",
+    "modules/usdt/fedimint-usdt-server",
+    "modules/usdt/fedimint-usdt-tests",
 ]
 resolver = "2"
 
@@ -11,6 +15,7 @@ resolver = "2"
 authors = ["The Experimint Developers"]
 edition = "2024"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/elsirion/experimint"
 version = "0.1.0"
 
@@ -35,20 +40,28 @@ version = "0.1.0"
 #
 # To bump: move this rev, then re-run `cargo check --workspace --all-targets`.
 # `branch = "experimint-v0.11"` would also resolve but is not reproducible.
+devimint = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-core = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-logging = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 
 # NOTE: fedimint's own `Cargo.lock` is NOT inherited when you depend on it as a
 # git dependency — cargo re-resolves the whole tree from scratch. That can land
@@ -69,29 +82,72 @@ fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "a2d02
 fedimint-amm-client = { path = "modules/amm/fedimint-amm-client", version = "0.1.0" }
 fedimint-amm-common = { path = "modules/amm/fedimint-amm-common", version = "0.1.0" }
 fedimint-amm-server = { path = "modules/amm/fedimint-amm-server", version = "0.1.0" }
+fedimint-usdt-client = { path = "modules/usdt/fedimint-usdt-client", version = "0.1.0" }
+fedimint-usdt-common = { path = "modules/usdt/fedimint-usdt-common", version = "0.1.0" }
+fedimint-usdt-server = { path = "modules/usdt/fedimint-usdt-server", version = "0.1.0" }
 
 # --- third party -------------------------------------------------------------
-# Versions mirror fedimint master's `[workspace.dependencies]` so we share
-# resolved versions with it rather than pulling in a second copy.
+# Versions are copied verbatim from the pinned platform branch's
+# `[workspace.dependencies]` so we share resolved versions with it rather than
+# pulling in a second copy. Do not "upgrade" one of these in isolation — an
+# exact match is what keeps `alloy*`/`secp256k1`/`bls12_381`/`cggmp21` from
+# unifying into two semver-incompatible copies across the git boundary.
+alloy = { version = "2.1", default-features = false, features = [
+    "essentials",
+    "reqwest-rustls-tls",
+] }
+alloy-consensus = "2.1"
+alloy-primitives = { version = "1.6", default-features = false, features = [
+    "std",
+] }
+alloy-rlp = "0.3"
+alloy-sol-types = { version = "1.6", default-features = false, features = [
+    "std",
+] }
+alloy-trie = "0.9"
 anyhow = "1.0.98"
 async-stream = "0.3.6"
 async-trait = "0.1.88"
 bitcoin = { version = "0.32.6", features = ["serde"] }
 bitcoin_hashes = "0.14.0"
+bls12_381 = "0.8.0"
+cggmp21 = { version = "0.6.3", features = [
+    "hd-wallet",
+    "hd-slip10",
+    "curve-secp256k1",
+    "state-machine",
+] }
+clap = { version = "4.5.60", features = ["derive", "env"] }
 erased-serde = "0.4"
 futures = "0.3.32"
+hex = "0.4.3"
+hex_lit = "0.1.1"
 rand = "0.8.5"
+reqwest = { version = "0.12.28", features = [
+    "json",
+    "rustls-tls",
+    "charset",
+    "http2",
+    "stream",
+], default-features = false }
+secp256k1 = { version = "0.29.0", default-features = false }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.149"
+sha2 = "0.10"
+sha3 = "0.10.8"
 strum = { version = "0.27", features = ["derive"] }
 strum_macros = "0.27"
 thiserror = "2.0.18"
 tokio = "1.48.0"
 tokio-stream = "0.1.18"
 tracing = "0.1.44"
+url = "2.5.4"
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
+# Mirrors the platform branch's lint policy, so module source lifted from it
+# stays lint-clean here.
+literal_string_with_formatting_args = "deny"
 
 [profile.dev]
 debug = "line-tables-only"
@@ -101,14 +157,28 @@ debug = "line-tables-only"
 [profile.dev.package]
 bitcoin_hashes = { opt-level = 3 }
 bls12_381 = { opt-level = 3 }
+# cggmp21 threshold-ECDSA ecosystem, copied from the platform branch: the
+# Paillier/bignum/curve math is extremely heavy at opt-level 1, which makes the
+# usdt module's runtime MPC signing tests take many minutes in dev.
+cggmp21 = { opt-level = 3 }
+cggmp21-keygen = { opt-level = 3 }
+fedimint-threshold-crypto = { opt-level = 3 }
 ff = { opt-level = 3 }
+generic-ec = { opt-level = 3 }
+generic-ec-core = { opt-level = 3 }
+generic-ec-curves = { opt-level = 3 }
+generic-ec-zkp = { opt-level = 3 }
+gmp-mpfr-sys = { opt-level = 3 }
 group = { opt-level = 3 }
+hd-wallet = { opt-level = 3 }
 librocksdb-sys = { opt-level = 3 }
+paillier-zk = { opt-level = 3 }
 pairing = { opt-level = 3 }
 rand = { opt-level = 3 }
 rand_chacha = { opt-level = 3 }
 rand_core = { opt-level = 3 }
 ring = { opt-level = 3 }
+rug = { opt-level = 3 }
 secp256k1 = { opt-level = 3 }
 secp256k1-sys = { opt-level = 3 }
 subtle = { opt-level = 3 }

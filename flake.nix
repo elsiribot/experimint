@@ -47,6 +47,13 @@
             cmake # aws-lc-sys
             perl # openssl-sys / aws-lc-sys
             git # fedimint-build's `git rev-parse` code-version probe
+
+            # gmp-mpfr-sys (rug <- cggmp21 <- fedimint-usdt-server) builds GMP
+            # from source with GMP's own autoconf script, which shells out to
+            # both of these. Without them `configure` fails with "No usable m4
+            # in $PATH" and a missing /usr/bin/file.
+            m4
+            file
             openssl
             sqlite
 
