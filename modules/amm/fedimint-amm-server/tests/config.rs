@@ -22,7 +22,7 @@ fn init_reports_our_module_kind() {
 #[test]
 fn trusted_dealer_gen_emits_a_valid_config_for_every_peer() {
     let peers = (0..4).map(PeerId::from).collect::<Vec<_>>();
-    let configs = AmmInit.trusted_dealer_gen(&peers, &args());
+    let configs = AmmInit.trusted_dealer_gen(&peers, &args(), &());
     assert_eq!(configs.len(), 4);
 
     let mut consensus = Vec::new();
@@ -50,7 +50,7 @@ fn empty_units_are_rejected_by_validation() {
 #[test]
 fn get_client_config_projects_consensus_fields() {
     let peers = (0..4).map(PeerId::from).collect::<Vec<_>>();
-    let configs = AmmInit.trusted_dealer_gen(&peers, &args());
+    let configs = AmmInit.trusted_dealer_gen(&peers, &args(), &());
     let cfg = &configs[&PeerId::from(0)];
 
     let client_cfg = AmmInit
@@ -70,7 +70,7 @@ fn get_client_config_projects_consensus_fields() {
 #[test]
 fn validate_config_calls_validate() {
     let peers = (0..4).map(PeerId::from).collect::<Vec<_>>();
-    let configs = AmmInit.trusted_dealer_gen(&peers, &args());
+    let configs = AmmInit.trusted_dealer_gen(&peers, &args(), &());
     let peer0 = PeerId::from(0);
     let cfg = configs[&peer0].clone();
     assert!(AmmInit.validate_config(&peer0, cfg).is_ok());

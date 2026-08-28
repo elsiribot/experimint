@@ -35,8 +35,9 @@ use fedimint_core::db::{
 };
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
-    AmountUnit, Amounts, ApiEndpoint, ApiError, ApiVersion, CoreConsensusVersion, InputMeta,
-    ModuleConsensusVersion, ModuleInit, TransactionItemAmounts, public_api_endpoint,
+    AmountUnit, Amounts, ApiEndpoint, ApiError, ApiVersion, CORE_CONSENSUS_VERSION,
+    CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
+    SupportedModuleApiVersions, TransactionItemAmounts, api_endpoint,
 };
 use fedimint_core::{Amount, InPoint, OutPoint, PeerId, push_db_pair_items};
 use fedimint_server_core::config::PeerHandleOps;
@@ -52,12 +53,16 @@ use crate::db::{
     LpPositionPrefix, Pool, PoolKey, PoolPrefix,
 };
 
-/// This module has no per-federation setup parameters exposed through
-/// [`ConfigGenModuleArgs`] (which is a fixed `{ network, disable_base_fees }`
-/// struct shared by every module on the pinned rev — there is no longer a
-/// per-module `GenParams` hook to thread custom values through). The sensible
-/// defaults below are therefore baked into the generator directly rather than
-/// being a caller-supplied params type. `default_consensus_config_passes_validate`
+/// The sensible defaults below are baked into the generator rather than being
+/// caller-supplied.
+///
+/// The pinned platform branch *does* offer a typed per-instance hook
+/// ([`ServerModuleInit::Params`], alongside the federation-wide
+/// `{ network, disable_base_fees }` of [`ConfigGenModuleArgs`]), so threading
+/// the unit allowlist and fee schedule through config gen is now possible —
+/// this module simply has not adopted it yet and declares `Params = ()`.
+/// Changing that is a config-gen change, not a consensus one.
+/// `default_consensus_config_passes_validate`
 /// (in this module's tests) stands in for the `validate()`-in-`trusted_dealer_gen`
 /// check the brief asked for, since `trusted_dealer_gen`'s return type
 /// (`BTreeMap<PeerId, ServerModuleConfig>`, no `Result`) gives no channel to
@@ -140,9 +145,26 @@ impl ModuleInit for AmmInit {
 impl ServerModuleInit for AmmInit {
     type Module = Amm;
 
+    /// The AMM takes no per-instance config-gen params — see the note on
+    /// [`default_consensus_config`].
+    type Params = ();
+
     /// Returns the version of this module.
     fn versions(&self, _core: CoreConsensusVersion) -> &[ModuleConsensusVersion] {
         &[MODULE_CONSENSUS_VERSION]
+    }
+
+    /// Every endpoint in [`Amm::api_endpoints`] is declared at
+    /// `ApiVersion::new(0, 0)`, so that is the only API version offered.
+    fn supported_api_versions(&self) -> SupportedModuleApiVersions {
+        SupportedModuleApiVersions::from_raw(
+            (CORE_CONSENSUS_VERSION.major, CORE_CONSENSUS_VERSION.minor),
+            (
+                MODULE_CONSENSUS_VERSION.major,
+                MODULE_CONSENSUS_VERSION.minor,
+            ),
+            &[(0, 0)],
+        )
     }
 
     /// Initialize the module.
@@ -160,6 +182,7 @@ impl ServerModuleInit for AmmInit {
         &self,
         peers: &[PeerId],
         _args: &ConfigGenModuleArgs,
+        _params: &Self::Params,
     ) -> BTreeMap<PeerId, ServerModuleConfig> {
         let consensus = default_consensus_config();
 
@@ -184,6 +207,7 @@ impl ServerModuleInit for AmmInit {
         &self,
         _peers: &(dyn PeerHandleOps + Send + Sync),
         _args: &ConfigGenModuleArgs,
+        _params: &Self::Params,
     ) -> anyhow::Result<ServerModuleConfig> {
         let consensus = default_consensus_config();
         consensus
@@ -923,7 +947,7 @@ impl ServerModule for Amm {
 
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
         vec![
-            public_api_endpoint! {
+            api_endpoint! {
                 POOLS_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Amm, context, _params: ()| -> Vec<PoolSummary> {
@@ -942,7 +966,7 @@ impl ServerModule for Amm {
                         .collect())
                 }
             },
-            public_api_endpoint! {
+            api_endpoint! {
                 QUOTE_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Amm, context, request: QuoteRequest| -> QuoteResponse {
@@ -980,7 +1004,7 @@ impl ServerModule for Amm {
                     })
                 }
             },
-            public_api_endpoint! {
+            api_endpoint! {
                 BALANCE_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Amm, context, request: BalanceRequest| -> Option<Amount> {
@@ -1001,7 +1025,7 @@ impl ServerModule for Amm {
                     Ok(balance)
                 }
             },
-            public_api_endpoint! {
+            api_endpoint! {
                 BALANCE_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Amm, context, request: RecoveryPageRequest| -> BalanceRecoveryResponse {
@@ -1136,7 +1160,7 @@ impl ServerModule for Amm {
                     })
                 }
             },
-            public_api_endpoint! {
+            api_endpoint! {
                 LP_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Amm, context, request: RecoveryPageRequest| -> LpRecoveryResponse {

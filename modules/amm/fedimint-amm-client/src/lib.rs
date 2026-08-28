@@ -1329,7 +1329,7 @@ impl ClientModuleInit for AmmClientInit {
         &self,
         args: &ClientModuleRecoverArgs<Self>,
         _snapshot: Option<&NoModuleBackup>,
-    ) -> anyhow::Result<Option<Amount>> {
+    ) -> anyhow::Result<()> {
         let summary = recover_with(args.db(), args.module_api(), args.module_root_secret()).await?;
 
         tracing::info!(
@@ -1338,17 +1338,7 @@ impl ClientModuleInit for AmmClientInit {
             "AMM module recovery scan complete; balances will be claimed once the module starts",
         );
 
-        // Unlike a single-denomination module (e.g. mintv2's notes), this
-        // module's recovered balances and positions span whichever
-        // federation-configured `AmountUnit`s they happened to be in —
-        // there is no single native unit to sum them into one `Amount`, so
-        // `None` is the honest answer the trait's own doc comment
-        // anticipates ("`None` for modules that can't determine the amount
-        // at recovery-completion time"), not a placeholder. It is also, now,
-        // the only honest answer for a second reason: this method no longer
-        // claims anything itself, so it has no claimed amount to report even
-        // in principle.
-        Ok(None)
+        Ok(())
     }
 
     fn get_database_migrations(&self) -> BTreeMap<DatabaseVersion, ClientModuleMigrationFn> {

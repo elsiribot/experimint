@@ -15,28 +15,40 @@ repository = "https://github.com/elsirion/experimint"
 version = "0.1.0"
 
 [workspace.dependencies]
-# --- fedimint (pinned to master) ---------------------------------------------
+# --- fedimint (pinned to the experimint platform branch) ---------------------
 #
 # All fedimint crates MUST share the exact same `rev`, otherwise cargo resolves
-# them as distinct source packages and the trait impls stop lining up.
+# them as distinct source packages and the trait impls stop lining up. That
+# applies across module families too: `amm` and `usdt` must see one and the
+# same `fedimint-core`, or they can never be registered into one federation.
 #
-# rev 4794ee166afc191e0125c092893bd8f080939b53 == master @ 2026-08-22
-# ("ci: gate fedimint-bot on the new bot-access team (#9048)"), workspace
-# version 0.13.0-alpha.
-fedimint-api-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-client-module = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-derive-secret = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-dummy-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-dummy-server = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-eventlog = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-logging = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-mintv2-client = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-mintv2-common = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-mintv2-server = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-server-core = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
-fedimint-testing = { git = "https://github.com/fedimint/fedimint", rev = "4794ee166afc191e0125c092893bd8f080939b53" }
+# rev a2d0207702fa13f386b40d41da8133f14fd000ac == elsiribot/fedimint
+# `experimint-v0.11` ("refactor(experimint): strip usdt+swap to form the
+# experimint-v0.11 platform branch"), workspace version 0.12.0-alpha.
+#
+# Why the fork and not upstream master: the usdt server depends on
+# `fedimint-threshold-ecdsa` (`crypto/threshold-ecdsa`), which exists only on
+# this branch. The branch also carries the `--module` config-gen CLI and the
+# typed per-module `ServerModuleInit::Params` hook. It is NOT a descendant of
+# upstream master — the two diverged from `be854220f`, so this is a different
+# API generation (0.12.0-alpha), not a newer one.
+#
+# To bump: move this rev, then re-run `cargo check --workspace --all-targets`.
+# `branch = "experimint-v0.11"` would also resolve but is not reproducible.
+fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-core = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-logging = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 
 # NOTE: fedimint's own `Cargo.lock` is NOT inherited when you depend on it as a
 # git dependency — cargo re-resolves the whole tree from scratch. That can land

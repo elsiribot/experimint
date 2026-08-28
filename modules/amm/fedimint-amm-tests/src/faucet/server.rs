@@ -83,8 +83,8 @@ use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransacti
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
-    Amounts, ApiEndpoint, CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
-    TransactionItemAmounts,
+    Amounts, ApiEndpoint, CORE_CONSENSUS_VERSION, CoreConsensusVersion, InputMeta,
+    ModuleConsensusVersion, ModuleInit, SupportedModuleApiVersions, TransactionItemAmounts,
 };
 use fedimint_core::{
     Amount, InPoint, OutPoint, PeerId, plugin_types_trait_impl_config, push_db_pair_items,
@@ -180,8 +180,21 @@ impl ModuleInit for FaucetInit {
 impl ServerModuleInit for FaucetInit {
     type Module = Faucet;
 
+    type Params = ();
+
     fn versions(&self, _core: CoreConsensusVersion) -> &[ModuleConsensusVersion] {
         &[MODULE_CONSENSUS_VERSION]
+    }
+
+    fn supported_api_versions(&self) -> SupportedModuleApiVersions {
+        SupportedModuleApiVersions::from_raw(
+            (CORE_CONSENSUS_VERSION.major, CORE_CONSENSUS_VERSION.minor),
+            (
+                MODULE_CONSENSUS_VERSION.major,
+                MODULE_CONSENSUS_VERSION.minor,
+            ),
+            &[(0, 0)],
+        )
     }
 
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Self::Module> {
@@ -195,6 +208,7 @@ impl ServerModuleInit for FaucetInit {
         &self,
         peers: &[PeerId],
         _args: &ConfigGenModuleArgs,
+        _params: &Self::Params,
     ) -> BTreeMap<PeerId, ServerModuleConfig> {
         peers
             .iter()
@@ -212,6 +226,7 @@ impl ServerModuleInit for FaucetInit {
         &self,
         _peers: &(dyn PeerHandleOps + Send + Sync),
         _args: &ConfigGenModuleArgs,
+        _params: &Self::Params,
     ) -> anyhow::Result<ServerModuleConfig> {
         Ok(FaucetConfig {
             private: FaucetConfigPrivate,

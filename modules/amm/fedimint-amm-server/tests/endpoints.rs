@@ -78,7 +78,7 @@ async fn call<R: DeserializeOwned>(
         .into_iter()
         .find(|e| e.path == path)
         .unwrap_or_else(|| panic!("endpoint {path} must be registered"));
-    let context = ApiEndpointContext::new(db.clone(), false);
+    let context = ApiEndpointContext::new(db.clone(), false, None);
     let request = ApiRequestErased::new(params);
     let value = (endpoint.handler)(module, context, request).await?;
     Ok(fedimint_core::module::serde_json::from_value(value)
