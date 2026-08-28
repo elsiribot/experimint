@@ -1,9 +1,21 @@
 # `fedimint-amm` — Module Specification
 
 **Status:** v1, implementation-ready · **Date:** 2026-08-22
-**Target:** fedimint master, pinned at `4794ee166afc191e0125c092893bd8f080939b53` (2026-08-22, workspace `0.13.0-alpha`, edition 2024)
+**Target:** `elsiribot/fedimint` branch `experimint-v0.11`, pinned at `a2d0207702fa13f386b40d41da8133f14fd000ac` (workspace `0.12.0-alpha`, edition 2024)
 **Supersedes:** `fedimint-amm-module-spec.md` (draft v0.1)
 **Prerequisite:** one issuing module instance per tradable unit, each of a **distinct `ModuleKind`** — see §3.2
+
+> **Retarget note (2026-08-28).** This spec was written against fedimint master
+> at `4794ee166afc191e0125c092893bd8f080939b53` (`0.13.0-alpha`). The workspace
+> has since moved to the `experimint-v0.11` platform branch so that the AMM and
+> the USDT module share one `fedimint-core`. That branch is **not** an ancestor
+> or descendant of the old pin — the two diverged from `be854220f` and are
+> different API generations. §3.2 has been corrected where the change made it
+> factually wrong. The remaining `file:line` citations were verified against the
+> old pin and have **not** been re-verified against this one; treat the file
+> paths as reliable and the line numbers as approximate. The implementation
+> itself compiles and passes its full suite against the current pin, which is
+> the load-bearing check.
 
 ---
 
@@ -85,14 +97,38 @@ This is why the draft's single-input swap needed the `fees` channel as a "consum
 
 ### 3.2 Where a second unit actually comes from
 
-Core's multi-unit machinery is complete (P2–P5), but on the pinned rev **a federation cannot issue two units through `mintv2`**, for two independent reasons:
+Core's multi-unit machinery is complete (P2–P5). **One instance per module kind** remains a hard constraint: `ModuleInitRegistry` is a `BTreeMap<ModuleKind, _>` whose `attach` carries a hard `assert!(… is_none(), "Can't insert module of same kind twice: {kind}")` (`fedimint-core/src/config.rs:713`), and `ConfigGenParams.enabled_modules` is a `BTreeSet<ModuleKind>` that config generation enumerates one instance per. A second `mintv2` cannot be registered at all.
 
-1. **One instance per module kind.** `ModuleInitRegistry` is a `BTreeMap<ModuleKind, _>` whose `attach` carries a hard `assert!(… is_none(), "Can't insert module of same kind twice")` (`fedimint-core/src/config.rs:540,616-625`), and `ConfigGenParams.enabled_modules` is a `BTreeSet<ModuleKind>` that config generation enumerates one instance per (`fedimint-server/src/config/mod.rs:251,501,663`). A second `mintv2` cannot be registered at all.
-2. **No per-module config-gen params.** `ConfigGenModuleArgs` is `{ network, disable_base_fees }` (`fedimint-server-core/src/init.rs:49-54`), with no channel for structured operator input — so `mintv2` hardcodes `amount_unit: AmountUnit::BITCOIN` (`mintv2-server/src/lib.rs:199,255`). Even if (1) were solved, both instances would be BITCOIN, and `PoolId::new` rejects `lo == hi`.
+**Consequence for this module.** It is entirely unit-generic and does not care which module issues a unit — but its counterparties must be issuing modules of **distinct `ModuleKind`s**. A BTC↔USD pool needs `mintv2` for BTC and some *other* module kind issuing USD. "One `mintv2` per unit", as the draft assumed, is not achievable at any effort short of rekeying the module registry and the DKG wire format. Fixing this is a large architectural change.
 
-**Consequence for this module.** It is entirely unit-generic and does not care which module issues a unit — but its counterparties must be issuing modules of **distinct `ModuleKind`s**. A BTC↔USD pool needs `mintv2` for BTC and some *other* module kind issuing USD. "One `mintv2` per unit", as the draft assumed, is not achievable at any effort short of rekeying the module registry and the DKG wire format.
+> **Superseded on the current pin.** An earlier revision of this section gave a
+> second, independent reason: that `ConfigGenModuleArgs` is a fixed
+> `{ network, disable_base_fees }` with no channel for structured operator
+> input, so `mintv2` hardcoded `amount_unit: AmountUnit::BITCOIN` and two
+> instances would both be BITCOIN anyway. **That is no longer true.** The
+> platform branch this repo pins carries a typed per-instance config-gen hook —
+> `ServerModuleInit::Params` — and `mintv2` uses it (`type Params =
+> MintGenParams`, with `amount_unit` settable per instance and overridable by
+> the config-gen leader through the `--module` CLI). `ConfigGenModuleArgs`
+> itself is still `{ network, disable_base_fees }`
+> (`fedimint-server-core/src/init.rs:50-55`); it is now the federation-wide
+> half of a two-part interface rather than the whole of it. This was the
+> additive upstream change §16 asked for, and it has landed. Only the
+> one-instance-per-kind constraint above still binds.
+>
+> This module has not adopted `Params` yet — it declares `Params = ()` and
+> bakes its unit allowlist and fee schedule into `default_consensus_config`.
+> Threading them through config gen is now possible and is a config-gen
+> change, not a consensus one.
 
-This is the binding platform constraint on deploying this module, and it is why §14's integration tests use a purpose-built test-only issuing module under its own kind rather than a second `mintv2`. Fixing (2) is the additive change §16 records as an upstream ask; fixing (1) is a much larger architectural one.
+**The second unit now exists in-tree.** `modules/usdt` issues `USDT_UNIT =
+AmountUnit::new_custom(1)` under `ModuleKind("usdt")` — a distinct kind, so it
+composes with `mintv2` exactly as this section requires. That is the same unit
+id this module's `default_consensus_config` already allowlists alongside
+`AmountUnit::BITCOIN`, so a BTC↔USDT pool needs no config change here. §14's
+integration tests still use the purpose-built test-only faucet module rather
+than `usdt`, to keep the AMM's test suite independent of the USDT module's
+EVM/anvil infrastructure.
 
 ---
 
