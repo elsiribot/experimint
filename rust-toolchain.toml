@@ -1,6 +1,10 @@
-# Matches fedimint master's flakebox setting `toolchain.channel = "stable"`
+# Matches the platform branch's flakebox setting `toolchain.channel = "stable"`
 # (fedimint has no `rust-toolchain.toml` of its own; the channel is configured
 # in its `flake.nix`). The workspace uses edition 2024, so this needs >= 1.85.
 [toolchain]
 channel = "stable"
 components = ["rustc", "cargo", "clippy", "rustfmt", "rust-src", "rust-analyzer"]
+# The client-facing crates (`*-common`, `*-client`) must stay WASM-safe, so the
+# target ships with the dev shell. `rustup target add` cannot supply it here —
+# the toolchain comes from rust-overlay via the flake, not from rustup.
+targets = ["wasm32-unknown-unknown"]

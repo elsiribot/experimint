@@ -73,6 +73,42 @@
           # bindgen (librocksdb-sys, aws-lc-sys) needs to find libclang.
           LIBCLANG_PATH = "${llvm.libclang.lib}/lib";
 
+          # `cargo check --target wasm32-unknown-unknown` (the WASM-safety gate
+          # on the `*-common`/`*-client` crates) has to compile one C
+          # dependency from source: `secp256k1-sys`, which vendors libsecp256k1
+          # along with its own `wasm/wasm-sysroot`.
+          #
+          # nixpkgs' cc-wrapper is single-target by construction — it warns
+          # "supplying the --target wasm32-unknown-unknown != <host> argument
+          # to a nix-wrapped compiler may not work correctly" and then proves
+          # it twice: it injects `-fzero-call-used-regs=used-gpr`, which clang
+          # rejects outright for wasm32, and it puts the host glibc headers on
+          # the include path, so the build dies on a missing `gnu/stubs-32.h`
+          # while looking for 32-bit glibc that has nothing to do with wasm.
+          #
+          # Pointing this target's CC at the *unwrapped* clang sidesteps both:
+          # no injected hardening flags, no host libc include paths. The vendored
+          # `wasm/wasm-sysroot` supplies the headers instead, which is exactly
+          # what `secp256k1-sys` intends for this target.
+          #
+          # (The platform branch solves the same problem differently, with a
+          # whole separate flakebox `toolchainWasm` cross shell. This is the
+          # small version of that: one env var, same effect for our one C dep.)
+          # Unwrapped clang does not put its own resource-dir headers
+          # (`stddef.h` and friends, which the compiler supplies rather than
+          # libc) on the include path the way the wrapper does, so they are
+          # added back explicitly — and only those, not the host libc.
+          CC_wasm32_unknown_unknown = "${llvm.clang-unwrapped}/bin/clang";
+          CFLAGS_wasm32_unknown_unknown =
+            "-isystem ${llvm.clang-unwrapped.lib}/lib/clang/"
+            + "${lib.versions.major llvm.clang-unwrapped.version}/include";
+
+          # `getrandom` 0.3 refuses to build for wasm32-unknown-unknown unless
+          # told which backend to use — the browser `crypto.getRandomValues`
+          # one, here. Copied from the platform branch's
+          # `nix/flakebox.nix:253`, which sets the identical value.
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS = ''--cfg getrandom_backend="wasm_js"'';
+
           # tonic/prost build scripts must not try to download protoc.
           PROTOC = "${pkgs.protobuf}/bin/protoc";
           PROTOC_INCLUDE = "${pkgs.protobuf}/include";
