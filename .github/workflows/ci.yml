@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Both module families build C from source (secp256k1-sys, gmp-mpfr-sys via
+  # rug <- cggmp21, ring, aws-lc-sys). A cold build is long; without a cache
+  # every job pays it again.
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: build
+            cmd: cargo check --workspace --all-targets --locked
+          - name: clippy
+            cmd: cargo clippy --workspace --all-targets --locked -- -D warnings
+          - name: fmt
+            cmd: cargo fmt --all --check
+          - name: wasm
+            # The client-facing crates must stay WASM-safe. Do not add
+            # non-WASM-safe dependencies to these four.
+            cmd: >-
+              cargo check --locked --target wasm32-unknown-unknown
+              -p fedimint-amm-common -p fedimint-amm-client
+              -p fedimint-usdt-common -p fedimint-usdt-client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: ${{ matrix.name }}
+        run: nix develop --accept-flake-config --command bash -c '${{ matrix.cmd }}'
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    # The usdt module's threshold-ECDSA tests run real MPC signing rounds and
+    # are slow by construction, even with the cggmp21 opt-level=3 overrides.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+
+      # NOTE: `anvil` is deliberately NOT installed here. The usdt e2e suites
+      # skip rather than fail without it, so this lane is green without
+      # exercising them -- see README. Installing Foundry and running them is a
+      # separate, slower lane worth adding, not something this one silently
+      # covers.
+      - name: cargo test
+        run: nix develop --accept-flake-config --command bash -c 'cargo test --workspace --locked'
