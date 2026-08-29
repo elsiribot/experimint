@@ -6,11 +6,12 @@
 //! [`FaucetOutput`] for free. That is the entire point: it exists solely as a
 //! funding counterparty so `fedimint-amm-tests` can exercise the real `amm`
 //! module against a second issuing unit in a real, consensus-driven
-//! federation, without a second `mintv2` instance being possible (spec §3.2 —
-//! `ModuleInitRegistry` allows only one instance per `ModuleKind`, and
-//! `mintv2` hardcodes `AmountUnit::BITCOIN` with no config-gen params channel
-//! to override it). `fedimint-amm-{common,server,client}` do not and must not
+//! federation. `fedimint-amm-{common,server,client}` do not and must not
 //! depend on this crate.
+//!
+//! It exists because it is *smaller* than a second `mintv2`, not because a
+//! second `mintv2` is impossible — see this module's `mod.rs` for that
+//! correction.
 //!
 //! ## Why minting from nothing doesn't crash the federation
 //!

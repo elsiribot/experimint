@@ -27,6 +27,10 @@ jobs:
         include:
           - name: build
             cmd: cargo check --workspace --all-targets --locked
+          - name: bin
+            # The daemon is the only thing that proves the module set actually
+            # links; a lib-only check would not catch a missing module dep.
+            cmd: cargo build --locked -p fedimintd-experimint
           - name: clippy
             cmd: cargo clippy --workspace --all-targets --locked -- -D warnings
           - name: fmt

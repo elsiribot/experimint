@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "bin/fedimintd-experimint",
     "modules/amm/fedimint-amm-client",
     "modules/amm/fedimint-amm-common",
     "modules/amm/fedimint-amm-server",
@@ -43,6 +44,7 @@ version = "0.1.0"
 devimint = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-build = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
@@ -51,7 +53,9 @@ fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = 
 fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-logging = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
@@ -62,6 +66,8 @@ fedimint-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d020
 fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
+fedimintd = { git = "https://github.com/elsiribot/fedimint", rev = "a2d0207702fa13f386b40d41da8133f14fd000ac" }
 
 # NOTE: fedimint's own `Cargo.lock` is NOT inherited when you depend on it as a
 # git dependency — cargo re-resolves the whole tree from scratch. That can land

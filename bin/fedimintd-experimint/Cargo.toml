@@ -1,0 +1,44 @@
+[package]
+authors = { workspace = true }
+description = "fedimintd built with the experimint module set (v2 core modules + meta + amm + usdt)"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimintd-experimint"
+publish = false
+readme = { workspace = true }
+repository = { workspace = true }
+version = { workspace = true }
+
+[[bin]]
+name = "fedimintd-experimint"
+path = "src/bin/main.rs"
+
+[lib]
+name = "fedimintd_experimint"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+fedimint-amm-server = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-lnv2-server = { workspace = true }
+fedimint-meta-server = { workspace = true }
+fedimint-mintv2-server = { workspace = true }
+fedimint-server-core = { workspace = true }
+fedimint-usdt-server = { workspace = true }
+fedimint-walletv2-server = { workspace = true }
+fedimintd = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+# `usdt_unit_is_in_the_amm_allowlist` asserts the unit the topology trades.
+fedimint-usdt-common = { workspace = true }
+
+[build-dependencies]
+# Sets `FEDIMINT_BUILD_CODE_VERSION`, which `fedimint_build_code_version_env!()`
+# reads via `env!` at *this* crate's compile time. Without the build script the
+# macro fails to expand.
+fedimint-build = { workspace = true }
+
+[lints]
+workspace = true

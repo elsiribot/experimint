@@ -3,7 +3,7 @@
 **Status:** v1, implementation-ready · **Date:** 2026-08-22
 **Target:** `elsiribot/fedimint` branch `experimint-v0.11`, pinned at `a2d0207702fa13f386b40d41da8133f14fd000ac` (workspace `0.12.0-alpha`, edition 2024)
 **Supersedes:** `fedimint-amm-module-spec.md` (draft v0.1)
-**Prerequisite:** one issuing module instance per tradable unit, each of a **distinct `ModuleKind`** — see §3.2
+**Prerequisite:** one issuing module instance per tradable unit. They may share a `ModuleKind` (e.g. two `mintv2` instances) or not — see §3.2
 
 > **Retarget note (2026-08-28).** This spec was written against fedimint master
 > at `4794ee166afc191e0125c092893bd8f080939b53` (`0.13.0-alpha`). The workspace
@@ -97,12 +97,27 @@ This is why the draft's single-input swap needed the `fees` channel as a "consum
 
 ### 3.2 Where a second unit actually comes from
 
-Core's multi-unit machinery is complete (P2–P5). **One instance per module kind** remains a hard constraint: `ModuleInitRegistry` is a `BTreeMap<ModuleKind, _>` whose `attach` carries a hard `assert!(… is_none(), "Can't insert module of same kind twice: {kind}")` (`fedimint-core/src/config.rs:713`), and `ConfigGenParams.enabled_modules` is a `BTreeSet<ModuleKind>` that config generation enumerates one instance per. A second `mintv2` cannot be registered at all.
+Core's multi-unit machinery is complete (P2–P5), and **a federation can run as many instances of one module kind as it likes.** `ServerModuleConfigGenParamsRegistry` is a `ModuleRegistry<ConfigGenModuleParams>`, i.e. `BTreeMap<ModuleInstanceId, (ModuleKind, ConfigGenModuleParams)>` (`fedimint-core/src/module/registry.rs`) — keyed by **instance**, not by kind. `ConfigGenParams::module_params` is documented as "the single source of truth for which module instances the federation runs" (`fedimint-server/src/config/mod.rs`). Two `mintv2` instances with different `amount_unit`s are a supported, tested topology: `fedimint-cli`'s `parses_full_deployment_topology` asserts exactly that shape.
 
-**Consequence for this module.** It is entirely unit-generic and does not care which module issues a unit — but its counterparties must be issuing modules of **distinct `ModuleKind`s**. A BTC↔USD pool needs `mintv2` for BTC and some *other* module kind issuing USD. "One `mintv2` per unit", as the draft assumed, is not achievable at any effort short of rekeying the module registry and the DKG wire format. Fixing this is a large architectural change.
+**Consequence for this module.** None, beyond confirming it is unit-generic. A BTC↔USD pool can be served by two `mintv2` instances, by `mintv2` plus a different issuing kind (e.g. `usdt`), or any mix. "One `mintv2` per unit", as the draft assumed, is achievable after all.
 
-> **Superseded on the current pin.** An earlier revision of this section gave a
-> second, independent reason: that `ConfigGenModuleArgs` is a fixed
+> **Correction (2026-08-28).** Two earlier revisions of this section were wrong,
+> in opposite directions, and both are worth stating plainly because the header's
+> "Prerequisite" line was derived from them.
+>
+> **The first error — the one that survived longest — was claiming a second
+> `mintv2` "cannot be registered at all".** The cited evidence was real but was
+> about a different registry: the `assert!(…, "Can't insert module of same kind
+> twice")` lives on `ModuleInitRegistry`, which maps `ModuleKind` → *init*. That
+> is one **implementation** per kind, which is correct and expected — a single
+> `mintv2` init serves every `mintv2` instance. It says nothing about how many
+> instances run. `ConfigGenParams` does not have an `enabled_modules` field at
+> all; the `BTreeSet<ModuleKind>` by that name is a parameter of the
+> `build_module_params_registry` *helper* that materialises a default
+> one-per-kind list, not the config-gen data model. Instance-keyed
+> `module_params` is the real source of truth.
+>
+> **The second error** was a claim about `ConfigGenModuleArgs` being a fixed
 > `{ network, disable_base_fees }` with no channel for structured operator
 > input, so `mintv2` hardcoded `amount_unit: AmountUnit::BITCOIN` and two
 > instances would both be BITCOIN anyway. **That is no longer true.** The
@@ -113,8 +128,14 @@ Core's multi-unit machinery is complete (P2–P5). **One instance per module kin
 > itself is still `{ network, disable_base_fees }`
 > (`fedimint-server-core/src/init.rs:50-55`); it is now the federation-wide
 > half of a two-part interface rather than the whole of it. This was the
-> additive upstream change §16 asked for, and it has landed. Only the
-> one-instance-per-kind constraint above still binds.
+> additive upstream change §16 asked for, and it has landed.
+>
+> With both corrected, **no platform constraint blocks a multi-unit federation.**
+> The one real remaining gap is cosmetic by comparison: the setup **UI** renders
+> one checkbox per kind and so cannot express a second instance. The CLI/API path
+> (`set-local-params --module`) can, and does. See
+> `bin/fedimintd-experimint`'s crate docs for the full analysis and the minimal
+> upstream fix.
 >
 > This module has not adopted `Params` yet — it declares `Params = ()` and
 > bakes its unit allowlist and fee schedule into `default_consensus_config`.

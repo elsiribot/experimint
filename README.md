@@ -9,6 +9,83 @@ Two module families live here:
 | --- | --- | --- |
 | `modules/amm` | `fedimint-amm-{common,server,client,tests}` | A constant-product AMM (Uniswap V2 as reference implementation) trading between the federation's `AmountUnit`s. See [`modules/amm/fedimint-amm-spec.md`](modules/amm/fedimint-amm-spec.md). |
 | `modules/usdt` | `fedimint-usdt-{common,server,client,tests}` | USDT-on-EVM peg-in/peg-out via threshold ECDSA and ERC-4337. Lifted from the fork; consensus version 0.12, with deployed federations. |
+| `bin/fedimintd-experimint` | — | A `fedimintd` carrying the v2 core modules, `meta`, and both local modules. |
+
+## Running a federation
+
+`bin/fedimintd-experimint` is a thin wrapper around the platform branch's
+`fedimintd::run`, supplying this module set: `mintv2`, `walletv2`, `lnv2`,
+`meta`, `amm`, `usdt`. Every flag, env var, setup UI and API endpoint is
+inherited from upstream.
+
+```bash
+cargo run -p fedimintd-experimint -- --help
+```
+
+It deliberately omits the v1 `mint`/`wallet`/`ln` modules that a stock
+`fedimintd` also attaches: this binary targets a multi-unit federation, which is
+a v2-only story — the v1 modules predate `AmountUnit`.
+
+### The intended topology
+
+| Instance | Purpose |
+| --- | --- |
+| `walletv2` | on-chain BTC peg-in/peg-out |
+| `mintv2` (`amount_unit: 0`) | BTC ecash |
+| `mintv2` (`amount_unit: 1`) | USDT ecash |
+| `usdt` | USDT-on-EVM peg (issues `AmountUnit::new_custom(1)`) |
+| `amm` | constant-product market between units 0 and 1 |
+| `lnv2` | Lightning |
+| `meta` | guardian-published metadata |
+
+Note the **two `mintv2` instances**. Only one of the two setup paths can
+express that.
+
+**CLI / API — works today.** `set-local-params` takes a repeatable
+`--module <kind>[=<json>]` that builds the instance list directly. Instance ids
+are assigned by flag position:
+
+```bash
+fedimint-cli admin setup set-local-params \
+    --module walletv2 \
+    --module 'mintv2={"amount_unit":0}' \
+    --module 'mintv2={"amount_unit":1}' \
+    --module lnv2 \
+    --module 'usdt={"chain_id":1}' \
+    --module amm \
+    --module meta
+```
+
+The platform branch has a test (`parses_full_deployment_topology`) asserting
+exactly this shape, two `mintv2` instances included.
+
+**Setup UI — not expressible.** The web UI renders one checkbox per module
+*kind*. Upstream's own comment says it: *"the current UI can only express a
+single instance per kind … the instance list type already supports it."*
+
+Multi-instance is not a platform limitation —
+`ServerModuleConfigGenParamsRegistry` is keyed by `ModuleInstanceId`, and
+`ConfigGenParams::module_params` is documented as the single source of truth for
+which instances run. (The `"Can't insert module of same kind twice"` assert is
+on `ModuleInitRegistry`, kind → *init*: one implementation per kind, unrelated
+to instance count. Conflating the two is an easy mistake.)
+
+The fix is smaller than it looks and is **not in the UI**: `select_kinds` already
+keeps *every* instance whose kind is ticked, so a two-instance available-list
+survives the UI intact. The blocker is only that `fedimintd::run` builds
+`ConfigGenSettings::available_module_params` internally as
+`build_module_params_registry(&registry, &registry.kinds())` — one per kind —
+with no caller override. Letting `run` accept a caller-supplied value would let
+this crate declare the topology and have the existing UI materialize it. That is
+an additive platform-branch change; it cannot be done from this repo.
+
+### Modules are not pre-ticked by default
+
+The setup UI pre-selects only modules whose `is_enabled_by_default()` is true —
+here just `lnv2`, `meta` and `amm`. The three carrying the interesting topology
+are opt-in via `FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
+`FM_ENABLE_MODULE_USDT`. They are still *available* without those variables; the
+variables only decide what starts pre-selected.
 
 ## The platform pin
 
@@ -141,12 +218,14 @@ crates.
 
 ## Not here yet
 
-- **Runnable binaries.** There is no `fedimintd-experimint` or
-  `fedimint-cli-experimint` yet — the modules build and test, but nothing in
-  this repo starts a federation with them attached. Adding them means a thin
-  `fedimintd` that attaches `UsdtInit` (and `AmmInit`), mirroring the fork's
-  `default_modules()`, plus the matching client-side registrations.
+- **A matching client binary.** There is no `fedimint-cli-experimint`
+  registering the `amm` and `usdt` *client* modules, so a stock `fedimint-cli`
+  can drive setup and the generic admin API but cannot exercise those two
+  modules' client-side flows.
+- **Setup-UI support for multiple instances of one module kind** — see above.
+  Needed for the intended topology to be reachable without the CLI.
 - **The `swap` module**, the other custom module on the fork's
   `2026-07-usdt-wallet` branch.
-- **CI.** There is no `.github/` in this repo, so none of the checks above run
-  automatically.
+- **An end-to-end run of the full topology.** `fedimintd-experimint` builds and
+  its module set is unit-tested, but no test in this repo stands up a
+  federation with all seven instances and moves value across them.
