@@ -216,6 +216,11 @@ lose the coverage. Every other failure mode (bad `FM_ANVIL_BASE_EXECUTABLE`,
 wrong permissions, anvil spawning but never serving RPC) is a hard failure, by
 design.
 
+`tests/full_topology_e2e.rs` deliberately does not take that affordance: it
+treats a missing `anvil` as a hard failure, because its central claim is that
+the `amm` trades *real* USDt and a silently-skipped USDt leg would make that
+claim unfalsifiable.
+
 These suites are the only coverage of the real ERC-4337 UserOp path,
 withdrawal batching against a live chain, reorg handling, residual recovery and
 non-standard token behaviour. `FM_ANVIL_BASE_EXECUTABLE` overrides the binary
@@ -252,6 +257,13 @@ crates.
   modules' client-side flows.
 - **The `swap` module**, the other custom module on the fork's
   `2026-07-usdt-wallet` branch.
-- **An end-to-end run of the full topology.** `fedimintd-experimint` builds and
-  its module set is unit-tested, but no test in this repo stands up a
-  federation with all seven instances and moves value across them.
+- **A deployment-shaped run of the full topology.** The topology itself is now
+  covered: `fedimint-usdt-tests`' `tests/full_topology_e2e.rs` stands up one
+  in-process federation with all seven instances (both `mintv2`s included),
+  pegs BTC in over `walletv2`, deposits USDt by proof against a real `anvil`,
+  seeds an `amm` pool with both legs, swaps each way at the quoted price,
+  withdraws the position and checks every guardian's balance sheet. What is
+  still untested is the deployment shape around it: `fedimint-testing`
+  trusted-dealer-generates configs rather than driving the `--module` CLI/UI
+  path, and no Lightning gateway is attached, so `lnv2` boots but never
+  routes.

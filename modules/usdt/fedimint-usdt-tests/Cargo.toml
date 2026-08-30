@@ -56,8 +56,12 @@ alloy-rlp = { workspace = true }
 alloy-trie = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bitcoin = { workspace = true }
 clap = { workspace = true }
 devimint = { workspace = true }
+fedimint-amm-client = { workspace = true }
+fedimint-amm-common = { workspace = true }
+fedimint-amm-server = { workspace = true }
 fedimint-api-client = { workspace = true }
 # The adversary bin joins a live federation from an invite code (mirroring
 # `fedimint-cli`'s client-join path).
@@ -66,7 +70,13 @@ fedimint-client = { workspace = true }
 fedimint-client-module = { workspace = true }
 fedimint-connectors = { workspace = true }
 fedimint-core = { workspace = true }
+fedimint-lnv2-client = { workspace = true }
+fedimint-lnv2-common = { workspace = true }
+fedimint-lnv2-server = { workspace = true }
 fedimint-logging = { workspace = true }
+fedimint-meta-client = { workspace = true }
+fedimint-meta-common = { workspace = true }
+fedimint-meta-server = { workspace = true }
 fedimint-mint-client = { workspace = true }
 fedimint-mint-common = { workspace = true }
 fedimint-mint-server = { workspace = true }
@@ -78,6 +88,9 @@ fedimint-testing = { workspace = true }
 fedimint-usdt-client = { workspace = true, features = ["test-util"] }
 fedimint-usdt-common = { workspace = true }
 fedimint-usdt-server = { workspace = true }
+fedimint-walletv2-client = { workspace = true }
+fedimint-walletv2-common = { workspace = true }
+fedimint-walletv2-server = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }

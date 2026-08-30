@@ -1,10 +1,14 @@
 //! End-to-end integration tests for the `amm` module against a real,
 //! consensus-driven federation running `mintv2` (BITCOIN), the test-only
-//! `faucet` module (a second, custom `AmountUnit` — see
-//! `fedimint_amm_tests::faucet`'s module doc comment for why a real
-//! federation cannot host two `mintv2` instances), `amm` itself, and `dummy`
+//! `faucet` module (a second, custom `AmountUnit`), `amm` itself, and `dummy`
 //! (used only to bootstrap BITCOIN into a wallet, exactly as
 //! `fedimint-mintv2-tests`'s own `issue_ecash` helper does).
+//!
+//! `faucet` stands in for the second unit because it is *smaller*, not
+//! because a second `mintv2` is impossible — see
+//! `fedimint_amm_tests::faucet`'s module doc comment, and
+//! `fedimint-usdt-tests`' `tests/full_topology_e2e.rs`, which runs this same
+//! `amm` against a real second `mintv2` denominated in `USDT_UNIT`.
 //!
 //! No plan-of-record multi-hop test: a third hop needs a third tradable
 //! unit, which needs a third issuing module of a third `ModuleKind` (spec
