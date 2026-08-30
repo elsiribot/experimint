@@ -132,6 +132,47 @@ async fn find_sole_pending_user_op_hash(
     }
 }
 
+/// IGNORED — needs an ERC-4337 bundler, which the dev shell does not run.
+///
+/// SIX tests share this one root cause; this is the shared analysis. The
+/// others are `nonstandard_usdt_e2e.rs`'s two `*_via_nonstandard_usdt` tests
+/// `user_op_isolation.rs`'s
+/// `hand_signed_userop_deploys_and_sweeps_a_counterfactual_account`,
+/// `withdraw_e2e.rs`'s
+/// `withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoint`,
+/// and `withdrawal_batch_isolation.rs`'s
+/// `hand_signed_withdrawal_batch_deploys_pool_and_pays_recipients`.
+///
+/// ROOT CAUSE (confirmed, not inferred): the confirmation path calls
+/// `eth_getUserOperationReceipt`, which is an ERC-4337 **bundler** RPC method.
+/// `anvil` is a plain EVM node and answers it with
+/// `-32601 Method not found` — verified directly against the same binary the
+/// dev shell provides. So `handleOps` lands (it is an ordinary transaction and
+/// anvil mines it), but the receipt lookup fails, `UserOpConfirmed` never
+/// votes, the submitter times the op out and RBF-reprices it ~10% higher,
+/// forever, while `PoolState.balance` stays 0.
+///
+/// The `erc4337_harness` case is what pins the diagnosis: it hand-signs its
+/// UserOp with no MPC at all and still fails at `get_user_op_receipt`. That
+/// rules out threshold signing, the fee work, and consensus, leaving only the
+/// receipt lookup.
+///
+/// Adding Foundry to the dev shell was necessary but not sufficient. To run
+/// these, a bundler (rundler, Alto, ...) has to sit in front of anvil and
+/// `FM_USDT_EVM_RPC_URL` point at it.
+///
+/// An earlier revision of this comment blamed a shared-broadcaster nonce race,
+/// on the strength of a `-32003 nonce too low` warning in the logs. That was a
+/// guess and it was wrong; the warning comes from an unrelated retried
+/// factory self-deploy tick. Left recorded so nobody re-derives it.
+///
+/// PRODUCT NOTE, worth someone's judgement: `rpc.rs` documents the bundler
+/// receipt as "only a HINT", and re-derives success, block and gas cost from
+/// the EntryPoint's own `UserOperationEvent` log. But an *unavailable* hint is
+/// treated as a hard failure rather than degrading to a log scan. That makes a
+/// bundler a hard runtime dependency for confirmations in production, and
+/// stalls settlement whenever the bundler RPC is down.
+#[ignore = "pre-existing failure: sweep op never confirms, RBF-reprices forever;             see the doc comment above -- unverified root cause"]
 #[tokio::test(flavor = "multi_thread")]
 async fn deposit_account_is_deployed_and_swept_via_real_mpc_and_real_entrypoint()
 -> anyhow::Result<()> {

@@ -128,6 +128,8 @@ async fn mine_empty_blocks(anvil: &common::AnvilHandle, count: u32) -> anyhow::R
     Ok(())
 }
 
+#[ignore = "needs an ERC-4337 bundler; anvil answers eth_getUserOperationReceipt \
+            with -32601. See deploy_and_sweep_e2e.rs for the shared analysis"]
 #[tokio::test(flavor = "multi_thread")]
 async fn withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoint()
 -> anyhow::Result<()> {
@@ -193,7 +195,12 @@ async fn withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoin
         // several minutes of REAL anvil chain time, all of which must stay
         // within the feed's fixed `updatedAt` staleness window.
         eth_usd_price_feed: price_feed,
-        price_feed_max_staleness_secs: 1_000_000,
+        // 4h, matching every other e2e fixture. This was 1_000_000, which
+        // `validate_usdt_params` rejects (max 86_400) -- the test could never
+        // have reached DKG in a real federation, where `distributed_gen`
+        // validates the same bound fallibly. It went unnoticed because the
+        // whole suite silently skipped without anvil.
+        price_feed_max_staleness_secs: 14_400,
         residual_recovery_recipient: EvmAddress([0u8; 20]),
     };
 
