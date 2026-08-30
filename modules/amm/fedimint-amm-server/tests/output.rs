@@ -17,7 +17,7 @@ use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::AmountUnit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::secp256k1::{self, Keypair, SECP256K1};
-use fedimint_core::{Amount, BitcoinHash, OutPoint, TransactionId};
+use fedimint_core::{Amount, BitcoinHash, NumPeers, OutPoint, PeerId, TransactionId};
 use fedimint_server_core::ServerModule;
 
 fn db() -> Database {
@@ -50,24 +50,34 @@ fn out_point() -> OutPoint {
 /// Units 0 and 1 are in the allowlist with `min_swap_in` 1_000 msats each;
 /// default fee 3/1000 (0.30%), matching the reference Uniswap V2 fee.
 fn amm() -> Amm {
-    Amm::new(AmmConfigConsensus {
-        units: BTreeMap::from([
-            (
-                unit(0),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1_000),
-                },
-            ),
-            (
-                unit(1),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1_000),
-                },
-            ),
-        ]),
-        default_fee_per_mille: 3,
-        fee_overrides: BTreeMap::new(),
-    })
+    Amm::new(
+        AmmConfigConsensus {
+            units: BTreeMap::from([
+                (
+                    unit(0),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1_000),
+                    },
+                ),
+                (
+                    unit(1),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1_000),
+                    },
+                ),
+            ]),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::new(),
+            // Wide open: these tests predate the guardian-voted fee and assert
+            // curve and settlement behaviour, so the band must not be the thing
+            // that changes their effective fee. The band itself is exercised by
+            // the fee-vote tests.
+            min_fee_per_mille: 0,
+            max_fee_per_mille: 999,
+        },
+        NumPeers::from(4),
+        PeerId::from(0),
+    )
 }
 
 fn pool01() -> PoolId {
@@ -241,16 +251,26 @@ async fn deposit_with_min_shares_too_high_returns_slippage_exceeded() {
 async fn deposit_with_lo_outside_allowlist_is_rejected() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
-    let module = Amm::new(AmmConfigConsensus {
-        units: BTreeMap::from([(
-            unit(5),
-            UnitParams {
-                min_swap_in: Amount::from_msats(1_000),
-            },
-        )]),
-        default_fee_per_mille: 3,
-        fee_overrides: BTreeMap::new(),
-    });
+    let module = Amm::new(
+        AmmConfigConsensus {
+            units: BTreeMap::from([(
+                unit(5),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1_000),
+                },
+            )]),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::new(),
+            // Wide open: these tests predate the guardian-voted fee and assert
+            // curve and settlement behaviour, so the band must not be the thing
+            // that changes their effective fee. The band itself is exercised by
+            // the fee-vote tests.
+            min_fee_per_mille: 0,
+            max_fee_per_mille: 999,
+        },
+        NumPeers::from(4),
+        PeerId::from(0),
+    );
     let pool = PoolId::new(unit(1), unit(5)).unwrap();
     assert_eq!(
         pool.lo(),
@@ -298,16 +318,26 @@ async fn deposit_with_lo_outside_allowlist_is_rejected() {
 async fn deposit_with_hi_outside_allowlist_is_rejected() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
-    let module = Amm::new(AmmConfigConsensus {
-        units: BTreeMap::from([(
-            unit(1),
-            UnitParams {
-                min_swap_in: Amount::from_msats(1_000),
-            },
-        )]),
-        default_fee_per_mille: 3,
-        fee_overrides: BTreeMap::new(),
-    });
+    let module = Amm::new(
+        AmmConfigConsensus {
+            units: BTreeMap::from([(
+                unit(1),
+                UnitParams {
+                    min_swap_in: Amount::from_msats(1_000),
+                },
+            )]),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::new(),
+            // Wide open: these tests predate the guardian-voted fee and assert
+            // curve and settlement behaviour, so the band must not be the thing
+            // that changes their effective fee. The band itself is exercised by
+            // the fee-vote tests.
+            min_fee_per_mille: 0,
+            max_fee_per_mille: 999,
+        },
+        NumPeers::from(4),
+        PeerId::from(0),
+    );
     let pool = PoolId::new(unit(1), unit(5)).unwrap();
     assert_eq!(
         pool.lo(),
@@ -1199,24 +1229,34 @@ async fn swap_settles_at_the_pool_fee_override_not_the_default() {
     let mut dbtx = db.begin_transaction_nc().await;
     let pool = pool01();
 
-    let module = Amm::new(AmmConfigConsensus {
-        units: BTreeMap::from([
-            (
-                unit(0),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1_000),
-                },
-            ),
-            (
-                unit(1),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1_000),
-                },
-            ),
-        ]),
-        default_fee_per_mille: 3,
-        fee_overrides: BTreeMap::from([(pool, 100)]),
-    });
+    let module = Amm::new(
+        AmmConfigConsensus {
+            units: BTreeMap::from([
+                (
+                    unit(0),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1_000),
+                    },
+                ),
+                (
+                    unit(1),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1_000),
+                    },
+                ),
+            ]),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::from([(pool, 100)]),
+            // Wide open: these tests predate the guardian-voted fee and assert
+            // curve and settlement behaviour, so the band must not be the thing
+            // that changes their effective fee. The band itself is exercised by
+            // the fee-vote tests.
+            min_fee_per_mille: 0,
+            max_fee_per_mille: 999,
+        },
+        NumPeers::from(4),
+        PeerId::from(0),
+    );
 
     // Same reserves as the reference-vector tests, so the ONLY thing that
     // could make `expected_dy` differ from the well-known fee-3 answer
@@ -1289,24 +1329,34 @@ async fn swap_with_fee_zero_and_exact_division_is_accepted() {
     let mut dbtx = db.begin_transaction_nc().await;
     let pool = pool01();
 
-    let module = Amm::new(AmmConfigConsensus {
-        units: BTreeMap::from([
-            (
-                unit(0),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1),
-                },
-            ),
-            (
-                unit(1),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1),
-                },
-            ),
-        ]),
-        default_fee_per_mille: 0,
-        fee_overrides: BTreeMap::new(),
-    });
+    let module = Amm::new(
+        AmmConfigConsensus {
+            units: BTreeMap::from([
+                (
+                    unit(0),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1),
+                    },
+                ),
+                (
+                    unit(1),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1),
+                    },
+                ),
+            ]),
+            default_fee_per_mille: 0,
+            fee_overrides: BTreeMap::new(),
+            // Wide open: these tests predate the guardian-voted fee and assert
+            // curve and settlement behaviour, so the band must not be the thing
+            // that changes their effective fee. The band itself is exercised by
+            // the fee-vote tests.
+            min_fee_per_mille: 0,
+            max_fee_per_mille: 999,
+        },
+        NumPeers::from(4),
+        PeerId::from(0),
+    );
 
     dbtx.insert_new_entry(
         &PoolKey(pool),

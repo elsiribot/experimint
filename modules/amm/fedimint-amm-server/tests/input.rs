@@ -16,7 +16,7 @@ use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::AmountUnit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::secp256k1::{self, Keypair, SECP256K1};
-use fedimint_core::{Amount, BitcoinHash, InPoint, TransactionId};
+use fedimint_core::{Amount, BitcoinHash, InPoint, NumPeers, PeerId, TransactionId};
 use fedimint_server_core::ServerModule;
 
 fn db() -> Database {
@@ -46,24 +46,34 @@ fn in_point() -> InPoint {
 /// `process_output`), but it mirrors `output.rs`'s `amm()` so both test files
 /// build the module identically.
 fn amm() -> Amm {
-    Amm::new(AmmConfigConsensus {
-        units: BTreeMap::from([
-            (
-                unit(0),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1_000),
-                },
-            ),
-            (
-                unit(1),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1_000),
-                },
-            ),
-        ]),
-        default_fee_per_mille: 3,
-        fee_overrides: BTreeMap::new(),
-    })
+    Amm::new(
+        AmmConfigConsensus {
+            units: BTreeMap::from([
+                (
+                    unit(0),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1_000),
+                    },
+                ),
+                (
+                    unit(1),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1_000),
+                    },
+                ),
+            ]),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::new(),
+            // Wide open: these tests predate the guardian-voted fee and assert
+            // curve and settlement behaviour, so the band must not be the thing
+            // that changes their effective fee. The band itself is exercised by
+            // the fee-vote tests.
+            min_fee_per_mille: 0,
+            max_fee_per_mille: 999,
+        },
+        NumPeers::from(4),
+        PeerId::from(0),
+    )
 }
 
 fn pool01() -> PoolId {

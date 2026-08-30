@@ -39,7 +39,7 @@ use fedimint_core::module::audit::Audit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::{AmountUnit, Amounts};
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
-use fedimint_core::{Amount, BitcoinHash, InPoint, OutPoint, TransactionId};
+use fedimint_core::{Amount, BitcoinHash, InPoint, NumPeers, OutPoint, PeerId, TransactionId};
 use fedimint_server_core::ServerModule;
 
 const MODULE_INSTANCE_ID: ModuleInstanceId = 0;
@@ -78,24 +78,34 @@ fn in_point() -> InPoint {
 /// never rejected as dust — this test is about audit conservation, not the
 /// dust policy.
 fn amm() -> Amm {
-    Amm::new(AmmConfigConsensus {
-        units: BTreeMap::from([
-            (
-                unit(0),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1),
-                },
-            ),
-            (
-                unit(1),
-                UnitParams {
-                    min_swap_in: Amount::from_msats(1),
-                },
-            ),
-        ]),
-        default_fee_per_mille: 3,
-        fee_overrides: BTreeMap::new(),
-    })
+    Amm::new(
+        AmmConfigConsensus {
+            units: BTreeMap::from([
+                (
+                    unit(0),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1),
+                    },
+                ),
+                (
+                    unit(1),
+                    UnitParams {
+                        min_swap_in: Amount::from_msats(1),
+                    },
+                ),
+            ]),
+            default_fee_per_mille: 3,
+            fee_overrides: BTreeMap::new(),
+            // Wide open: these tests predate the guardian-voted fee and assert
+            // curve and settlement behaviour, so the band must not be the thing
+            // that changes their effective fee. The band itself is exercised by
+            // the fee-vote tests.
+            min_fee_per_mille: 0,
+            max_fee_per_mille: 999,
+        },
+        NumPeers::from(4),
+        PeerId::from(0),
+    )
 }
 
 fn pool01() -> PoolId {

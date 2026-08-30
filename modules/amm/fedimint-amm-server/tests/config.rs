@@ -42,8 +42,48 @@ fn empty_units_are_rejected_by_validation() {
         units: Default::default(),
         default_fee_per_mille: 3,
         fee_overrides: Default::default(),
+        min_fee_per_mille: 1,
+        max_fee_per_mille: 50,
     };
     assert_eq!(cfg.validate(), Err(ConfigError::NoUnits));
+}
+
+/// The generated fee band must actually admit the generated default fee.
+/// A band that excludes it is legal (`validate` only requires
+/// `min <= max < 1000`) and the server clamps rather than fails, so nothing
+/// downstream would notice a generator that shipped a default nobody could
+/// ever charge.
+#[test]
+fn generated_default_fee_lies_inside_the_generated_band() {
+    let peers = (0..4).map(PeerId::from).collect::<Vec<_>>();
+    let configs = AmmInit.trusted_dealer_gen(&peers, &args(), &());
+    let cfg: AmmConfig = configs[&PeerId::from(0)]
+        .clone()
+        .to_typed()
+        .expect("must decode as AmmConfig");
+
+    assert!(
+        cfg.consensus
+            .fee_in_band(cfg.consensus.default_fee_per_mille)
+    );
+    assert_eq!(
+        cfg.consensus
+            .clamp_fee_to_band(cfg.consensus.default_fee_per_mille),
+        cfg.consensus.default_fee_per_mille
+    );
+}
+
+/// An inverted band must fail the ceremony rather than reach the server,
+/// where `clamp_fee_to_band` would panic on it.
+#[test]
+fn validate_config_rejects_an_inverted_fee_band() {
+    let peers = (0..4).map(PeerId::from).collect::<Vec<_>>();
+    let configs = AmmInit.trusted_dealer_gen(&peers, &args(), &());
+    let peer0 = PeerId::from(0);
+
+    let mut bad: AmmConfig = configs[&peer0].clone().to_typed().unwrap();
+    bad.consensus.min_fee_per_mille = bad.consensus.max_fee_per_mille + 1;
+    assert!(AmmInit.validate_config(&peer0, bad.to_erased()).is_err());
 }
 
 /// `get_client_config` must project the consensus config field-for-field.

@@ -19,6 +19,7 @@ erased-serde = { workspace = true }
 fedimint-amm-client = { workspace = true }
 fedimint-amm-common = { workspace = true }
 fedimint-amm-server = { workspace = true }
+fedimint-api-client = { workspace = true }
 fedimint-client = { workspace = true }
 fedimint-client-module = { workspace = true }
 fedimint-core = { workspace = true }
