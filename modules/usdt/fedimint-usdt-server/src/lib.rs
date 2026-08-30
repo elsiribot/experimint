@@ -55,7 +55,9 @@ use fedimint_usdt_common::endpoint_constants::{
     USDT_STATUS_ENDPOINT, USEROP_STATUS_ENDPOINT, WITHDRAW_FEE_QUOTE_ENDPOINT,
     WITHDRAW_FEES_ENDPOINT, WITHDRAWAL_STATUS_ENDPOINT,
 };
-use fedimint_usdt_common::user_op::{SignedUserOp, eth_signed_message_hash, user_op_hash};
+use fedimint_usdt_common::user_op::{
+    SignedUserOp, UnsignedUserOp, eth_signed_message_hash, user_op_hash,
+};
 use fedimint_usdt_common::{
     AnchoredBlockResponse, BLOCK_HASH_RING_LEN, BlockHashObservation, BootstrapObservation,
     BootstrapState, DepositFeeQuoteRequest, DepositFeeQuoteResponse, DepositObservation,
@@ -6921,12 +6923,10 @@ impl Usdt {
     /// deterministic affordability decision consulted by BOTH sides of the
     /// reprice path: [`Usdt::propose_replace_user_ops`] only proposes a reprice
     /// that is UNDER the ceiling, and [`Usdt::process_replace_user_op`]'s
-    /// `Withdraw` arm STALLS (bails) a reprice that is over it. It MUST
-    /// replicate that arm's reprice fee/gas-cost math byte-for-byte so the two
-    /// sides never disagree:
-    /// `new_max_fee_per_gas =
-    /// with_median_fees(median).max_fee_per_gas.max(bump_10_percent(old))`,
-    /// `gas_cost_wei = total_gas_units * new_max_fee_per_gas`,
+    /// `Withdraw` arm STALLS (bails) a reprice that is over it. The fee/
+    /// gas-cost math itself lives in [`repriced_user_op_fees`], the SAME
+    /// helper `process_replace_user_op` builds the replacement from, so the
+    /// two sides cannot disagree by construction. The decision here is:
     /// `ceiling = sum of covered UnclaimedWithdrawals' committed max_fee`,
     /// `over = wei_gas_cost_to_usdt(gas_cost_wei, median.usdt_per_eth_e6) >
     /// ceiling` (an overflowing/degenerate rate is treated as over-ceiling
@@ -6949,22 +6949,11 @@ impl Usdt {
         let UserOpPurpose::Withdraw { outpoints } = &submitted.purpose else {
             return false;
         };
-        let old = &submitted.signed.unsigned;
 
-        // Fresh median-derived fee bumped >= 10% over the OLD op's fee -- the
-        // EXACT `new_max_fee_per_gas` `process_replace_user_op` will build.
-        let priced =
-            GasBounds::DEPLOY_AND_SWEEP_DEVNET.with_median_fees(Some(median.max_fee_per_gas_wei));
-        let new_max_fee_per_gas = priced
-            .max_fee_per_gas
-            .max(bump_10_percent(old.max_fee_per_gas));
-
-        // The broadcaster-fronted prefund the replacement would cost, in wei.
-        let total_gas_units = old
-            .verification_gas_limit
-            .saturating_add(old.call_gas_limit)
-            .saturating_add(u128::try_from(old.pre_verification_gas).unwrap_or(u128::MAX));
-        let gas_cost_wei = total_gas_units.saturating_mul(new_max_fee_per_gas);
+        // The EXACT repriced fee and prefund `process_replace_user_op` will
+        // build (shared helper).
+        let RepricedUserOpFees { gas_cost_wei, .. } =
+            repriced_user_op_fees(&submitted.signed.unsigned, median);
 
         // Ceiling = sum of the covered withdrawals' committed `max_fee` (what
         // the users agreed to pay).
@@ -7106,20 +7095,15 @@ impl Usdt {
 
         let old = submitted.signed.unsigned.clone();
 
-        // Fresh median-derived fee (2x headroom, clamped) -- the SAME formula
-        // the builders use -- then bumped >= 10% over the OLD op's fees so a
-        // bundler prefers the replacement (ERC-4337 mempool replacement rule).
-        // The `GasBounds` receiver is a throwaway: `with_median_fees` only
-        // touches the two fee fields.
-        let priced =
-            GasBounds::DEPLOY_AND_SWEEP_DEVNET.with_median_fees(Some(median.max_fee_per_gas_wei));
-        let new_max_fee_per_gas = priced
-            .max_fee_per_gas
-            .max(bump_10_percent(old.max_fee_per_gas));
-        let new_max_priority_fee_per_gas = priced
-            .max_priority_fee_per_gas
-            .max(bump_10_percent(old.max_priority_fee_per_gas))
-            .min(new_max_fee_per_gas);
+        // The repriced fees, from the SAME shared helper
+        // `withdraw_reprice_over_ceiling` prices affordability with (see
+        // `repriced_user_op_fees`' doc comment), so proposal-side gate and
+        // this arm can never disagree.
+        let RepricedUserOpFees {
+            max_fee_per_gas: new_max_fee_per_gas,
+            max_priority_fee_per_gas: new_max_priority_fee_per_gas,
+            gas_cost_wei: _,
+        } = repriced_user_op_fees(&old, &median);
 
         // The replacement is the OLD op with ONLY the two fee fields bumped:
         // its calldata/nonce/sender/init_code/gas-limits stay byte-identical,
@@ -7689,6 +7673,72 @@ const SWEEP_MAX_FEE_PER_GAS_WEI: u128 = 200_000_000_000;
 /// (unreachable in practice, and the sweep/withdraw ceilings bite first).
 fn bump_10_percent(fee: u128) -> u128 {
     fee.saturating_add(fee.div_ceil(10))
+}
+
+/// The repriced fee fields a `ReplaceUserOp` replacement for `old` carries at
+/// the consensus fee `median`, plus the worst-case broadcaster-fronted
+/// prefund (`gas_cost_wei`) the replacement would cost. See
+/// [`repriced_user_op_fees`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepricedUserOpFees {
+    /// Fresh median-derived fee (2x headroom, clamped -- the SAME formula the
+    /// builders use), bumped >= 10% over the OLD op's fee so a bundler
+    /// prefers the replacement (ERC-4337 mempool replacement rule).
+    max_fee_per_gas: u128,
+    /// Median-derived priority fee, bumped >= 10% over the OLD op's, clamped
+    /// never to exceed `max_fee_per_gas`.
+    max_priority_fee_per_gas: u128,
+    /// `(verification_gas_limit + call_gas_limit + pre_verification_gas) *
+    /// max_fee_per_gas`: the prefund the replacement would cost, in wei.
+    gas_cost_wei: u128,
+}
+
+/// THE reprice fee/gas-cost math (security findings 03 + review F4), shared
+/// by BOTH sides of the reprice path so they can never disagree:
+/// [`Usdt::withdraw_reprice_over_ceiling`] (the affordability gate
+/// `propose_replace_user_ops` consults before proposing) and
+/// [`Usdt::process_replace_user_op`] (the consensus arm that builds the
+/// replacement). Before this helper each site re-implemented the formula
+/// under a doc-comment obligation to keep them byte-for-byte identical;
+/// sharing the code makes that structural instead of aspirational, and does
+/// not change a single output byte (NOT consensus-affecting).
+///
+/// The `GasBounds` receiver `with_median_fees` is called on is a throwaway
+/// (`DEPLOY_AND_SWEEP_DEVNET`, folded in here from both former call sites):
+/// `with_median_fees` only derives the two fee fields from the median and the
+/// compile-time floor/ceiling constants, never reading the receiver's gas
+/// limits -- the gas *units* priced below come from the OLD op itself, which
+/// carries its purpose's real bounds.
+///
+/// # Determinism (consensus-critical)
+///
+/// A pure function of `old` (consensus DB: the `SubmittedUserOp`'s unsigned
+/// op) and `median` (the consensus fee-vote median) plus compile-time
+/// constants -- no RPC / wall-clock / `our_peer_id` / float -- so every
+/// guardian computes the identical repriced fees, which is essential: they
+/// are part of the replacement's signed `userOpHash`.
+fn repriced_user_op_fees(old: &UnsignedUserOp, median: &FeeVote) -> RepricedUserOpFees {
+    let priced =
+        GasBounds::DEPLOY_AND_SWEEP_DEVNET.with_median_fees(Some(median.max_fee_per_gas_wei));
+    let max_fee_per_gas = priced
+        .max_fee_per_gas
+        .max(bump_10_percent(old.max_fee_per_gas));
+    let max_priority_fee_per_gas = priced
+        .max_priority_fee_per_gas
+        .max(bump_10_percent(old.max_priority_fee_per_gas))
+        .min(max_fee_per_gas);
+
+    let total_gas_units = old
+        .verification_gas_limit
+        .saturating_add(old.call_gas_limit)
+        .saturating_add(u128::try_from(old.pre_verification_gas).unwrap_or(u128::MAX));
+    let gas_cost_wei = total_gas_units.saturating_mul(max_fee_per_gas);
+
+    RepricedUserOpFees {
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        gas_cost_wei,
+    }
 }
 
 /// The number of consensus blocks the OLDEST currently-`Queued` withdrawal
@@ -18841,6 +18891,46 @@ mod tests {
             max_fee_per_gas: 30_000_000_000,
             paymaster_and_data: vec![],
         }
+    }
+
+    /// [`repriced_user_op_fees`] is THE shared reprice fee/gas-cost math for
+    /// both sides of the reprice path (see its doc comment). This pins its
+    /// formula: median-derived fee vs. 10%-bump dominance in both directions,
+    /// the priority-fee clamp, and the prefund gas cost -- so a change to it
+    /// (which would alter the replacement op's signed `userOpHash`) cannot
+    /// slip through unnoticed.
+    #[test]
+    fn repriced_user_op_fees_matches_the_documented_formula() {
+        let mut old = sample_unsigned_user_op_for_test();
+
+        // Median dominates: a tiny old fee is replaced by the median-derived
+        // fee (2x headroom over 20 gwei = 40 gwei), and the priority fee is
+        // the 10%-bumped old priority (1.65 gwei) since it exceeds the
+        // median-derived 1 gwei tip.
+        old.max_fee_per_gas = 1_000_000_000;
+        old.max_priority_fee_per_gas = 1_500_000_000;
+        let median = FeeVote {
+            max_fee_per_gas_wei: 20_000_000_000,
+            usdt_per_eth_e6: 3_000_000_000,
+        };
+        let fees = repriced_user_op_fees(&old, &median);
+        assert_eq!(fees.max_fee_per_gas, 40_000_000_000);
+        assert_eq!(fees.max_priority_fee_per_gas, 1_650_000_000);
+        // (500_000 + 200_000 + 100_000) gas units at 40 gwei.
+        assert_eq!(fees.gas_cost_wei, 800_000 * 40_000_000_000);
+
+        // Bump dominates: an old fee above the median-derived value is bumped
+        // >= 10% (the ERC-4337 replacement rule), and the priority fee is
+        // clamped to never exceed the max fee.
+        old.max_fee_per_gas = 100_000_000_000;
+        old.max_priority_fee_per_gas = 150_000_000_000;
+        let fees = repriced_user_op_fees(&old, &median);
+        assert_eq!(fees.max_fee_per_gas, 110_000_000_000);
+        assert_eq!(
+            fees.max_priority_fee_per_gas, 110_000_000_000,
+            "priority fee must be clamped to max_fee_per_gas"
+        );
+        assert_eq!(fees.gas_cost_wei, 800_000 * 110_000_000_000);
     }
 
     /// A real, decodable `DeployAndSweep` [`UnsignedUserOp`] whose
