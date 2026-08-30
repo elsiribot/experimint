@@ -57,6 +57,15 @@
             openssl
             sqlite
 
+            # `anvil`, for the usdt module's EVM end-to-end suites. Without it
+            # `spawn_anvil` returns `Ok(None)` and every anvil-gated test
+            # SKIPS — silently, and indistinguishably from passing. Those
+            # suites are the only coverage of the real ERC-4337 UserOp path,
+            # withdrawal batching against a live chain, reorg handling and
+            # residual recovery, so a dev shell without Foundry makes a green
+            # `cargo test --workspace` mean much less than it appears to.
+            foundry
+
             # dev conveniences
             just
             cargo-nextest

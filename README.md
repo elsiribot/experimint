@@ -203,19 +203,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-### What needs external binaries
+### The EVM end-to-end suites
 
-The `fedimint-usdt-tests` end-to-end suites drive a real EVM chain. They
-**skip rather than fail** when `anvil` is not on `PATH`, so a plain
-`cargo test --workspace` is green without it but is *not* exercising them.
-Affected files, all under `modules/usdt/fedimint-usdt-tests/tests/`:
-`deploy_and_sweep_e2e.rs`, `withdraw_e2e.rs`, `recovery_e2e.rs`,
-`nonstandard_usdt_e2e.rs`, `anvil_reorg_drill.rs`, `erc4337_harness.rs`,
-`evm_adapter.rs`, `user_op_hash.rs`, `user_op_isolation.rs`,
-`withdrawal_batch_isolation.rs`, `adversary.rs`.
+The `fedimint-usdt-tests` end-to-end suites drive a real EVM chain via `anvil`,
+which the dev shell provides (Foundry). Nothing extra to install.
 
-To run them, put `anvil` (from Foundry) on `PATH`, or point
-`FM_ANVIL_BASE_EXECUTABLE` at it. Some also want `bitcoind` via `devimint`.
+**They skip silently if `anvil` is missing.** `spawn_anvil` returns `Ok(None)`
+on `ErrorKind::NotFound`, so an absent binary and a passing test produce
+identical output. That is why Foundry is a dev-shell dependency rather than a
+CI step — the shell is what CI and developers share, so neither can quietly
+lose the coverage. Every other failure mode (bad `FM_ANVIL_BASE_EXECUTABLE`,
+wrong permissions, anvil spawning but never serving RPC) is a hard failure, by
+design.
+
+These suites are the only coverage of the real ERC-4337 UserOp path,
+withdrawal batching against a live chain, reorg handling, residual recovery and
+non-standard token behaviour. `FM_ANVIL_BASE_EXECUTABLE` overrides the binary
+if you need a specific build. Some devimint tests separately want `bitcoind`.
 
 Three `fedimint-usdt-tests` binaries are not part of any test lane:
 

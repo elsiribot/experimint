@@ -71,10 +71,11 @@ jobs:
         with:
           key: test
 
-      # NOTE: `anvil` is deliberately NOT installed here. The usdt e2e suites
-      # skip rather than fail without it, so this lane is green without
-      # exercising them -- see README. Installing Foundry and running them is a
-      # separate, slower lane worth adding, not something this one silently
-      # covers.
+      # `anvil` comes from the dev shell (Foundry), so the usdt EVM e2e suites
+      # actually run here. They skip silently when the binary is absent --
+      # `spawn_anvil` returns `Ok(None)` on `NotFound` -- which makes a missing
+      # Foundry indistinguishable from a pass. That is why it is a dev-shell
+      # dependency rather than a step here: the shell is the thing both CI and
+      # a developer share, so neither can quietly lose the coverage.
       - name: cargo test
         run: nix develop --accept-flake-config --command bash -c 'cargo test --workspace --locked'

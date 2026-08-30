@@ -333,6 +333,16 @@ async fn deposit_account_is_deployed_and_swept_via_real_mpc_and_real_entrypoint(
     //    `UserOpConfirmed` -- converging `PoolState.balance` on every guardian.
     //    Real MPC + a real chain round-trip is slow -- a generous multi-minute
     //    deadline per guardian.
+    //
+    //    The loop MINES while it waits, for the same reason step 6 mines before
+    //    crediting: anvil auto-mines exactly one block per transaction and then
+    //    sits still. The submitter's `handleOps` transaction gets its own block,
+    //    but nothing afterwards produces the further blocks needed to bury it to
+    //    `confirmation_depth`, which is what `UserOpConfirmed` waits for. Without
+    //    this the op is mined and then never confirmed: the submitter times it
+    //    out, RBF-reprices it 10% higher, and the federation loops on that
+    //    forever while `PoolState.balance` stays 0. That is an artefact of a
+    //    chain that only moves when poked, not a fault in the sweep pipeline.
     for &peer in &peers {
         let deadline = Instant::now() + Duration::from_secs(600);
         loop {
@@ -347,6 +357,10 @@ async fn deposit_account_is_deployed_and_swept_via_real_mpc_and_real_entrypoint(
                     pool.balance
                 );
             }
+            mine_provider
+                .raw_request::<_, String>("evm_mine".into(), ())
+                .await
+                .context("failed to mine an anvil block while awaiting sweep confirmation")?;
             sleep(Duration::from_secs(2)).await;
         }
     }
