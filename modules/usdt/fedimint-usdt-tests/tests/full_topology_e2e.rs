@@ -18,9 +18,11 @@
 //!   for which unit. It needs no external daemon.
 //! - [`value_moves_across_the_full_topology`] is the end-to-end value flow:
 //!   BTC in over `walletv2`, USDt in over `usdt`'s deposit-by-proof path
-//!   against a real `anvil`, both legs seeded into an `amm` pool, a swap in
-//!   each direction settling at the quoted price, the LP position withdrawn,
-//!   and the guardians' balance sheets checked at the end.
+//!   against a real `anvil`, both legs seeded into an `amm` pool, a threshold
+//!   of guardians voting the swap fee away from its DKG-time default, a swap
+//!   in each direction settling at the quoted price *at that voted fee*, the
+//!   LP position withdrawn, and the guardians' balance sheets checked at the
+//!   end.
 //!
 //! # Unit alignment (load-bearing)
 //!
@@ -53,15 +55,19 @@ use anyhow::{Context as _, bail, ensure};
 use common::MockEvmRpc;
 use fedimint_amm_client::db::{LpPositionKey, LpPositionRecord};
 use fedimint_amm_client::{AmmClientInit, AmmClientModule};
-use fedimint_amm_common::endpoints::PoolSummary;
+use fedimint_amm_common::endpoints::{
+    FEE_VOTE_SUBMIT_ENDPOINT, FEE_VOTES_ENDPOINT, FeeVoteSubmitRequest, FeeVotesRequest,
+    FeeVotesResponse, PoolSummary,
+};
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_amm_server::AmmInit;
+use fedimint_api_client::api::FederationApiExt as _;
 use fedimint_client::ClientHandleArc;
 use fedimint_core::core::{ModuleInstanceId, ModuleKind};
 use fedimint_core::module::audit::AuditSummary;
-use fedimint_core::module::{AmountUnit, ApiAuth};
+use fedimint_core::module::{AmountUnit, ApiAuth, ApiRequestErased};
 use fedimint_core::runtime::{Instant, sleep};
-use fedimint_core::{Amount, PeerId};
+use fedimint_core::{Amount, NumPeersExt as _, PeerId};
 use fedimint_lnv2_client::LightningClientInit;
 use fedimint_lnv2_server::LightningInit;
 use fedimint_logging::LOG_TEST;
@@ -100,6 +106,29 @@ fn pool_id() -> PoolId {
 /// The smallest client-held `mintv2` note denomination, `2^9` msat
 /// (`fedimint-mintv2-common::config::client_denominations`, `9..42`).
 const MINTV2_MIN_DENOMINATION_MSATS: u64 = 512;
+
+/// `fedimint-amm-server::default_consensus_config`'s `default_fee_per_mille`:
+/// what every pool charges until a threshold of guardians votes otherwise.
+const CONFIG_DEFAULT_FEE_PER_MILLE: u16 = 3;
+
+/// The fee this test's guardians vote. Inside `default_consensus_config`'s
+/// `[1, 50]` band and an order of magnitude away from
+/// [`CONFIG_DEFAULT_FEE_PER_MILLE`], so a swap priced at one is unmistakably
+/// not priced at the other --- asserted below rather than assumed. Deliberately
+/// the same gap `fedimint-amm-tests`'
+/// `a_threshold_of_guardian_votes_changes_the_fee_a_swap_settles_at` votes
+/// across, so any divergence between the two suites is a difference in
+/// topology rather than in the numbers picked.
+const VOTED_FEE_PER_MILLE: u16 = 30;
+
+/// How long the fee-vote steps wait for a submission to be ordered and applied.
+///
+/// A vote only becomes a consensus item on the submitting guardian's next
+/// `consensus_proposal`, so there is nothing deterministic to await: every
+/// guardian converges on the same value, just not at the same instant. This is
+/// longer than `fedimint-amm-tests` needs for the same steps because six other
+/// module instances are proposing into the same sessions here.
+const FEE_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long [`peg_in_btc`] lets `walletv2`'s client-side address scanner grind
 /// before declaring it stuck. Generous: it is a ~1-in-65_536 search running in
@@ -319,16 +348,144 @@ async fn pool_summary(amm: &AmmClientModule) -> anyhow::Result<PoolSummary> {
         .context("the BITCOIN/USDT_UNIT pool does not exist")
 }
 
+/// One `FEE_VOTE_SUBMIT_ENDPOINT` call against `peer`'s own admin API.
+///
+/// `request_admin` is the only path that reaches an endpoint gated on
+/// *verified* guardian auth: `FEE_VOTE_SUBMIT_ENDPOINT` calls
+/// `fedimint_core::net::auth::check_auth`, not `request_auth()`, so a request
+/// that merely carries a password field does not pass. It targets exactly the
+/// one peer the admin API was built for, which is what makes "a threshold of
+/// distinct guardians voted" a statement about distinct guardians.
+///
+/// `auth` is a parameter so the negative case can be exercised with the same
+/// request the positive one uses.
+async fn try_submit_fee_vote(
+    fed: &FederationTest,
+    peer: PeerId,
+    amm_instance: ModuleInstanceId,
+    fee_per_mille: u16,
+    auth: ApiAuth,
+) -> anyhow::Result<()> {
+    fed.new_admin_api(peer)
+        .await?
+        .with_module(amm_instance)
+        .request_admin::<()>(
+            FEE_VOTE_SUBMIT_ENDPOINT,
+            ApiRequestErased::new(FeeVoteSubmitRequest {
+                pool: pool_id(),
+                fee_per_mille,
+            }),
+            auth,
+        )
+        .await
+        .map_err(Into::into)
+}
+
+/// Records `fee_per_mille` as `peer`'s desired fee for [`pool_id`], retrying
+/// while the receiving guardian has not yet created the pool.
+///
+/// The endpoint rejects a vote for a pool the *receiving* guardian does not
+/// hold yet. A client observing its deposit as accepted has seen a threshold
+/// of guardians apply it, not all of them --- guardians apply an ordered
+/// session at slightly different wall-clock moments --- so a submit racing
+/// that lag is expected rather than a fault, and retrying it is not a flake
+/// mask. Any other rejection fails immediately.
+async fn submit_fee_vote(
+    fed: &FederationTest,
+    peer: PeerId,
+    amm_instance: ModuleInstanceId,
+    fee_per_mille: u16,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + FEE_CONSENSUS_TIMEOUT;
+    loop {
+        match try_submit_fee_vote(
+            fed,
+            peer,
+            amm_instance,
+            fee_per_mille,
+            ApiAuth::new(TESTING_API_AUTH.to_string()),
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => ensure!(
+                error.to_string().contains("no such pool") && Instant::now() < deadline,
+                "guardian {peer} rejected the fee vote: {error}"
+            ),
+        }
+        sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Blocks until `FEE_VOTES_ENDPOINT` reports exactly `expected` recorded votes
+/// for [`pool_id`], returning that response.
+///
+/// Waiting for the votes to be *visible in their own right* is what makes the
+/// below-threshold assertion meaningful: an unvoted-fee reading taken before
+/// the minority's votes were ordered would pass because nothing had happened
+/// yet, not because a minority cannot move the fee.
+async fn await_recorded_fee_votes(
+    client: &ClientHandleArc,
+    amm_instance: ModuleInstanceId,
+    expected: usize,
+) -> anyhow::Result<FeeVotesResponse> {
+    let deadline = Instant::now() + FEE_CONSENSUS_TIMEOUT;
+    loop {
+        let votes: FeeVotesResponse = client
+            .api()
+            .with_module(amm_instance)
+            .request_current_consensus(
+                FEE_VOTES_ENDPOINT.to_string(),
+                ApiRequestErased::new(FeeVotesRequest { pool: pool_id() }),
+            )
+            .await?;
+        if votes.votes.len() == expected {
+            return Ok(votes);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "only {} of {expected} fee votes were ever recorded",
+            votes.votes.len()
+        );
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Blocks until `POOLS_ENDPOINT` reports `expected` as [`pool_id`]'s effective
+/// fee, returning the summary that reported it.
+async fn await_reported_fee(amm: &AmmClientModule, expected: u16) -> anyhow::Result<PoolSummary> {
+    let deadline = Instant::now() + FEE_CONSENSUS_TIMEOUT;
+    loop {
+        let summary = pool_summary(amm).await?;
+        if summary.fee_per_mille == expected {
+            return Ok(summary);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "POOLS_ENDPOINT never reported fee {expected} (last saw {})",
+            summary.fee_per_mille
+        );
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Asserts `quoted_out` is exactly what the constant-product curve pays out
 /// of `pool`'s reserves at the fee the federation *currently* charges for it.
 ///
-/// The fee comes from `POOLS_ENDPOINT`'s `fee_per_mille` (i.e. from
-/// `AmmConfigConsensus::fee_for`) rather than being hard-coded to
-/// `default_consensus_config`'s `3`. That is the whole point of routing the
-/// check this way: once the fee is guardian-voted rather than config-fixed,
-/// this assertion already reads whatever the guardians agreed on, so a swap
-/// settling at the voted fee is covered without editing the arithmetic. The
-/// only edit such a change needs here is to *drive* a vote before quoting.
+/// The fee comes from `POOLS_ENDPOINT`'s `fee_per_mille` --- i.e. from
+/// `Amm::consensus_fee_for`, the aggregate of the guardians' votes --- rather
+/// than being hard-coded to `default_consensus_config`'s
+/// [`CONFIG_DEFAULT_FEE_PER_MILLE`]. Both swaps below run after the guardians
+/// have voted [`VOTED_FEE_PER_MILLE`], so this reads the voted fee; hard-coding
+/// the config default here would instead make the check disagree with a
+/// federation that has exercised its own fee governance.
+///
+/// This is the *consistency* half of the fee assertions. It cannot by itself
+/// prove the federation charges the voted fee, since a server that reported
+/// and charged the same wrong number would satisfy it --- which is why the
+/// call sites additionally pin settlement against
+/// `math::amount_out(.., VOTED_FEE_PER_MILLE)` computed test-side, and against
+/// its inequality with the config-default result.
 ///
 /// Combined with the settlement assertions at the call sites, this pins the
 /// module's core invariant from both ends: `quote_swap` is one shared
@@ -597,36 +754,178 @@ async fn value_moves_across_the_full_topology() -> anyhow::Result<()> {
         seeded.total_shares > 0,
         "the first deposit must mint shares"
     );
+    assert_eq!(
+        seeded.fee_per_mille, CONFIG_DEFAULT_FEE_PER_MILLE,
+        "a pool no guardian has voted on must report the DKG-time config fee"
+    );
 
-    // --- Step 5a: BTC -> USDt, settling at the quoted price.
+    // --- Step 5: the guardians vote the swap fee away from its config
+    // default. The pool has to exist first: a vote naming a pool the receiving
+    // guardian does not hold is rejected outright.
+    let amm_instance = client
+        .get_first_instance(&fedimint_amm_common::KIND)
+        .context("amm module is registered")?;
+    let peers: Vec<PeerId> = fed.online_peer_ids().collect();
+    let threshold = peers.as_slice().to_num_peers().threshold();
+    ensure!(
+        peers.len() == 4 && threshold == 3,
+        "this step's below-threshold/at-threshold split is written for 4 peers with threshold 3, \
+         got {} peers with threshold {threshold}",
+        peers.len()
+    );
+
+    // The submit endpoint gates on verified guardian auth, so an unauthorized
+    // caller must not be able to price other people's swaps. Checked here and
+    // not only in `fedimint-amm-server`'s unit suite because only a real
+    // federation exercises the actual authentication layer rather than a
+    // hand-built `ApiEndpointContext`.
+    let unauthorized = try_submit_fee_vote(
+        &fed,
+        peers[0],
+        amm_instance,
+        VOTED_FEE_PER_MILLE,
+        ApiAuth::new("not-the-federation-password".to_string()),
+    )
+    .await
+    .expect_err("a fee vote under a bogus password must be rejected");
+    info!(target: LOG_TEST, %unauthorized, "unauthenticated fee vote rejected");
+
+    // Below threshold: `threshold - 1` guardians voting must not move the fee.
+    // Without this the at-threshold assertion below could be satisfied by an
+    // implementation that let any single guardian set the fee.
+    for &peer in peers.iter().take(threshold - 1) {
+        submit_fee_vote(&fed, peer, amm_instance, VOTED_FEE_PER_MILLE).await?;
+    }
+    let minority = await_recorded_fee_votes(&client, amm_instance, threshold - 1).await?;
+    info!(
+        target: LOG_TEST,
+        votes = ?minority.votes,
+        effective_fee_per_mille = minority.effective_fee_per_mille,
+        band = ?(minority.min_fee_per_mille, minority.max_fee_per_mille),
+        "below-threshold fee votes recorded"
+    );
+    assert_eq!(
+        minority.effective_fee_per_mille, CONFIG_DEFAULT_FEE_PER_MILLE,
+        "a minority of guardians must not move the fee at all"
+    );
+    assert_eq!(
+        pool_summary(&amm).await?.fee_per_mille,
+        CONFIG_DEFAULT_FEE_PER_MILLE,
+        "POOLS_ENDPOINT must still report the config fee below threshold"
+    );
+
+    // The threshold-th vote is what moves it.
+    submit_fee_vote(
+        &fed,
+        peers[threshold - 1],
+        amm_instance,
+        VOTED_FEE_PER_MILLE,
+    )
+    .await?;
+    let voted = await_reported_fee(&amm, VOTED_FEE_PER_MILLE).await?;
+    info!(
+        target: LOG_TEST,
+        config_fee_per_mille = CONFIG_DEFAULT_FEE_PER_MILLE,
+        voted_fee_per_mille = voted.fee_per_mille,
+        voters = threshold,
+        of_peers = peers.len(),
+        "threshold of guardians moved the swap fee"
+    );
+    assert_eq!(
+        voted.reserve_lo, seeded.reserve_lo,
+        "voting a fee must not move the pool's BITCOIN reserve"
+    );
+    assert_eq!(
+        voted.reserve_hi, seeded.reserve_hi,
+        "voting a fee must not move the pool's USDT_UNIT reserve"
+    );
+
+    // --- Step 6a: BTC -> USDt, settling at the quoted price, at the VOTED fee.
     //
     // `max_slippage_bps: 0` demands the swap settle at exactly the quote the
     // client takes immediately before submitting; this is a single-actor test,
     // so nothing else can move the pool in between.
     let btc_in = mintv2_representable_floor(Amount::from_sats(100_000));
+
+    // Computed test-side from the pool's own reserves, so the comparison never
+    // routes through a number the server chose. The inequality is what stops
+    // the voted-fee assertion from being satisfied by a federation that
+    // ignored the vote entirely.
+    let at_voted_fee = Amount::from_msats(fedimint_amm_common::math::amount_out(
+        voted.reserve_lo.msats,
+        voted.reserve_hi.msats,
+        btc_in.msats,
+        VOTED_FEE_PER_MILLE,
+    )?);
+    let at_config_fee = Amount::from_msats(fedimint_amm_common::math::amount_out(
+        voted.reserve_lo.msats,
+        voted.reserve_hi.msats,
+        btc_in.msats,
+        CONFIG_DEFAULT_FEE_PER_MILLE,
+    )?);
+    ensure!(
+        at_voted_fee < at_config_fee,
+        "the fee assertions are vacuous unless {VOTED_FEE_PER_MILLE} and \
+         {CONFIG_DEFAULT_FEE_PER_MILLE} per-mille produce different outputs (both gave \
+         {at_voted_fee})"
+    );
+
     let quote_btc_usdt = amm.quote(AmountUnit::BITCOIN, USDT_UNIT, btc_in).await?;
     ensure!(
         quote_btc_usdt.amount_out > Amount::ZERO,
         "quote must be non-zero"
     );
     assert_quote_is_curve_at_effective_fee(
-        &seeded,
+        &voted,
         AmountUnit::BITCOIN,
         btc_in,
         quote_btc_usdt.amount_out,
     )?;
+    assert_eq!(
+        quote_btc_usdt.amount_out, at_voted_fee,
+        "QUOTE_ENDPOINT must price at the voted fee"
+    );
 
     let usdt_before = client.get_balance_for_unit(USDT_UNIT).await?;
     let swap_op = amm.swap(AmountUnit::BITCOIN, USDT_UNIT, btc_in, 0).await?;
     amm.await_swap(swap_op).await?;
     client.wait_for_all_active_state_machines().await?;
     let usdt_after = client.get_balance_for_unit(USDT_UNIT).await?;
+
+    // Settlement is read off the pool's reserves, not off the wallet: both
+    // units are held in a real `mintv2` here, so a wallet delta carries the
+    // denomination floor and cannot be compared to an exact curve result.
+    let after_first_swap = pool_summary(&amm).await?;
+    let settled_dy = voted.reserve_hi - after_first_swap.reserve_hi;
     info!(
         target: LOG_TEST,
         %btc_in,
         quoted = %quote_btc_usdt.amount_out,
+        %settled_dy,
+        %at_voted_fee,
+        %at_config_fee,
+        fee_per_mille = after_first_swap.fee_per_mille,
         received = %(usdt_after - usdt_before),
         "BTC -> USDt swap settled"
+    );
+
+    assert_eq!(
+        settled_dy, at_voted_fee,
+        "settlement must charge the voted fee of {VOTED_FEE_PER_MILLE}/1000"
+    );
+    assert_ne!(
+        settled_dy, at_config_fee,
+        "settlement must not still be charging the config default of \
+         {CONFIG_DEFAULT_FEE_PER_MILLE}/1000"
+    );
+    assert_eq!(
+        after_first_swap.reserve_lo,
+        voted.reserve_lo + btc_in,
+        "the BITCOIN leg must have landed in the pool in full"
+    );
+    assert_eq!(
+        after_first_swap.fee_per_mille, VOTED_FEE_PER_MILLE,
+        "the voted fee must survive a swap"
     );
 
     // What reaches the wallet is that settled `dy` minus only what `mintv2`
@@ -637,10 +936,32 @@ async fn value_moves_across_the_full_topology() -> anyhow::Result<()> {
         "a BTC -> USDt swap must settle at exactly the quoted price"
     );
 
-    // --- Step 5b: USDt -> BTC, likewise, against the reserves the first swap
+    // --- Step 6b: USDt -> BTC, likewise, against the reserves the first swap
     // left behind.
-    let after_first_swap = pool_summary(&amm).await?;
     let usdt_in = mintv2_representable_floor(Amount::from_msats(usdt_after.msats / 4));
+
+    // The reverse direction is priced off `reserve_hi` in and `reserve_lo`
+    // out, so it is a different arithmetic path through the curve and gets its
+    // own voted-versus-config comparison rather than inheriting 6a's.
+    let back_at_voted_fee = Amount::from_msats(fedimint_amm_common::math::amount_out(
+        after_first_swap.reserve_hi.msats,
+        after_first_swap.reserve_lo.msats,
+        usdt_in.msats,
+        VOTED_FEE_PER_MILLE,
+    )?);
+    let back_at_config_fee = Amount::from_msats(fedimint_amm_common::math::amount_out(
+        after_first_swap.reserve_hi.msats,
+        after_first_swap.reserve_lo.msats,
+        usdt_in.msats,
+        CONFIG_DEFAULT_FEE_PER_MILLE,
+    )?);
+    ensure!(
+        back_at_voted_fee < back_at_config_fee,
+        "the fee assertions are vacuous unless {VOTED_FEE_PER_MILLE} and \
+         {CONFIG_DEFAULT_FEE_PER_MILLE} per-mille produce different outputs (both gave \
+         {back_at_voted_fee})"
+    );
+
     let quote_usdt_btc = amm.quote(USDT_UNIT, AmountUnit::BITCOIN, usdt_in).await?;
     ensure!(
         quote_usdt_btc.amount_out > Amount::ZERO,
@@ -652,27 +973,47 @@ async fn value_moves_across_the_full_topology() -> anyhow::Result<()> {
         usdt_in,
         quote_usdt_btc.amount_out,
     )?;
+    assert_eq!(
+        quote_usdt_btc.amount_out, back_at_voted_fee,
+        "QUOTE_ENDPOINT must price the reverse direction at the voted fee too"
+    );
 
     let btc_before = client.get_balance_for_btc().await?;
     let swap_back_op = amm.swap(USDT_UNIT, AmountUnit::BITCOIN, usdt_in, 0).await?;
     amm.await_swap(swap_back_op).await?;
     client.wait_for_all_active_state_machines().await?;
     let btc_after = client.get_balance_for_btc().await?;
+
+    let after_second_swap = pool_summary(&amm).await?;
+    let settled_dx = after_first_swap.reserve_lo - after_second_swap.reserve_lo;
     info!(
         target: LOG_TEST,
         %usdt_in,
         quoted = %quote_usdt_btc.amount_out,
+        %settled_dx,
+        at_voted_fee = %back_at_voted_fee,
+        at_config_fee = %back_at_config_fee,
+        fee_per_mille = after_second_swap.fee_per_mille,
         received = %(btc_after - btc_before),
         "USDt -> BTC swap settled"
     );
 
+    assert_eq!(
+        settled_dx, back_at_voted_fee,
+        "the reverse swap must charge the voted fee of {VOTED_FEE_PER_MILLE}/1000"
+    );
+    assert_ne!(
+        settled_dx, back_at_config_fee,
+        "the reverse swap must not still be charging the config default of \
+         {CONFIG_DEFAULT_FEE_PER_MILLE}/1000"
+    );
     assert_eq!(
         btc_after - btc_before,
         mintv2_representable_floor(quote_usdt_btc.amount_out),
         "a USDt -> BTC swap must settle at exactly the quoted price"
     );
 
-    // --- Step 6: withdraw the LP position; the accounting closes.
+    // --- Step 7: withdraw the LP position; the accounting closes.
     let (position_key, position): (LpPositionKey, LpPositionRecord) = amm
         .list_lp_positions()
         .await
@@ -713,11 +1054,8 @@ async fn value_moves_across_the_full_topology() -> anyhow::Result<()> {
         "the USDT_UNIT credited must equal what left the pool's reserve_hi"
     );
 
-    // --- Step 7: the guardians' balance sheets.
+    // --- Step 8: the guardians' balance sheets.
     let audits = audit_every_guardian(&fed).await?;
-    let amm_instance = client
-        .get_first_instance(&fedimint_amm_common::KIND)
-        .context("amm module is registered")?;
     let final_pool = pool_summary(&amm).await?;
 
     for (peer, summary) in &audits {
