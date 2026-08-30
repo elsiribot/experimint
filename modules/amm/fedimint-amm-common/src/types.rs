@@ -281,23 +281,57 @@ impl fmt::Display for AmmOutputOutcome {
     }
 }
 
-/// This module has no consensus items (spec §10): a `Balance` is always
-/// claimable and no reserves are ever earmarked, so there is nothing that
-/// needs deadline- or vote-style consensus. `ModuleCommon::ConsensusItem` is
-/// nonetheless a mandatory associated type, so — mirroring
-/// `MintConsensusItem` on the pinned rev, which documents exactly this
-/// situation — this is an enum with only the `#[encodable_default]` variant,
-/// so a future peer that *does* gain a real consensus item still decodes
-/// against an older binary without breaking it.
+/// The module's only consensus item: one guardian's desired swap fee for one
+/// pool (spec §10). Nothing else in this design needs consensus — a
+/// `Balance` is always claimable and no reserves are ever earmarked — and in
+/// particular there is still no price or oracle item, which would create a
+/// manipulation surface the endogenous curve does not have.
+///
+/// **No `salt` field, deliberately.** AlephBFT merges byte-identical items
+/// within a session, so a guardian moving its vote `a -> b -> a` inside one
+/// session has the second `a` dropped. The `meta` module carries an
+/// otherwise-meaningless `salt: u64` to defeat that. This module does not,
+/// because the drop is not lost — only delayed: `consensus_proposal`
+/// re-derives its proposal every session from the difference between the
+/// guardian's locally stored intent and its own last *recorded* vote, so a
+/// vote that was merged away is proposed again in the next session and lands
+/// then. A swap fee is a governance parameter that moves on human
+/// timescales, so bounded, self-healing latency of one session is the correct
+/// price for not putting a non-deterministic field into a consensus item.
+/// This trade-off would be wrong for a fast-moving value; revisit the choice,
+/// not just the delay, if one is ever added here.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub enum AmmConsensusItem {
+    /// `peer` is not a field: consensus items are already attributed to the
+    /// submitting guardian by `process_consensus_item`'s `peer_id` argument,
+    /// and a self-declared peer field would be an unauthenticated copy of it.
+    FeeVoteV0 {
+        pool: PoolId,
+        /// Vote in per-mille. Only accepted inside the federation's
+        /// configured `[min_fee_per_mille, max_fee_per_mille]` band, so no
+        /// minority of guardians can propose a confiscatory fee.
+        fee_per_mille: u16,
+    },
     #[encodable_default]
     Default { variant: u64, bytes: Vec<u8> },
 }
 
 impl fmt::Display for AmmConsensusItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "AmmConsensusItem")
+        match self {
+            AmmConsensusItem::FeeVoteV0 {
+                pool,
+                fee_per_mille,
+            } => write!(
+                f,
+                "AmmConsensusItem::FeeVoteV0 {pool:?} fee={fee_per_mille}"
+            ),
+            AmmConsensusItem::Default { variant, bytes } => write!(
+                f,
+                "AmmConsensusItem::Default variant={variant} bytes_len={}",
+                bytes.len()
+            ),
+        }
     }
 }
 
@@ -481,9 +515,23 @@ mod tests {
         assert_eq!(unknown, back);
     }
 
-    /// The consensus-item type has no real variants (spec §10), but the
-    /// `#[encodable_default]` catch-all must still round-trip so a future
-    /// peer that gains a real item doesn't break an older decoder.
+    #[test]
+    fn fee_vote_consensus_item_round_trips() {
+        let pool = PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap();
+        let item = AmmConsensusItem::FeeVoteV0 {
+            pool,
+            fee_per_mille: 7,
+        };
+        let bytes = item.consensus_encode_to_vec();
+        let back =
+            AmmConsensusItem::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+                .unwrap();
+        assert_eq!(item, back);
+    }
+
+    /// The `#[encodable_default]` catch-all must still round-trip alongside
+    /// the real variant, so a peer that gains a *further* consensus item
+    /// doesn't break an older decoder.
     #[test]
     fn consensus_item_default_round_trips() {
         let unknown = AmmConsensusItem::Default {

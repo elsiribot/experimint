@@ -3,8 +3,10 @@
 //! Kept in `common` (not `server`) so a client crate can depend on the
 //! request/response shapes without depending on the server crate.
 
+use std::collections::BTreeMap;
+
 use fedimint_core::module::AmountUnit;
-use fedimint_core::{Amount, secp256k1};
+use fedimint_core::{Amount, PeerId, secp256k1};
 use serde::{Deserialize, Serialize};
 
 use crate::pool_id::PoolId;
@@ -87,12 +89,72 @@ pub struct RecoveryPageRequest {
     pub limit: Option<u32>,
 }
 
+/// Guardian-authenticated. Records the calling guardian's *desired* swap fee
+/// for one pool as purely local state; it does not itself change the fee.
+/// The vote reaches consensus on the next `consensus_proposal`, and only a
+/// threshold of guardians voting can move the fee that swaps actually settle
+/// at (spec §10, §11).
+///
+/// Idempotent: re-submitting the value already desired is accepted and
+/// changes nothing, so a guardian UI may submit unconditionally.
+pub const FEE_VOTE_SUBMIT_ENDPOINT: &str = "amm_fee_vote_submit";
+
+/// Every guardian's currently recorded fee vote for one pool, plus the
+/// aggregate those votes currently produce and the band they are confined to.
+///
+/// **Unauthenticated, deliberately.** Per-guardian votes are ordered
+/// consensus items, so they are already in the publicly retrievable session
+/// history; gating this endpoint would hide nothing an observer cannot
+/// reconstruct, while denying the fee's provenance to exactly the traders the
+/// fee is charged to. `meta`'s equivalent submissions endpoint is
+/// guardian-only, and this deliberately differs from it.
+pub const FEE_VOTES_ENDPOINT: &str = "amm_fee_votes";
+
+/// Request for [`FEE_VOTE_SUBMIT_ENDPOINT`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeVoteSubmitRequest {
+    /// Must name a pool that already exists. Pools are created
+    /// permissionlessly by the first `DepositV0` and are never removed, so
+    /// this is a "not yet" rather than a "never" rejection.
+    pub pool: PoolId,
+    /// Must lie inside the federation's configured
+    /// `[min_fee_per_mille, max_fee_per_mille]` band.
+    pub fee_per_mille: u16,
+}
+
+/// Request for [`FEE_VOTES_ENDPOINT`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeVotesRequest {
+    pub pool: PoolId,
+}
+
+/// Response for [`FEE_VOTES_ENDPOINT`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeVotesResponse {
+    /// Only guardians that have voted appear. Absence is "has not voted",
+    /// not "voted the default".
+    pub votes: BTreeMap<PeerId, u16>,
+    /// What [`PoolSummary::fee_per_mille`] reports and what a swap on this
+    /// pool settles at right now — the threshold-index aggregate of `votes`
+    /// when enough have been cast, the configured fee otherwise, clamped into
+    /// the band either way. Reported alongside the raw votes so a caller
+    /// never has to re-implement the aggregation to interpret them.
+    pub effective_fee_per_mille: u16,
+    pub min_fee_per_mille: u16,
+    pub max_fee_per_mille: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolSummary {
     pub pool: PoolId,
     pub reserve_lo: Amount,
     pub reserve_hi: Amount,
     pub total_shares: u64,
+    /// The fee a swap on this pool settles at right now — the aggregate of
+    /// the guardians' fee votes, not the config value they may have voted
+    /// away from. This field is the only way the client learns the fee at
+    /// all, so reporting the config value here would let the displayed fee
+    /// silently diverge from settlement.
     pub fee_per_mille: u16,
 }
 

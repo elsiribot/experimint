@@ -3,7 +3,7 @@
 use fedimint_amm_common::pool_id::PoolId;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::AmountUnit;
-use fedimint_core::{Amount, impl_db_lookup, impl_db_record, secp256k1};
+use fedimint_core::{Amount, PeerId, impl_db_lookup, impl_db_record, secp256k1};
 use serde::Serialize;
 use strum_macros::EnumIter;
 
@@ -13,6 +13,11 @@ pub enum DbKeyPrefix {
     Pool = 0x01,
     LpPosition = 0x02,
     Balance = 0x03,
+    /// Consensus state: one row per (pool, guardian) that has voted.
+    FeeVote = 0x04,
+    /// Local state only, never replicated: this guardian's own intent, which
+    /// `consensus_proposal` turns into [`DbKeyPrefix::FeeVote`] rows.
+    DesiredFee = 0x05,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -94,6 +99,58 @@ impl_db_record!(
 );
 impl_db_lookup!(key = BalanceKey, query_prefix = BalancePrefix);
 
+/// One guardian's last fee vote for one pool, in per-mille.
+///
+/// `pool` comes FIRST and `peer` second, so that a byte prefix of
+/// `(prefix_byte, pool)` selects exactly one pool's votes — the scan
+/// [`FeeVotesByPoolPrefix`] performs and the aggregation depends on. The
+/// reverse field order would make the per-pool scan impossible and force a
+/// full-table scan filtered in memory. (`MetaSubmissionsKey` in
+/// `fedimint-meta-server` is ordered `{ key, peer_id }` for exactly this
+/// reason.)
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct FeeVoteKey {
+    pub pool: PoolId,
+    pub peer: PeerId,
+}
+
+/// Table-wide scan, used by `dump_database`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct FeeVotePrefix;
+
+/// Every guardian's vote for one pool — the input to the aggregation.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct FeeVotesByPoolPrefix(pub PoolId);
+
+impl_db_record!(
+    key = FeeVoteKey,
+    value = u16,
+    db_prefix = DbKeyPrefix::FeeVote
+);
+impl_db_lookup!(key = FeeVoteKey, query_prefix = FeeVotePrefix);
+impl_db_lookup!(key = FeeVoteKey, query_prefix = FeeVotesByPoolPrefix);
+
+/// This guardian's locally-set intent for one pool's fee, in per-mille.
+///
+/// Purely local: written only by the guardian-authenticated submit endpoint,
+/// never by consensus, and never read by anything but
+/// `ServerModule::consensus_proposal`. It is the "what I want" half of the
+/// diff against [`FeeVoteKey`]'s "what I have actually had ordered", which is
+/// what makes a proposal self-healing across sessions rather than a
+/// fire-and-forget submission.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct DesiredFeeKey(pub PoolId);
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct DesiredFeePrefix;
+
+impl_db_record!(
+    key = DesiredFeeKey,
+    value = u16,
+    db_prefix = DbKeyPrefix::DesiredFee
+);
+impl_db_lookup!(key = DesiredFeeKey, query_prefix = DesiredFeePrefix);
+
 #[cfg(test)]
 mod tests {
     use fedimint_core::Amount;
@@ -165,6 +222,68 @@ mod tests {
 
         let all: Vec<_> = dbtx.find_by_prefix(&LpPositionPrefix).await.collect().await;
         assert_eq!(all.len(), 3);
+        dbtx.commit_tx().await;
+    }
+
+    /// The whole reason `FeeVoteKey` is ordered `{ pool, peer }`: the
+    /// per-pool prefix must select exactly that pool's votes. A key ordered
+    /// `{ peer, pool }` would encode a byte prefix that groups by peer
+    /// instead, and this test would return votes for the wrong pool.
+    #[tokio::test]
+    async fn fee_votes_scan_per_pool_not_across_pools() {
+        let db = db();
+        let mut dbtx = db.begin_transaction().await;
+        let a = pool_id(0, 1);
+        let b = pool_id(0, 2);
+
+        for (pool, peer, fee) in [(a, 0, 5u16), (a, 1, 7), (a, 2, 9), (b, 0, 40)] {
+            dbtx.insert_new_entry(
+                &FeeVoteKey {
+                    pool,
+                    peer: PeerId::from(peer),
+                },
+                &fee,
+            )
+            .await;
+        }
+
+        let mut votes_a: Vec<u16> = dbtx
+            .find_by_prefix(&FeeVotesByPoolPrefix(a))
+            .await
+            .map(|(_, fee)| fee)
+            .collect()
+            .await;
+        votes_a.sort_unstable();
+        assert_eq!(votes_a, vec![5, 7, 9]);
+
+        let votes_b: Vec<u16> = dbtx
+            .find_by_prefix(&FeeVotesByPoolPrefix(b))
+            .await
+            .map(|(_, fee)| fee)
+            .collect()
+            .await;
+        assert_eq!(votes_b, vec![40]);
+
+        let all: Vec<_> = dbtx.find_by_prefix(&FeeVotePrefix).await.collect().await;
+        assert_eq!(all.len(), 4);
+
+        dbtx.commit_tx().await;
+    }
+
+    #[tokio::test]
+    async fn desired_fees_round_trip_and_enumerate() {
+        let db = db();
+        let mut dbtx = db.begin_transaction().await;
+        let a = pool_id(0, 1);
+        let b = pool_id(0, 2);
+
+        dbtx.insert_new_entry(&DesiredFeeKey(a), &4u16).await;
+        dbtx.insert_new_entry(&DesiredFeeKey(b), &6u16).await;
+
+        assert_eq!(dbtx.get_value(&DesiredFeeKey(a)).await, Some(4));
+        let all: Vec<_> = dbtx.find_by_prefix(&DesiredFeePrefix).await.collect().await;
+        assert_eq!(all.len(), 2);
+
         dbtx.commit_tx().await;
     }
 

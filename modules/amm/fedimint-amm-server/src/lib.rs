@@ -4,6 +4,11 @@
 //! generation (spec §11). `process_output` (Task 7) and `process_input`
 //! (Task 8) implement the real curve logic; `audit` (spec §9.1) and the
 //! `api_endpoints` (spec §12) are implemented below as well.
+//!
+//! `consensus_proposal`/`process_consensus_item` carry the module's one
+//! consensus item, the guardian-voted swap fee (spec §10). `Amm::
+//! consensus_fee_for` is its aggregator and the single source of truth for
+//! the fee — both settlement and every fee this module reports go through it.
 
 pub mod db;
 
@@ -15,7 +20,8 @@ use fedimint_amm_common::config::{
 };
 use fedimint_amm_common::endpoints::{
     BALANCE_ENDPOINT, BALANCE_RECOVERY_ENDPOINT, BalanceRecoveryEntry, BalanceRecoveryResponse,
-    BalanceRequest, LP_RECOVERY_ENDPOINT, LpRecoveryEntry, LpRecoveryResponse,
+    BalanceRequest, FEE_VOTE_SUBMIT_ENDPOINT, FEE_VOTES_ENDPOINT, FeeVoteSubmitRequest,
+    FeeVotesRequest, FeeVotesResponse, LP_RECOVERY_ENDPOINT, LpRecoveryEntry, LpRecoveryResponse,
     MAX_RECOVERY_PAGE_SIZE, POOLS_ENDPOINT, PoolSummary, QUOTE_ENDPOINT, QuoteRequest,
     QuoteResponse, RecoveryPageRequest,
 };
@@ -39,7 +45,7 @@ use fedimint_core::module::{
     CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
     SupportedModuleApiVersions, TransactionItemAmounts, api_endpoint,
 };
-use fedimint_core::{Amount, InPoint, OutPoint, PeerId, push_db_pair_items};
+use fedimint_core::{Amount, InPoint, NumPeers, OutPoint, PeerId, push_db_pair_items};
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::migration::ServerModuleDbMigrationFn;
 use fedimint_server_core::{
@@ -49,8 +55,9 @@ use futures::StreamExt;
 use strum::IntoEnumIterator;
 
 use crate::db::{
-    BalanceEntry, BalanceKey, BalancePrefix, DbKeyPrefix, LpPosition, LpPositionKey,
-    LpPositionPrefix, Pool, PoolKey, PoolPrefix,
+    BalanceEntry, BalanceKey, BalancePrefix, DbKeyPrefix, DesiredFeeKey, DesiredFeePrefix,
+    FeeVoteKey, FeeVotePrefix, FeeVotesByPoolPrefix, LpPosition, LpPositionKey, LpPositionPrefix,
+    Pool, PoolKey, PoolPrefix,
 };
 
 /// The sensible defaults below are baked into the generator rather than being
@@ -87,6 +94,14 @@ fn default_consensus_config() -> AmmConfigConsensus {
         ]),
         default_fee_per_mille: 3,
         fee_overrides: BTreeMap::new(),
+        // 0.1% to 5%: wide enough to price a volatile pair that the DKG-time
+        // default misprices (the reason the fee is votable at all), narrow
+        // enough that a fully captured guardian set still cannot turn the
+        // pool into a confiscation device. The band is fixed at DKG
+        // precisely because a bound the voters can also vote on bounds
+        // nothing.
+        min_fee_per_mille: 1,
+        max_fee_per_mille: 50,
     }
 }
 
@@ -133,6 +148,26 @@ impl ModuleInit for AmmInit {
                         "Amm Balance"
                     );
                 }
+                DbKeyPrefix::FeeVote => {
+                    push_db_pair_items!(
+                        dbtx,
+                        FeeVotePrefix,
+                        FeeVoteKey,
+                        u16,
+                        items,
+                        "Amm Fee Vote"
+                    );
+                }
+                DbKeyPrefix::DesiredFee => {
+                    push_db_pair_items!(
+                        dbtx,
+                        DesiredFeePrefix,
+                        DesiredFeeKey,
+                        u16,
+                        items,
+                        "Amm Desired Fee"
+                    );
+                }
             }
         }
 
@@ -170,7 +205,11 @@ impl ServerModuleInit for AmmInit {
     /// Initialize the module.
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Self::Module> {
         let cfg: AmmConfig = args.cfg().to_typed()?;
-        Ok(Amm::new(cfg.consensus))
+        Ok(Amm::new(
+            cfg.consensus,
+            args.num_peers(),
+            args.our_peer_id(),
+        ))
     }
 
     /// Generates configs for all peers in a trusted manner for testing.
@@ -305,84 +344,100 @@ struct SwapQuote {
     reserve_in_new: u64,
 }
 
-/// Resolves orientation, applies every swap admission check, and computes
-/// the output via [`math::amount_out`] — the single function shared by
-/// `process_output`'s `SwapV0` arm and `QUOTE_ENDPOINT` (finding I1), so a
-/// quote can never disagree with settlement, and a client trusting a quote
-/// cannot build a transaction that settlement then rejects for a reason the
-/// quote never checked (finding M9: `min_swap_in`, the unit allowlist, and
-/// the `MAX_RESERVE` cap on `reserve_in + amount_in` are all enforced here,
-/// not just in `process_output`).
-///
-/// `unit_out` is not a separate parameter: `pool_id` must already have been
-/// constructed as `PoolId::new(unit_in, unit_out)` by the caller (both call
-/// sites do this), so `unit_out` is simply the side of `pool_id` that is not
-/// `unit_in`.
-///
-/// `min_out` is `Some` only from `process_output`'s `SwapV0` arm —
-/// `QUOTE_ENDPOINT` passes `None`, since a mere quote has no slippage
-/// tolerance to check against. Checking it here, immediately after `dy` is
-/// known and before the `MAX_RESERVE`-on-`reserve_in_new` check below,
-/// restores the error priority settlement had before finding I1 folded both
-/// checks into this one function (fix pass 2, Minor 4): a swap that both
-/// misses slippage and would push the reserve past its cap reports
-/// `SlippageExceeded`, not `ReserveCapExceeded`.
-fn quote_swap(
-    cfg: &AmmConfigConsensus,
-    pool: &Pool,
-    pool_id: PoolId,
-    unit_in: AmountUnit,
-    amount_in: Amount,
-    min_out: Option<Amount>,
-) -> Result<SwapQuote, AmmOutputError> {
-    let params_in = cfg.units.get(&unit_in).ok_or(AmmOutputError::UnknownUnit)?;
-    let in_is_lo = unit_in == pool_id.lo();
-    // `pool_id` was constructed as `PoolId::new(unit_in, unit_out)` by every
-    // caller (see this function's doc comment), so `unit_in` is always one
-    // side of the pair and `other` is always `Some`; the `ok_or` is a
-    // non-panicking guard for a caller violating that precondition.
-    let unit_out = pool_id.other(unit_in).ok_or(AmmOutputError::UnknownUnit)?;
-    if !cfg.units.contains_key(&unit_out) {
-        return Err(AmmOutputError::UnknownUnit);
+impl Amm {
+    /// Resolves orientation, applies every swap admission check, and computes
+    /// the output via [`math::amount_out`] — the single function shared by
+    /// `process_output`'s `SwapV0` arm and `QUOTE_ENDPOINT` (finding I1), so
+    /// a quote can never disagree with settlement, and a client trusting a
+    /// quote cannot build a transaction that settlement then rejects for a
+    /// reason the quote never checked (finding M9: `min_swap_in`, the unit
+    /// allowlist, and the `MAX_RESERVE` cap on `reserve_in + amount_in` are
+    /// all enforced here, not just in `process_output`).
+    ///
+    /// `unit_out` is not a separate parameter: `pool_id` must already have
+    /// been constructed as `PoolId::new(unit_in, unit_out)` by the caller
+    /// (both call sites do this), so `unit_out` is simply the side of
+    /// `pool_id` that is not `unit_in`.
+    ///
+    /// `min_out` is `Some` only from `process_output`'s `SwapV0` arm —
+    /// `QUOTE_ENDPOINT` passes `None`, since a mere quote has no slippage
+    /// tolerance to check against. Checking it here, immediately after `dy`
+    /// is known and before the `MAX_RESERVE`-on-`reserve_in_new` check below,
+    /// restores the error priority settlement had before finding I1 folded
+    /// both checks into this one function (fix pass 2, Minor 4): a swap that
+    /// both misses slippage and would push the reserve past its cap reports
+    /// `SlippageExceeded`, not `ReserveCapExceeded`.
+    ///
+    /// Takes a `DatabaseTransaction` because the fee is no longer a pure
+    /// function of the config: it is the aggregate of the guardians' votes,
+    /// which live in the database ([`Amm::consensus_fee_for`]). Both callers
+    /// already hold a transaction. This must remain ONE function called by
+    /// both — splitting it into a quote path and a settle path is exactly how
+    /// a quote starts disagreeing with settlement, and a votable fee adds a
+    /// second input that could drift between the two.
+    async fn quote_swap(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        pool: &Pool,
+        pool_id: PoolId,
+        unit_in: AmountUnit,
+        amount_in: Amount,
+        min_out: Option<Amount>,
+    ) -> Result<SwapQuote, AmmOutputError> {
+        let params_in = self
+            .cfg
+            .units
+            .get(&unit_in)
+            .ok_or(AmmOutputError::UnknownUnit)?;
+        let in_is_lo = unit_in == pool_id.lo();
+        // `pool_id` was constructed as `PoolId::new(unit_in, unit_out)` by
+        // every caller (see this function's doc comment), so `unit_in` is
+        // always one side of the pair and `other` is always `Some`; the
+        // `ok_or` is a non-panicking guard for a caller violating that
+        // precondition.
+        let unit_out = pool_id.other(unit_in).ok_or(AmmOutputError::UnknownUnit)?;
+        if !self.cfg.units.contains_key(&unit_out) {
+            return Err(AmmOutputError::UnknownUnit);
+        }
+        if amount_in < params_in.min_swap_in {
+            return Err(AmmOutputError::BelowMinSwapIn);
+        }
+
+        let (reserve_in, reserve_out) = if in_is_lo {
+            (pool.reserve_lo, pool.reserve_hi)
+        } else {
+            (pool.reserve_hi, pool.reserve_lo)
+        };
+
+        let fee = self.consensus_fee_for(dbtx, pool_id).await;
+        // Computed ONCE (spec §7.4): this is the same `dy` the caller uses
+        // for both the reserve debit and the balance credit (settlement) or
+        // returns directly (quote) — never recomputed.
+        let dy = math::amount_out(reserve_in.msats, reserve_out.msats, amount_in.msats, fee)
+            .map_err(map_curve_error)?;
+
+        if let Some(min_out) = min_out
+            && dy < min_out.msats
+        {
+            return Err(AmmOutputError::SlippageExceeded);
+        }
+
+        let reserve_in_new = reserve_in
+            .msats
+            .checked_add(amount_in.msats)
+            .ok_or(AmmOutputError::ReserveCapExceeded)?;
+        if reserve_in_new > math::MAX_RESERVE {
+            return Err(AmmOutputError::ReserveCapExceeded);
+        }
+
+        Ok(SwapQuote {
+            dy,
+            in_is_lo,
+            reserve_in,
+            reserve_out,
+            reserve_in_new,
+        })
     }
-    if amount_in < params_in.min_swap_in {
-        return Err(AmmOutputError::BelowMinSwapIn);
-    }
-
-    let (reserve_in, reserve_out) = if in_is_lo {
-        (pool.reserve_lo, pool.reserve_hi)
-    } else {
-        (pool.reserve_hi, pool.reserve_lo)
-    };
-
-    let fee = cfg.fee_for(pool_id);
-    // Computed ONCE (spec §7.4): this is the same `dy` the caller uses for
-    // both the reserve debit and the balance credit (settlement) or returns
-    // directly (quote) — never recomputed.
-    let dy = math::amount_out(reserve_in.msats, reserve_out.msats, amount_in.msats, fee)
-        .map_err(map_curve_error)?;
-
-    if let Some(min_out) = min_out
-        && dy < min_out.msats
-    {
-        return Err(AmmOutputError::SlippageExceeded);
-    }
-
-    let reserve_in_new = reserve_in
-        .msats
-        .checked_add(amount_in.msats)
-        .ok_or(AmmOutputError::ReserveCapExceeded)?;
-    if reserve_in_new > math::MAX_RESERVE {
-        return Err(AmmOutputError::ReserveCapExceeded);
-    }
-
-    Ok(SwapQuote {
-        dy,
-        in_is_lo,
-        reserve_in,
-        reserve_out,
-        reserve_in_new,
-    })
 }
 
 /// Clamps a client-requested recovery page size to `[1,
@@ -592,12 +647,66 @@ where
 #[derive(Debug)]
 pub struct Amm {
     pub cfg: AmmConfigConsensus,
+    /// Needed by [`Amm::consensus_fee_for`]: the aggregation's safety rests
+    /// entirely on indexing the sorted votes at `threshold() - 1`, which is
+    /// a function of the federation's size, not of how many votes happen to
+    /// have arrived.
+    pub num_peers: NumPeers,
+    /// Which guardian this instance is, so `consensus_proposal` can diff its
+    /// local intent against its OWN recorded vote rather than against some
+    /// other peer's.
+    pub our_peer_id: PeerId,
 }
 
 impl Amm {
     /// Create new module instance.
-    pub fn new(cfg: AmmConfigConsensus) -> Amm {
-        Amm { cfg }
+    pub fn new(cfg: AmmConfigConsensus, num_peers: NumPeers, our_peer_id: PeerId) -> Amm {
+        Amm {
+            cfg,
+            num_peers,
+            our_peer_id,
+        }
+    }
+
+    /// The fee, in per-mille, that `pool` currently charges — the single
+    /// source of truth for both settlement and every fee this module reports.
+    ///
+    /// **Aggregation.** Votes are sorted ascending and the one at index
+    /// `threshold() - 1` is taken, the same rule `fedimint-walletv2-server`'s
+    /// `consensus_feerate` uses. With `t = threshold()` of `n` peers and at
+    /// most `f = n - t` faulty ones, that index is bracketed by honest votes
+    /// on both sides: the faulty peers can shift *which* honest vote is
+    /// selected but can never push the result outside the range the honest
+    /// guardians themselves voted. A plain `[len / 2]` median does not have
+    /// that property — `f` extreme votes drag it — which is why this is not
+    /// the median the legacy wallet module takes.
+    ///
+    /// **Fallback.** Unlike `consensus_feerate` this returns a `u16`, not an
+    /// `Option`. A freshly-DKG'd federation has no votes at all, and
+    /// propagating "no fee known" into `quote_swap` would reject every swap
+    /// on every new pool until a threshold of guardians happened to vote —
+    /// a self-inflicted outage in exchange for nothing, since the config
+    /// already carries a perfectly good fee. Below threshold, that config fee
+    /// is used.
+    ///
+    /// **Clamp.** The result is forced into the configured band whichever
+    /// branch produced it. For the vote branch this is redundant with the
+    /// admission check in `process_consensus_item` and cheap insurance
+    /// against it ever being weakened; for the config branch it is load
+    /// bearing, since nothing constrains a DKG-time
+    /// `default_fee_per_mille`/`fee_overrides` entry to sit inside a band.
+    pub async fn consensus_fee_for(&self, dbtx: &mut DatabaseTransaction<'_>, pool: PoolId) -> u16 {
+        let mut votes: Vec<u16> = dbtx
+            .find_by_prefix(&FeeVotesByPoolPrefix(pool))
+            .await
+            .map(|(_, fee)| fee)
+            .collect()
+            .await;
+        votes.sort_unstable();
+
+        let voted = votes.get(self.num_peers.threshold() - 1).copied();
+        self.cfg
+            .clamp_fee_to_band(voted.unwrap_or_else(|| self.cfg.fee_for(pool)))
     }
 }
 
@@ -607,26 +716,123 @@ impl ServerModule for Amm {
     type Common = AmmModuleTypes;
     type Init = AmmInit;
 
+    /// Proposes the difference between this guardian's locally-set intent
+    /// (`DesiredFee`, written only by `FEE_VOTE_SUBMIT_ENDPOINT`) and its own
+    /// last vote that consensus actually recorded (`FeeVote` at
+    /// `self.our_peer_id`) — the same three-way-diff shape
+    /// `fedimint-meta-server`'s `consensus_proposal` uses.
+    ///
+    /// Deriving the proposal from stored state on every call, rather than
+    /// enqueuing an item when the guardian submits, is what makes a vote
+    /// survive a merge, a crash, or a restart: whatever the reason a vote did
+    /// not land, the difference is still there next session and is proposed
+    /// again. It is also what lets [`AmmConsensusItem`] omit `meta`'s `salt`
+    /// (see that type's doc comment).
+    ///
+    /// A desired fee for a pool that does not exist is skipped rather than
+    /// proposed. `process_consensus_item` rejects such a vote, so proposing
+    /// it would put this guardian in a loop of proposing an item every peer
+    /// (including itself) must error on. `FEE_VOTE_SUBMIT_ENDPOINT` already
+    /// refuses to record one, and pools are never deleted, so this is
+    /// unreachable in practice — but a skip is a far cheaper failure mode
+    /// than a permanent proposal loop.
     async fn consensus_proposal(
         &self,
-        _dbtx: &mut DatabaseTransaction<'_>,
+        dbtx: &mut DatabaseTransaction<'_>,
     ) -> Vec<AmmConsensusItem> {
-        // This module has no consensus items (spec §10): a `Balance` is
-        // always claimable and no reserves are ever earmarked.
-        Vec::new()
+        let desired: Vec<(PoolId, u16)> = dbtx
+            .find_by_prefix(&DesiredFeePrefix)
+            .await
+            .map(|(key, fee)| (key.0, fee))
+            .collect()
+            .await;
+
+        let mut to_submit = Vec::new();
+        for (pool, fee_per_mille) in desired {
+            if dbtx.get_value(&PoolKey(pool)).await.is_none() {
+                continue;
+            }
+            let recorded = dbtx
+                .get_value(&FeeVoteKey {
+                    pool,
+                    peer: self.our_peer_id,
+                })
+                .await;
+            if recorded != Some(fee_per_mille) {
+                to_submit.push(AmmConsensusItem::FeeVoteV0 {
+                    pool,
+                    fee_per_mille,
+                });
+            }
+        }
+
+        to_submit
     }
 
+    /// Records one guardian's fee vote (spec §10). `peer_id` is the ordering
+    /// layer's attribution of the item, so a peer can only ever write its own
+    /// row — there is no way to vote on another guardian's behalf.
+    ///
+    /// Every field is validated against state the *recipient* holds, never
+    /// against anything the sender asserts: the fee must lie inside the
+    /// DKG-fixed band, and the pool must exist. A vote is otherwise a free
+    /// write into a table that `consensus_fee_for` scans per swap, so an
+    /// unvalidated `pool` would let a guardian grow that table without bound
+    /// with rows naming pools that will never exist.
+    ///
+    /// Returns `Err` for a redundant vote, as `ServerModule::
+    /// process_consensus_item`'s contract requires — an item that changes no
+    /// state must be rejected, or a peer can pad every session for free. The
+    /// unknown/default variant likewise returns `Err` rather than panicking:
+    /// this arm is reachable from a peer that is simply running a newer
+    /// binary, and halting the federation over that would be a
+    /// self-inflicted outage.
     async fn process_consensus_item<'a, 'b>(
         &'a self,
-        _dbtx: &mut DatabaseTransaction<'b>,
-        _consensus_item: AmmConsensusItem,
-        _peer_id: PeerId,
+        dbtx: &mut DatabaseTransaction<'b>,
+        consensus_item: AmmConsensusItem,
+        peer_id: PeerId,
     ) -> anyhow::Result<()> {
-        // WARNING: `process_consensus_item` should return an `Err` for items
-        // that do not change any internal consensus state. We never expect to
-        // receive one at all (spec §10), so unconditionally erroring is
-        // correct and, unlike a panic, keeps the federation running.
-        anyhow::bail!("AMM module does not process consensus items")
+        match consensus_item {
+            AmmConsensusItem::FeeVoteV0 {
+                pool,
+                fee_per_mille,
+            } => {
+                anyhow::ensure!(
+                    self.cfg.fee_in_band(fee_per_mille),
+                    "fee vote {fee_per_mille} from peer {peer_id} is outside the configured band \
+                     [{}, {}]",
+                    self.cfg.min_fee_per_mille,
+                    self.cfg.max_fee_per_mille
+                );
+                anyhow::ensure!(
+                    dbtx.get_value(&PoolKey(pool)).await.is_some(),
+                    "fee vote from peer {peer_id} names a pool that does not exist"
+                );
+                // The write is what tells us whether the item was redundant,
+                // so it necessarily happens before the rejection. Erroring
+                // out of `process_consensus_item` discards this transaction,
+                // so a rejected vote leaves no row behind.
+                let previous = dbtx
+                    .insert_entry(
+                        &FeeVoteKey {
+                            pool,
+                            peer: peer_id,
+                        },
+                        &fee_per_mille,
+                    )
+                    .await;
+                anyhow::ensure!(
+                    previous != Some(fee_per_mille),
+                    "fee vote from peer {peer_id} is redundant"
+                );
+
+                Ok(())
+            }
+            AmmConsensusItem::Default { variant, .. } => anyhow::bail!(
+                "received an AMM consensus item with unknown variant {variant} from peer {peer_id}"
+            ),
+        }
     }
 
     async fn process_input<'a, 'b, 'c>(
@@ -803,14 +1009,9 @@ impl ServerModule for Amm {
                 // call itself — the exact function `QUOTE_ENDPOINT` calls
                 // (finding I1), so a quote can never disagree with
                 // settlement.
-                let quote = quote_swap(
-                    &self.cfg,
-                    &pool,
-                    pool_id,
-                    *unit_in,
-                    *amount_in,
-                    Some(*min_out),
-                )?;
+                let quote = self
+                    .quote_swap(dbtx, &pool, pool_id, *unit_in, *amount_in, Some(*min_out))
+                    .await?;
                 let dy = quote.dy;
 
                 // Findings Minor 4/5/6: orientation, `reserve_in_new`, and
@@ -1111,16 +1312,22 @@ impl ServerModule for Amm {
                     let db = context.db();
                     let mut dbtx = db.begin_transaction_nc().await;
                     let pools: Vec<_> = dbtx.find_by_prefix(&PoolPrefix).await.collect().await;
-                    Ok(pools
-                        .into_iter()
-                        .map(|(key, pool)| PoolSummary {
+                    // The VOTED fee, not `cfg.fee_for` — this field is the
+                    // only channel through which the client ever learns the
+                    // fee, so reporting the config value would let the
+                    // displayed fee silently diverge from what `quote_swap`
+                    // settles at.
+                    let mut summaries = Vec::with_capacity(pools.len());
+                    for (key, pool) in pools {
+                        summaries.push(PoolSummary {
                             pool: key.0,
                             reserve_lo: pool.reserve_lo,
                             reserve_hi: pool.reserve_hi,
                             total_shares: pool.total_shares,
-                            fee_per_mille: module.cfg.fee_for(key.0),
-                        })
-                        .collect())
+                            fee_per_mille: module.consensus_fee_for(&mut dbtx, key.0).await,
+                        });
+                    }
+                    Ok(summaries)
                 }
             },
             api_endpoint! {
@@ -1145,7 +1352,9 @@ impl ServerModule for Amm {
                     // checks, and the curve call cannot drift apart between
                     // quote and settlement (finding M9). `min_out` is `None`:
                     // a quote has no slippage tolerance of its own to check.
-                    let quote = quote_swap(&module.cfg, &pool, pool_id, unit_in, amount_in, None)
+                    let quote = module
+                        .quote_swap(&mut dbtx, &pool, pool_id, unit_in, amount_in, None)
+                        .await
                         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
                     let price_impact_per_mille = math::price_impact_per_mille(
@@ -1158,6 +1367,79 @@ impl ServerModule for Amm {
                     Ok(QuoteResponse {
                         amount_out: Amount::from_msats(quote.dy),
                         price_impact_per_mille,
+                    })
+                }
+            },
+            api_endpoint! {
+                FEE_VOTE_SUBMIT_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Amm, context, request: FeeVoteSubmitRequest| -> () {
+                    // Guardian-only: this writes the intent that
+                    // `consensus_proposal` turns into a vote, so an
+                    // unauthenticated caller reaching it would be setting
+                    // this guardian's vote.
+                    //
+                    // `check_auth` (i.e. `ApiEndpointContext::has_auth`),
+                    // NOT `request_auth().is_some()`: `request_auth` returns
+                    // whatever password the request carried "regardless of
+                    // whether it was correct"
+                    // (`fedimint-core/src/module/mod.rs`), and the server
+                    // sets `has_auth` only after actually verifying it
+                    // (`fedimint-server/src/consensus/api.rs`, `server_auth
+                    // .verify(req_auth)`). `fedimint-meta-server`'s
+                    // SUBMIT_ENDPOINT gates on the former and is therefore
+                    // not a template to copy here — under it, any caller
+                    // supplying an arbitrary non-empty password passes.
+                    let _auth = fedimint_core::net::auth::check_auth(context)?;
+
+                    // Both checks are repeated by `process_consensus_item`
+                    // against the ordered item, which is where they are
+                    // load bearing — a peer's proposal is not bound by our
+                    // copy of them. Here they exist to fail the guardian's
+                    // own request loudly and immediately, rather than
+                    // accepting a vote that could only ever be rejected.
+                    if !module.cfg.fee_in_band(request.fee_per_mille) {
+                        return Err(ApiError::bad_request(format!(
+                            "fee_per_mille must be within [{}, {}]",
+                            module.cfg.min_fee_per_mille, module.cfg.max_fee_per_mille
+                        )));
+                    }
+
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction().await;
+                    if dbtx.get_value(&PoolKey(request.pool)).await.is_none() {
+                        return Err(ApiError::not_found("no such pool".to_string()));
+                    }
+                    dbtx.insert_entry(&DesiredFeeKey(request.pool), &request.fee_per_mille)
+                        .await;
+                    dbtx.commit_tx_result().await?;
+
+                    Ok(())
+                }
+            },
+            api_endpoint! {
+                FEE_VOTES_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Amm, context, request: FeeVotesRequest| -> FeeVotesResponse {
+                    // Unauthenticated by design — see FEE_VOTES_ENDPOINT's
+                    // doc comment. Reports the aggregate alongside the raw
+                    // votes so a caller never re-implements the aggregation.
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let votes = dbtx
+                        .find_by_prefix(&FeeVotesByPoolPrefix(request.pool))
+                        .await
+                        .map(|(key, fee)| (key.peer, fee))
+                        .collect()
+                        .await;
+
+                    Ok(FeeVotesResponse {
+                        votes,
+                        effective_fee_per_mille: module
+                            .consensus_fee_for(&mut dbtx, request.pool)
+                            .await,
+                        min_fee_per_mille: module.cfg.min_fee_per_mille,
+                        max_fee_per_mille: module.cfg.max_fee_per_mille,
                     })
                 }
             },

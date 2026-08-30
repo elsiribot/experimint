@@ -56,7 +56,7 @@ This is deliberate. The swap math and the share accounting are the parts of an A
 | D6 | Protocol fee (`feeTo`, `kLast`, ⅙ of growth) | none | The entire fee accrues to LPs. A guardian-directed cut is a governance question, deferred to §15. |
 | D7 | Flash swaps via `uniswapV2Call` callback | none | No callback primitive; structurally absent, which removes the largest on-chain exploit class outright. |
 | D8 | LP balance is a single fungible number | positions fragment, one per deposit | Follows from the recovery-safe key derivation in §8. |
-| D9 | Fee fixed at 0.30% in bytecode | `fee_per_mille` configurable per pool | Federations trade pairs of wildly differing volatility. Setting it to `3` reproduces the reference exactly. |
+| D9 | Fee fixed at 0.30% in bytecode | `fee_per_mille` configurable per pool at DKG, then guardian-votable inside a DKG-fixed band (§10) | Federations trade pairs of wildly differing volatility, and that volatility changes after DKG. Setting the config fee to `3` and never voting reproduces the reference exactly. |
 
 ---
 
@@ -172,9 +172,11 @@ All curve and share arithmetic lives in `common` as pure functions, so client qu
 ```rust
 #[repr(u8)]
 pub enum DbKeyPrefix {
-    Pool       = 0x01,  // PoolId                -> Pool
-    LpPosition = 0x02,  // (PoolId, PublicKey)   -> LpPosition
+    Pool       = 0x01,  // PoolId                  -> Pool
+    LpPosition = 0x02,  // (PoolId, PublicKey)     -> LpPosition
     Balance    = 0x03,  // (PublicKey, AmountUnit) -> BalanceEntry
+    FeeVote    = 0x04,  // (PoolId, PeerId)        -> u16   consensus state (§10)
+    DesiredFee = 0x05,  // PoolId                  -> u16   local state only (§10)
 }
 
 /// Canonical unordered pair. MUST decode with lo < hi; see §5.1.
@@ -190,7 +192,9 @@ pub struct LpPosition { pub shares: u64, pub tweak: [u8; 16] }
 pub struct BalanceEntry { pub amount: Amount, pub tweak: [u8; 16] }
 ```
 
-Pools are independent, so operations on different pairs never contend. `LpPosition` is keyed `(PoolId, PublicKey)` so an audit or API prefix scan enumerates a pool's positions.
+Pools are independent, so operations on different pairs never contend. `LpPosition` is keyed `(PoolId, PublicKey)` so an audit or API prefix scan enumerates a pool's positions. `FeeVote` is keyed `(PoolId, PeerId)` — **pool first** — for the same reason: the aggregation in §10 is a byte-prefix scan of one pool's votes, and the reverse field order would group by guardian instead and force a full-table scan.
+
+`FeeVote` and `DesiredFee` carry no value, so neither appears in `audit` (§9.1).
 
 Shares are a plain `u64`, not denominated in any `AmountUnit`.
 
@@ -319,7 +323,7 @@ Note that **each transaction touches exactly one unit on the mint side** for swa
 ### 6.3 Properties of the two-transaction swap
 
 - **`SwapV0` carries no authorisation, correctly.** Outputs return no `pub_key`; Tx1 is authorised entirely by the note spend. Anyone may swap into anyone's `recipient_pk`, which is harmless and yields pay-to-swap for free.
-- **Never submitting Tx2 costs the pool nothing.** The pool already holds its A. The balance sits indefinitely: no deadline, no expiry sweep, no refund path, no reserves earmarked away from other traders. This is the entire payoff of choosing balances over pending offers, and it is why no consensus item is needed (§10).
+- **Never submitting Tx2 costs the pool nothing.** The pool already holds its A. The balance sits indefinitely: no deadline, no expiry sweep, no refund path, no reserves earmarked away from other traders. This is the entire payoff of choosing balances over pending offers, and it is why the swap path needs no consensus item at all — the one item this module does carry is a fee vote (§10), which is governance state and never touches a pending swap.
 - **Multi-hop costs one extra transaction, not two.** A→B→C is Tx1 `SwapV0(A→B)`; Tx2 `ClaimBalance(B)` + `SwapV0(B→C)`; Tx3 `ClaimBalance(C)` + notes. Purely client-side; the server needs no routing logic.
 - **Full exit from fragmented positions is one transaction.** Several `WithdrawV0` inputs may share a transaction, since core collects a `pub_key` per input and validates the whole set at `transaction.rs:81`.
 
@@ -534,9 +538,31 @@ Collapsing every unit into one `i64` msat scalar is lossy in general but safe he
 
 ## 10. Consensus items
 
-**None.** The draft carried a median `Timestamp` item to support deadline logic; nothing in this design has a deadline, because a balance is always claimable and no reserves are ever earmarked. Adding it now would be dead consensus surface.
+**Exactly one: `FeeVoteV0 { pool, fee_per_mille }`** — one guardian's desired swap fee for one pool. This resolves §16 open question 1 and supersedes D9's listing of dynamic fees as out of scope (§15).
 
-**No price consensus item exists and none should be added.** Pricing is endogenous; an oracle would create a manipulation surface this design otherwise does not have.
+```rust
+pub enum AmmConsensusItem {
+    FeeVoteV0 { pool: PoolId, fee_per_mille: u16 },
+    #[encodable_default]
+    Default { variant: u64, bytes: Vec<u8> },
+}
+```
+
+**No deadline item.** The draft carried a median `Timestamp` item to support deadline logic; nothing in this design has a deadline, because a balance is always claimable and no reserves are ever earmarked. It would still be dead consensus surface.
+
+**No price consensus item exists and none should be added.** Pricing stays endogenous; an oracle would create a manipulation surface this design otherwise does not have. A votable *fee* is not a votable *price*: it moves the constant-product curve's spread, never its state, and is bounded at DKG (§11).
+
+**Aggregation — threshold index, not median.** `consensus_fee_for(pool)` sorts the pool's votes ascending and takes the one at index `threshold() - 1`. With `t = threshold()` of `n` peers and at most `f = n - t` faulty ones, that index is bracketed by honest votes on both sides, so the faulty guardians can shift *which* honest vote is selected but can never push the result outside the range the honest guardians voted. This is `fedimint-walletv2-server`'s `consensus_feerate` rule. A plain `[len / 2]` median — what the legacy wallet module takes — does **not** have that property: `f` extreme votes drag it.
+
+**Fallback and clamp.** Below `t` votes the DKG-time config fee applies (§11), so a freshly-DKG'd federation can quote and swap before anyone has voted. Unlike `consensus_feerate` this never returns "no fee known": doing so would reject every swap on every new pool until votes happened to land, an outage in exchange for nothing. The result is clamped into the configured band whichever branch produced it — redundant on the vote branch, load bearing on the config branch, since nothing constrains a DKG-time fee to sit inside a band.
+
+**One fee, one function.** The aggregate is read in exactly one place, `quote_swap`, which `process_output`'s `SwapV0` arm and `QUOTE_ENDPOINT` both call (§12), and reported by `POOLS_ENDPOINT` through the same aggregate. The client has no other source for the fee, so reporting the config value anywhere would let the displayed fee diverge from settlement.
+
+**Proposals are a diff, not a queue.** `consensus_proposal` compares the guardian's local `DesiredFee` rows against its own recorded `FeeVote` rows and proposes only the differences — `fedimint-meta-server`'s shape. A vote that failed to land for any reason is still a difference next session and is proposed again.
+
+**No `salt`, deliberately.** AlephBFT merges byte-identical items within a session, so moving a vote `a → b → a` inside one session drops the second `a`; `meta` defeats this with an otherwise-meaningless `salt: u64`. Here the drop is not lost but delayed by one session, because the proposal is re-derived from stored state (above). A swap fee is a governance parameter that moves on human timescales, so bounded, self-healing latency is the right price for keeping a non-deterministic field out of a consensus item. This trade-off would be wrong for a fast-moving value.
+
+**Admission rules**, all checked against state the *recipient* holds, never against anything the sender asserts: the fee must lie inside the configured band; the pool must already exist (an unvalidated `pool` would let a guardian grow a per-swap-scanned table without bound); a redundant vote is rejected, per `ServerModule::process_consensus_item`'s contract. The unknown/default variant returns `Err`, never a panic — it is reachable from a peer merely running a newer binary.
 
 ---
 
@@ -548,10 +574,16 @@ pub struct AmmConfigConsensus {
     /// A unit is only reachable if some mintv2 instance issues it — a setup
     /// requirement this module cannot verify (P13).
     pub units: BTreeMap<AmountUnit, UnitParams>,
-    /// Applied to any pool without an explicit override. Default 3 (= 0.30%,
-    /// the reference value).
+    /// Applied to any pool without an explicit override, and the fallback
+    /// used until a threshold of guardians has voted (§10). Default 3
+    /// (= 0.30%, the reference value).
     pub default_fee_per_mille: u16,
     pub fee_overrides: BTreeMap<PoolId, u16>,
+    /// Band a guardian-voted fee is confined to, and the band the effective
+    /// fee is clamped into. Fixed at DKG: a bound the voters could also vote
+    /// on bounds nothing. Default `[1, 50]` (0.1% to 5%).
+    pub min_fee_per_mille: u16,
+    pub max_fee_per_mille: u16,
 }
 
 pub struct UnitParams {
@@ -571,13 +603,19 @@ pub struct AmmConfigPrivate;  // empty — this module holds no key material
 
 `MINIMUM_LIQUIDITY` is the reference's hardcoded `1000`, not configurable.
 
-**DKG validation.** `units` non-empty; every fee `< 1000`; every `min_swap_in` non-zero; every `PoolId` in `fee_overrides` canonical (§5.1) with both units in `units`. The federation must additionally run a `mintv2` instance per listed unit, which this module cannot check — surface it as a guardian-UI setup checklist item.
+`AmmClientConfig` deliberately does **not** mirror the band: the client never reads a fee out of its config (it takes the effective, already-aggregated fee from `PoolSummary::fee_per_mille`), so a mirrored band would be config surface with no reader. Mirror it only alongside a client that actually checks a server-reported fee against it.
+
+**DKG validation.** `units` non-empty; every fee `< 1000`; `max_fee_per_mille < 1000`; `min_fee_per_mille <= max_fee_per_mille` (an inverted band would make the server's clamp ill-defined); every `min_swap_in` non-zero; every `PoolId` in `fee_overrides` canonical (§5.1) with both units in `units`. A `default_fee_per_mille` or override *outside* the band is legal and clamped rather than rejected (§10) — the generator's own default is nonetheless asserted to sit inside its own band, since a default nobody could ever charge is a config-gen mistake nothing downstream would notice.
+
+The federation must additionally run a `mintv2` instance per listed unit, which this module cannot check — surface it as a guardian-UI setup checklist item.
 
 **Adding units** requires standing up an issuing module of a **new `ModuleKind`** plus an `AmmConfigConsensus` change, i.e. a coordinated federation upgrade (§3.2 — a second `mintv2` is not an option). Adding *pairs* over existing units requires nothing.
 
 Because `AmmConfigPrivate` is empty, this module holds no key material and pools are ordinary database records — which is why one instance can host many pools while a `mintv2` instance hosts exactly one unit (P13) and cannot be stood up twice (P15).
 
-**Consensus version** starts at `0.0`. Any change to the encoded shape of an input, output or stored record requires a bump plus a `get_database_migrations` entry.
+**Consensus version** starts at `0.0`. Any change to the encoded shape of an input, output, consensus item or stored record requires a bump plus a `get_database_migrations` entry.
+
+The fee-vote work (§10) changed `AmmConfigConsensus` and gave `AmmConsensusItem` its first real variant, and did **not** bump the version: no federation runs this module (repo README, "Nothing here is deployed"), so there is no peer at an older encoding to stay compatible with. `get_database_migrations` likewise stays empty: `FeeVote` and `DesiredFee` are new prefixes, no existing record's shape changed, and an absent row reads as `None`. Both of those are consequences of being undeployed, not of the change being backward compatible — it is not.
 
 ---
 
@@ -603,11 +641,13 @@ A local failure to build/submit Tx2, or Tx2 being rejected by consensus, does **
 
 **API endpoints** (server)
 
-- `POOLS_ENDPOINT` → every `PoolId` with reserves, `total_shares`, effective fee.
+- `POOLS_ENDPOINT` → every `PoolId` with reserves, `total_shares`, effective fee. "Effective" means the **aggregate of the guardians' votes** (§10), not the config value — this field is the only channel through which the client learns the fee at all.
 - `QUOTE_ENDPOINT(unit_in, unit_out, amount_in)` → `{ amount_out, price_impact_per_mille }`, computed with the same `common` function the server settles with. `effective_price` is deliberately omitted (finding M5): it is a ratio with no exact integer representation, and the client can compute it exactly itself from `amount_out` and the `amount_in` it already knows.
 - `BALANCE_ENDPOINT(pubkey, unit) -> Option<Amount>` → point lookup for a single stored `Balance` (fix pass 3, Important 5). Added because the swap Tx1→Tx2 re-read (§6.1) already knows the exact key it wants and was using `BALANCE_RECOVERY_ENDPOINT`'s paginated scan for it — worse than O(rows): `request_current_consensus` requires threshold-many byte-identical responses *per page*, against a table that mutates on every swap in the federation, and `Balance` rows are attacker-creatable for one `min_swap_in` each and never garbage-collected (below), so an attacker could otherwise permanently tax every swap's Tx2 re-read. Leaks nothing the paginated endpoint does not already expose publicly.
 - `BALANCE_RECOVERY_ENDPOINT` → paginated stream of `(tweak, pubkey, unit, amount)` (finding I2: cursor + limit, server-enforced max page size — `Balance` rows are attacker-creatable for one `min_swap_in` each and never garbage-collected, §9.2, so an unpaginated dump is a single-request amplification). The cursor is a keyset cursor (fix pass 2, Important 2) — the server's opaque encoding of the last row returned, echoed back verbatim by the client — not a row offset, so pagination stays correct even though `Balance` rows are deleted continuously in a live federation (every `ClaimBalanceV0`). Recovery still uses this (not `BALANCE_ENDPOINT`) since it must discover balances by tweak-match, not by an already-known key.
 - `LP_RECOVERY_ENDPOINT` → paginated stream of `(tweak, pool, pubkey, shares)`, same pagination as above.
+- `FEE_VOTE_SUBMIT_ENDPOINT(pool, fee_per_mille) -> ()` → **guardian-authenticated.** Records the calling guardian's desired fee as local state; it does not itself change the fee (§10). Idempotent, so a guardian UI may submit unconditionally. Gated on `ApiEndpointContext::has_auth` — the *verified* flag — **not** `request_auth().is_some()`, which returns whatever password the request carried "regardless of whether it was correct". `fedimint-meta-server`'s `SUBMIT_ENDPOINT` gates on the latter and is therefore not a template to copy: under it, any caller supplying an arbitrary non-empty password passes. Use `fedimint_core::net::auth::check_auth`.
+- `FEE_VOTES_ENDPOINT(pool) -> { votes, effective_fee_per_mille, min, max }` → **unauthenticated, deliberately.** Per-guardian votes are ordered consensus items and are therefore already in the publicly retrievable session history; gating this would hide nothing an observer cannot reconstruct while denying the fee's provenance to exactly the traders the fee is charged to. `meta`'s equivalent submissions endpoint is guardian-only and this deliberately differs from it. Absence of a guardian from `votes` means "has not voted", not "voted the default".
 
 ### 12.1 Documented limitations
 
@@ -633,7 +673,8 @@ A local failure to build/submit Tx2, or Tx2 being rejected by consensus, does **
 | --- | --- | --- |
 | Guardian front-running | Guardians see submitted transactions before ordering them | Not fully solvable. `min_out` bounds the loss to the trader's stated tolerance. Document the residual exposure honestly. |
 | Censorship | A guardian withholds a swap | Standard threshold assumption; client submits to multiple peers |
-| LVR / adverse selection | Anyone with a faster external price picks off stale reserves | Inherent to the reference design. `fee_per_mille` must reflect the pair's volatility; a pool with one-directional flow will bleed. Surface realised fee income vs. reserve drift in the guardian UI. |
+| LVR / adverse selection | Anyone with a faster external price picks off stale reserves | Inherent to the reference design. `fee_per_mille` must reflect the pair's volatility; a pool with one-directional flow will bleed. Guardians can now retune it without a config change (§10). Surface realised fee income vs. reserve drift in the guardian UI. |
+| Guardian fee manipulation | The fee is now guardian-voted (§10), so guardians can move the price every trader pays — by raising it to extract from traders, or lowering it to bleed LPs via LVR | **Partly mitigated, and the residual is a governance exposure, not a custody one.** The threshold-index aggregation keeps the outcome inside the range the *honest* guardians voted: up to `max_evil()` faulty guardians can shift which honest vote is selected but cannot pull the result past the honest extremes, and below `threshold()` votes the fee does not move from the config value at all. The DKG-fixed band is what bounds a *fully captured* guardian set, which the aggregation alone cannot: it is set once at DKG and cannot itself be voted, so `[min, max]` is the widest range a unanimous set can ever charge (default `[1, 50]`, i.e. 0.1%–5%). **What neither defends against:** a colluding threshold moving the fee anywhere inside that band, at any time, with no rate limit and no notice period; the band being set too wide at DKG; and the fee changing between a client's quote and its Tx1 — a swap re-prices at settlement, and the trader's protection there is `min_out`, exactly as for a concurrent reserve move. Votes are individually attributable and publicly readable (`FEE_VOTES_ENDPOINT`), so the exposure is observable rather than silent; that is a transparency property, not a technical bound. See §15.1: pricing being "not subject to guardian discretion" is now bounded discretion, not none — documentation must not claim otherwise. |
 | Dust / spam griefing | Many tiny swaps, each flooring output to zero | `min_swap_in`; reject `amount_in` below it and `out == 0` |
 | First-depositor inflation | Mint 1 share, donate to inflate share price | `MINIMUM_LIQUIDITY` burn (§7.2) |
 | Ratio shift on deposit | Deposit lands after a large swap and mints fewer shares | `min_shares` |
@@ -685,6 +726,8 @@ What remains binding:
 
 **Integration tests** against `devimint`: full construction through real `mintv2` instances, verifying the per-unit funding check accepts §6.2's shapes and rejects malformed variants — missing claim leg, wrong unit, `min_out` violation, non-existent balance.
 
+**Fee-vote tests** (§10): the aggregator picking index `threshold() - 1` across several federation sizes, with hand-computed expectations rather than a recomputed index; a single faulty guardian never pulling the result outside the honest range; the config fallback before threshold, and a below-threshold minority not moving the fee at all; clamping on both the vote and the fallback branch; band admission at both endpoints and rejection outside; rejection of a vote for a non-existent pool; redundant-vote rejection with a change and a change-back both still accepted; the unknown variant erroring rather than panicking; the proposal diff against *our own* recorded vote, including re-proposing a vote that never got recorded (the property the no-salt design rests on); the submit endpoint requiring *verified* auth. Plus a multi-guardian integration test proving a swap settles at the voted fee rather than the config default, asserted against `math::amount_out` at both fees so it cannot pass vacuously.
+
 **Determinism test:** run curve and audit paths on x86-64 and aarch64 in CI and compare byte-identical output.
 
 ---
@@ -696,19 +739,22 @@ Deliberately not planned, as distinct from "not yet built":
 - **Bearer LP shares.** The draft's Phase 2 issued shares as a per-pool `AmountUnit` via `mintv2`. That contradicts permissionless pool creation: a new unit needs a DKG key ceremony, so a permissionlessly-created pool could never get a share unit, and bearer shares would silently restrict pool creation to coordinated upgrades. Permissionless pools were kept; positions stay account-based and LP privacy is a documented limitation (§12.1), not a roadmap item. A future bearer scheme would need this module's own threshold keyset with the pool encoded in the signed message — a substantially larger project.
 - **Batch clearing.** Two-phase uniform-price clearing would remove the front-running incentive, but it costs atomicity, reintroduces refund state machines, and buys no privacy the e-cash legs do not already provide (§13.1). Revisit only if guardian front-running proves to be a real problem in practice.
 - **Server-side multi-hop routing.** Composes client-side at one transaction per hop (§6.3).
-- **Concentrated liquidity, dynamic fees, TWAP oracle, protocol fee.** D5, D6, D9.
+- **Concentrated liquidity, TWAP oracle, protocol fee.** D5, D6.
+  - **Dynamic fees (D9) are no longer out of scope** — a guardian-voted, band-bounded fee is implemented (§10, resolving §16 open question 1). D9's original objection was to a *reactive* fee: a fee that adjusts automatically to volume, volatility or reserve imbalance. That remains out of scope, and deliberately so: it would make the fee a function of pool state, which is attacker-influenceable, whereas a vote is a governance input with a bounded, attributable, human-timescale change rate.
 - **Cross-federation swaps.**
 - **Adding units after DKG.** Adding *pairs* over existing units is permissionless; adding units is not (§11).
 
 ### 15.1 Non-goal, stated explicitly
 
-This module is **not trust-minimised relative to the federation**. Reserves are federation-held funds. What it guarantees is that pricing is deterministic, auditable, and not subject to guardian discretion — a governance property, not a custody one. Documentation must not imply otherwise.
+This module is **not trust-minimised relative to the federation**. Reserves are federation-held funds. What it guarantees is that pricing is deterministic and auditable: given the reserves and the fee, the output is a pure function with no guardian discretion in it at all.
+
+The **fee itself is now guardian-voted** (§10), so guardian discretion over pricing is *bounded*, not absent: confined to the DKG-fixed band, requiring a threshold to move, and publicly attributable per guardian. This section previously claimed pricing was "not subject to guardian discretion" outright; that is no longer true and documentation must not repeat it. What remains true is that the discretion is bounded, observable, and cannot reach the curve or the reserves — a governance property, not a custody one.
 
 ---
 
 ## 16. Open questions
 
-1. **Fee governance.** A fee fixed at DKG is inflexible for a pair whose volatility changes. Is a guardian-voted fee (median consensus item, bounded range, rate-limited) worth reintroducing the consensus item §10 removed?
+1. ~~**Fee governance.**~~ **Resolved: yes.** Implemented as §10 — a guardian-voted fee, aggregated by threshold index rather than the median this question proposed (a median is not Byzantine-safe; see §10), bounded by a DKG-fixed band, and falling back to the config fee below threshold. The question's third property, **rate limiting, was not implemented**: a guardian may re-vote as often as it likes, subject only to AlephBFT's per-session merge. That is deliberate — a rate limit stored per guardian is more consensus state to defend for a parameter that already cannot leave its band, and the band is what actually bounds the harm (§13). Revisit if vote churn ever becomes a griefing vector in practice; the natural form would be a minimum session gap enforced in `process_consensus_item`.
 2. **Reserve seeding.** Who provides initial liquidity, and does the federation want to seed pools from a treasury? That implies a privileged deposit path with governance implications worth deciding deliberately rather than by omission.
 3. **Per-unit audit.** Would upstream accept `AuditItem` carrying an `AmountUnit` (§9.2)? It would make the global assert per-unit and remove a class of federation-halting bugs across the ecosystem.
 4. **Recovery primitives upstream.** Should `grind_tweak` / `check_tweak` / `tweak_filter` move to `fedimint-client-module` (§8.4)?

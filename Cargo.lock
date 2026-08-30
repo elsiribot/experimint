@@ -3646,6 +3646,7 @@ dependencies = [
  "fedimint-amm-client",
  "fedimint-amm-common",
  "fedimint-amm-server",
+ "fedimint-api-client",
  "fedimint-client",
  "fedimint-client-module",
  "fedimint-core",
