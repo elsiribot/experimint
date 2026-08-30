@@ -1,0 +1,54 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-cli built with the experimint client module set (v2 core modules + meta + amm + usdt)"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-cli-experimint"
+publish = false
+readme = { workspace = true }
+repository = { workspace = true }
+version = { workspace = true }
+
+[[bin]]
+name = "fedimint-cli-experimint"
+path = "src/bin/main.rs"
+
+[lib]
+name = "fedimint_cli_experimint"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+fedimint-amm-client = { workspace = true, features = ["cli"] }
+# Defaults are off at the workspace level (see the root manifest). `tor` is
+# re-enabled here: it is what lets an invite code name an onion API endpoint.
+# `jemalloc` is deliberately not: that feature only pulls `tikv-jemallocator`
+# in, while the `#[global_allocator]` that makes it take effect lives in the
+# binary crate root and would have to be vendored here. Upstream wants it
+# because rocksdb fragments the system allocator over a long-lived process;
+# this CLI runs one command and exits.
+fedimint-cli = { workspace = true, features = ["tor"] }
+fedimint-client = { workspace = true }
+fedimint-client-module = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-lnv2-client = { workspace = true, features = ["cli"] }
+fedimint-meta-client = { workspace = true, features = ["cli"] }
+fedimint-mintv2-client = { workspace = true, features = ["cli"] }
+fedimint-usdt-client = { workspace = true, features = ["cli"] }
+fedimint-walletv2-client = { workspace = true, features = ["cli"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+# `client_and_server_module_sets_agree` compares this crate's client module set
+# against the server set that binary registers, rather than a second
+# hand-written list that could drift from it.
+fedimintd-experimint = { path = "../fedimintd-experimint" }
+
+[build-dependencies]
+# Sets `FEDIMINT_BUILD_CODE_VERSION`, which `fedimint_build_code_version_env!()`
+# reads via `env!` at *this* crate's compile time. Without the build script the
+# macro fails to expand.
+fedimint-build = { workspace = true }
+
+[lints]
+workspace = true
