@@ -17,28 +17,29 @@
 //! | `lnv2` | Lightning |
 //! | `meta` | guardian-published metadata |
 //!
-//! Note the **two `mintv2` instances**. That is the part worth understanding
-//! before deploying, because only one of the two setup paths can express it.
+//! Note the **two `mintv2` instances**, one per asset. Both setup paths can
+//! express that.
 //!
-//! # Two `mintv2` instances: what works, and what does not
+//! # Two `mintv2` instances
 //!
-//! Multiple instances of one [`ModuleKind`] are fully supported by the
-//! platform. `ServerModuleConfigGenParamsRegistry` is a
-//! `ModuleRegistry<ConfigGenModuleParams>`, i.e. a
-//! `BTreeMap<ModuleInstanceId, (ModuleKind, ConfigGenModuleParams)>` — keyed by
-//! *instance*, not by kind. `ConfigGenParams::module_params` is documented
-//! upstream as "the single source of truth for which module instances the
-//! federation runs".
+//! Multiple instances of one [`ModuleKind`] have always been supported by the
+//! platform: `ServerModuleConfigGenParamsRegistry` is keyed by
+//! `ModuleInstanceId`, not by kind, and `ConfigGenParams::module_params` is the
+//! single source of truth for which instances a federation runs.
 //!
 //! (The `assert!(…, "Can't insert module of same kind twice")` in
 //! `fedimint-core/src/config.rs` is on `ModuleInitRegistry`, which maps kind ->
 //! *init*. That is one implementation per kind — it does not constrain how many
-//! instances a federation runs. Conflating the two registries is an easy
-//! mistake; this crate's own registry below is the init one.)
+//! instances run. Conflating the two registries is an easy mistake; this
+//! crate's own registry below is the init one.)
 //!
-//! **Via the CLI / API: works today.** `fedimint-cli admin setup
-//! set-local-params` takes a repeatable `--module <kind>[=<json>]`, which builds
-//! the instance list directly and bypasses the UI entirely:
+//! **Setup UI.** The form builds the instance list one row at a time: pick a
+//! kind, and for kinds denominated in an asset pick that too. Add a second
+//! `mintv2` row, choose "USDT (unit 1)", and the federation runs two mints.
+//! The asset choices are the assets the enabled modules declare they back.
+//!
+//! **CLI / API.** `fedimint-cli admin setup set-local-params` takes a
+//! repeatable `--module <kind>[=<json>]`, building the same list directly:
 //!
 //! ```text
 //! fedimint-cli admin setup set-local-params \
@@ -51,43 +52,21 @@
 //!     --module meta
 //! ```
 //!
-//! Instance ids are assigned by flag position (0, 1, 2, …). The platform branch
-//! has a test (`fedimint-cli`'s `parses_full_deployment_topology`) asserting
-//! exactly this shape, including the two `mintv2` instances carrying distinct
-//! `amount_unit`s.
+//! Instance ids follow position in both paths.
 //!
-//! **Via the setup UI: not expressible.** The web UI renders one checkbox per
-//! [`ModuleKind`] and turns the ticked set into an instance list with
-//! `select_kinds`. The available list it filters comes from
-//! `ConfigGenSettings::available_module_params`, which [`fedimintd::run`] builds
-//! as `build_module_params_registry(&registry, &registry.kinds())` — one
-//! instance per kind, by construction. Upstream's own comment in
-//! `fedimint-server-ui/src/setup.rs` says so: *"the current UI can only express
-//! a single instance per kind … the instance list type already supports it."*
+//! # Assets
 //!
-//! **The minimal fix is smaller than it looks, and it is not in the UI.**
-//! `select_kinds` keeps *every* instance whose kind is selected:
+//! A mint holds no reserves of its own — its ecash is a claim on whatever backs
+//! the unit it is denominated in. So modules declare both sides:
+//! `walletv2` and `usdt` declare what they back (`provided_assets`), `mintv2`
+//! declares what it needs (`required_assets`), and config generation refuses a
+//! topology whose ecash is denominated in something nothing backs. That check
+//! runs before DKG, because the denomination is baked into the module's
+//! consensus config and cannot be changed afterwards.
 //!
-//! ```text
-//! for (_, kind, params) in self.iter_modules() {
-//!     if selected.contains(kind) { selection.append_module(kind.clone(), params.clone()); }
-//! }
-//! ```
-//!
-//! So a two-instance `available_module_params` already survives the UI's
-//! filtering intact — tick "mintv2" and you get both instances. The only thing
-//! standing in the way is that [`fedimintd::run`] derives that field internally
-//! and gives the caller no way to override it. Letting `run` accept a
-//! caller-supplied `available_module_params` (or a whole `ConfigGenSettings`
-//! override) would let *this* crate declare the topology and have the existing
-//! UI materialize it, with no UI change at all. That is an additive change to
-//! the platform branch; it cannot be done from here, because the field is
-//! populated inside the pinned crate.
-//!
-//! The residual UX wart after such a fix: the operator still sees one "mintv2"
-//! checkbox and cannot tell it stands for two instances, nor pick just one.
-//! Making the instance list first-class in the UI is the larger follow-up
-//! upstream already flagged.
+//! Bitcoin is always available and never needs a backing module: it is the
+//! federation's native unit, and a lightning-only federation denominates in it
+//! with no on-chain wallet enabled.
 //!
 //! # Modules are not enabled by default
 //!
@@ -138,6 +117,7 @@ pub fn experimint_modules() -> ServerModuleInitRegistry {
 
 #[cfg(test)]
 mod tests {
+    use fedimint_core::config::ServerModuleConfigGenParamsRegistry;
     use fedimint_core::core::ModuleKind;
 
     use super::*;
@@ -182,6 +162,62 @@ mod tests {
 
         assert!(kinds.contains(&ModuleKind::clone_from_str("amm")));
         assert!(kinds.contains(&ModuleKind::clone_from_str("usdt")));
+    }
+
+    /// The intended topology must pass config generation's asset check.
+    ///
+    /// This is the end-to-end statement of what the asset plumbing is for: two
+    /// `mintv2` instances, one on bitcoin and one on the unit `usdt` backs,
+    /// alongside the modules that back them. If `usdt` ever stopped declaring
+    /// `provided_assets`, or `mintv2` stopped declaring `required_assets`, a
+    /// federation configured this way would be rejected at DKG — this fails
+    /// first instead.
+    #[test]
+    fn intended_topology_passes_asset_validation() {
+        let registry = experimint_modules();
+        let mut params = ServerModuleConfigGenParamsRegistry::default();
+
+        params.attach_config_gen_params(ModuleKind::clone_from_str("walletv2"), ());
+        params.attach_config_gen_params(
+            ModuleKind::clone_from_str("mintv2"),
+            serde_json::json!({ "amount_unit": 0 }),
+        );
+        params.attach_config_gen_params(
+            ModuleKind::clone_from_str("mintv2"),
+            serde_json::json!({ "amount_unit": fedimint_usdt_common::USDT_UNIT.id() }),
+        );
+        params.attach_config_gen_params(
+            ModuleKind::clone_from_str("usdt"),
+            fedimint_usdt_common::UsdtGenParams::default(),
+        );
+
+        fedimint_server::config::validate_module_assets(&registry, &params)
+            .expect("the intended topology must validate");
+    }
+
+    /// A mint denominated in an asset no enabled module backs must be refused.
+    ///
+    /// Same instance list as above but with `usdt` left out, so nothing holds
+    /// reserves against its unit. Without this the federation would boot and
+    /// issue ecash redeemable against nothing, with no way to fix it after DKG.
+    #[test]
+    fn mint_without_a_backing_module_is_rejected() {
+        let registry = experimint_modules();
+        let mut params = ServerModuleConfigGenParamsRegistry::default();
+
+        params.attach_config_gen_params(ModuleKind::clone_from_str("walletv2"), ());
+        params.attach_config_gen_params(
+            ModuleKind::clone_from_str("mintv2"),
+            serde_json::json!({ "amount_unit": fedimint_usdt_common::USDT_UNIT.id() }),
+        );
+
+        let err = fedimint_server::config::validate_module_assets(&registry, &params)
+            .expect_err("a mint with no backing module must be refused");
+
+        assert!(
+            err.to_string().contains("which no enabled module backs"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The units the intended topology trades must line up.

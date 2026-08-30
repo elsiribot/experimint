@@ -31,8 +31,11 @@ fedimintd = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
-# `usdt_unit_is_in_the_amm_allowlist` asserts the unit the topology trades.
+# `intended_topology_passes_asset_validation` drives config generation's asset
+# check directly, with the real module inits rather than a stub registry.
+fedimint-server = { workspace = true }
 fedimint-usdt-common = { workspace = true }
+serde_json = { workspace = true }
 
 [build-dependencies]
 # Sets `FEDIMINT_BUILD_CODE_VERSION`, which `fedimint_build_code_version_env!()`

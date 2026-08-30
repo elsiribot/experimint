@@ -31,9 +31,9 @@ use fedimint_core::envs::{
 };
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
-    Amounts, ApiEndpoint, ApiError, ApiVersion, CORE_CONSENSUS_VERSION, CoreConsensusVersion,
-    InputMeta, ModuleConsensusVersion, ModuleInit, SupportedModuleApiVersions,
-    TransactionItemAmounts, api_endpoint,
+    Amounts, ApiEndpoint, ApiError, ApiVersion, Asset, CORE_CONSENSUS_VERSION,
+    CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
+    SupportedModuleApiVersions, TransactionItemAmounts, api_endpoint,
 };
 use fedimint_core::net::auth::check_auth;
 use fedimint_core::task::TaskGroup;
@@ -764,6 +764,16 @@ impl ServerModuleInit for UsdtInit {
             ),
             &[(0, 0)],
         )
+    }
+
+    /// This module holds the federation's USDT reserves on the EVM side, so it
+    /// is what backs [`USDT_UNIT`] for everything else — a `mintv2` instance
+    /// denominating ecash in it, the `amm` trading it against bitcoin.
+    ///
+    /// Without this the federation would refuse to start a mint denominated in
+    /// unit 1, since nothing would claim to hold reserves against it.
+    fn provided_assets(&self) -> Vec<Asset> {
+        vec![Asset::new(fedimint_usdt_common::USDT_UNIT, "USDT")]
     }
 
     fn is_enabled_by_default(&self) -> bool {

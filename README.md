@@ -38,10 +38,9 @@ a v2-only story — the v1 modules predate `AmountUnit`.
 | `lnv2` | Lightning |
 | `meta` | guardian-published metadata |
 
-Note the **two `mintv2` instances**. Only one of the two setup paths can
-express that.
+Note the **two `mintv2` instances**, one per asset. Both setup paths express it.
 
-**CLI / API — works today.** `set-local-params` takes a repeatable
+**CLI / API.** `set-local-params` takes a repeatable
 `--module <kind>[=<json>]` that builds the instance list directly. Instance ids
 are assigned by flag position:
 
@@ -59,25 +58,37 @@ fedimint-cli admin setup set-local-params \
 The platform branch has a test (`parses_full_deployment_topology`) asserting
 exactly this shape, two `mintv2` instances included.
 
-**Setup UI — not expressible.** The web UI renders one checkbox per module
-*kind*. Upstream's own comment says it: *"the current UI can only express a
-single instance per kind … the instance list type already supports it."*
+**Setup UI — supported.** The form builds the instance list one row at a time:
+pick a kind, and for kinds denominated in an asset pick that too. Add a second
+`mintv2` row, choose "USDT (unit 1)", and the federation runs two mints. Rows
+can be added and removed, so the UI expresses the same topologies as `--module`.
 
-Multi-instance is not a platform limitation —
+Multiple instances of one kind were always supported by the data model —
 `ServerModuleConfigGenParamsRegistry` is keyed by `ModuleInstanceId`, and
-`ConfigGenParams::module_params` is documented as the single source of truth for
-which instances run. (The `"Can't insert module of same kind twice"` assert is
-on `ModuleInitRegistry`, kind → *init*: one implementation per kind, unrelated
-to instance count. Conflating the two is an easy mistake.)
+`ConfigGenParams::module_params` is the single source of truth for which
+instances run. Only the form couldn't express it. (The `"Can't insert module of
+same kind twice"` assert is on `ModuleInitRegistry`, kind → *init*: one
+implementation per kind, unrelated to instance count.)
 
-The fix is smaller than it looks and is **not in the UI**: `select_kinds` already
-keeps *every* instance whose kind is ticked, so a two-instance available-list
-survives the UI intact. The blocker is only that `fedimintd::run` builds
-`ConfigGenSettings::available_module_params` internally as
-`build_module_params_registry(&registry, &registry.kinds())` — one per kind —
-with no caller override. Letting `run` accept a caller-supplied value would let
-this crate declare the topology and have the existing UI materialize it. That is
-an additive platform-branch change; it cannot be done from this repo.
+### Assets
+
+A mint holds no reserves of its own — its ecash is a claim on whatever backs the
+unit it is denominated in. Both sides are declared:
+
+| Module | Declares |
+| --- | --- |
+| `walletv2` | backs Bitcoin (unit 0) |
+| `usdt` | backs USDT (unit 1) |
+| `mintv2` | requires whichever unit its `amount_unit` names |
+
+Config generation refuses a topology whose ecash is denominated in an asset
+nothing backs, and it does so before DKG — the denomination is baked into the
+module's consensus config and cannot be changed afterwards. The setup UI offers
+only the declared assets, so the same mistake is unreachable through the form.
+
+Bitcoin is always available and never needs a backing module: it is the
+federation's native unit, and a lightning-only federation denominates in it with
+no on-chain wallet enabled.
 
 ### Modules are not pre-ticked by default
 
@@ -222,8 +233,6 @@ crates.
   registering the `amm` and `usdt` *client* modules, so a stock `fedimint-cli`
   can drive setup and the generic admin API but cannot exercise those two
   modules' client-side flows.
-- **Setup-UI support for multiple instances of one module kind** — see above.
-  Needed for the intended topology to be reachable without the CLI.
 - **The `swap` module**, the other custom module on the fork's
   `2026-07-usdt-wallet` branch.
 - **An end-to-end run of the full topology.** `fedimintd-experimint` builds and
