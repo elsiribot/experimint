@@ -178,6 +178,13 @@ pub fn burn_shares(
     if shares > total_shares {
         return Err(CurveError::InsufficientShares);
     }
+    // This branch is provably UNREACHABLE, kept as defence in depth rather
+    // than deleted (same convention as `amount_out`'s `InsufficientLiquidity`
+    // guard, finding T7): the `ZeroAmount` guard above ensures `shares >= 1`,
+    // so `total_shares == 0` implies `shares > total_shares`, which the
+    // `InsufficientShares` guard already returned on. It cannot be exercised
+    // by any input; its value is guarding the division below against a
+    // divide-by-zero if the guards above are ever reordered or weakened.
     if total_shares == 0 {
         return Err(CurveError::InsufficientShares);
     }

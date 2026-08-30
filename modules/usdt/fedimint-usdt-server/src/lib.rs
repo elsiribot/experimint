@@ -2181,6 +2181,21 @@ impl ServerModule for Usdt {
                 Ok(())
             }
             UsdtConsensusItem::Deposit(obs) => {
+                // LEGACY ARM -- FROZEN BY REPLAY, NOT LIVE. Like the
+                // `UsdtConsensusItem::Deposit` variant itself (see its doc
+                // comment in `fedimint-usdt-common`), this whole arm belongs
+                // to the REMOVED guardian-poll deposit path: deposit
+                // crediting is proof-driven now (`UsdtInput::DepositProofV0`)
+                // and NO honest guardian proposes `Deposit` items any more.
+                // This arm still fires for exactly two inputs: (a) replay of
+                // historical consensus sessions ordered before the removal,
+                // which MUST re-execute byte-identically, and (b) a Byzantine
+                // peer proposing the legacy item today, which must keep being
+                // judged exactly as it always was. Both freeze this arm at
+                // its current behavior for the deployed
+                // MODULE_CONSENSUS_VERSION (0.12): do not modify, "fix", or
+                // remove it, and do not wire new logic into it.
+                //
                 // Security finding 14: self-authenticate BEFORE storing the
                 // vote, not only later inside `credit_deposit` (which runs
                 // only once threshold-many IDENTICAL votes accumulate). A

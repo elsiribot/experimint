@@ -154,8 +154,15 @@ pub struct UsdtConfigConsensus {
     /// CREATE2 `initCodeHash`). Placeholder; real deployments/tests must
     /// override.
     pub simple_account_impl: EvmAddress,
-    /// Guardian-side: how many blocks a claimed-but-unconfirmed deposit
-    /// check remains valid for before it must be re-issued.
+    /// DEAD-BUT-FROZEN (config-encoding stability only). NO logic reads this
+    /// field anywhere: it configured the TTL of a "deposit check" in the
+    /// removed guardian-poll deposit path (deposit crediting is now
+    /// proof-driven via `UsdtInput::DepositProofV0`, which has no
+    /// claim-then-confirm window to expire). It is retained ONLY because
+    /// `UsdtConfigConsensus` is `Encodable`/`Decodable` positionally and
+    /// deployed federations at consensus version 0.12 hold configs with this
+    /// field encoded -- removing it would corrupt decode of every existing
+    /// config. Do not wire new logic to it.
     pub check_ttl_blocks: u64,
     /// The minimum ETH balance (in wei) a guardian's broadcaster EOA must
     /// hold to count as "funded" for the Part C readiness state machine (see

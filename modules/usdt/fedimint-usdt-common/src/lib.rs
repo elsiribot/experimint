@@ -1360,6 +1360,11 @@ pub struct UsdtGenParams {
     /// The deployed `SimpleAccount` implementation contract address (Phase
     /// 7). Placeholder; real deployments/tests must override.
     pub simple_account_impl: EvmAddress,
+    /// DEAD-BUT-FROZEN: NO logic reads this. It configured the removed
+    /// guardian-poll deposit path's claim TTL and is only threaded through
+    /// DKG into `UsdtConfigConsensus::check_ttl_blocks` (see that field's
+    /// doc comment), where it is retained purely for config-encoding
+    /// stability on deployed federations. Do not wire new logic to it.
     pub check_ttl_blocks: u64,
     /// The minimum ETH balance (in wei) a guardian's broadcaster EOA must
     /// hold to count as "funded" for the Part C readiness state machine (see

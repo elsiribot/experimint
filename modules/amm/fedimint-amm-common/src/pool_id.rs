@@ -48,11 +48,9 @@ impl PoolId {
         self.hi
     }
 
-    pub fn contains(&self, unit: AmountUnit) -> bool {
-        self.lo == unit || self.hi == unit
-    }
-
     /// Given one side, return the other. `None` if `unit` is not in this pair.
+    /// Used by the server's `quote_swap` to resolve `unit_out` from a
+    /// `PoolId` already constructed over `unit_in`.
     pub fn other(&self, unit: AmountUnit) -> Option<AmountUnit> {
         if unit == self.lo {
             Some(self.hi)
@@ -171,6 +169,19 @@ mod tests {
     fn new_rejects_identical_units() {
         let a = AmountUnit::new_custom(3);
         assert_eq!(PoolId::new(a, a), None);
+    }
+
+    /// `other` resolves either side of the pair to its counterpart and
+    /// refuses a unit outside the pair (the server's `quote_swap` relies on
+    /// this to derive `unit_out`).
+    #[test]
+    fn other_returns_the_counterpart_side() {
+        let a = AmountUnit::new_custom(1);
+        let b = AmountUnit::new_custom(7);
+        let id = PoolId::new(a, b).unwrap();
+        assert_eq!(id.other(a), Some(b));
+        assert_eq!(id.other(b), Some(a));
+        assert_eq!(id.other(AmountUnit::new_custom(9)), None);
     }
 
     #[test]

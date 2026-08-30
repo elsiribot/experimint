@@ -2,8 +2,8 @@
 //!
 //! Implements the `ServerModuleInit`/`ServerModule` skeleton and DKG config
 //! generation (spec §11). `process_output` (Task 7) and `process_input`
-//! (Task 8) implement the real curve logic. `audit` is empty — Task 9
-//! implements it. `api_endpoints` is empty — Task 9 adds them.
+//! (Task 8) implement the real curve logic; `audit` (spec §9.1) and the
+//! `api_endpoints` (spec §12) are implemented below as well.
 
 pub mod db;
 
@@ -337,7 +337,11 @@ fn quote_swap(
 ) -> Result<SwapQuote, AmmOutputError> {
     let params_in = cfg.units.get(&unit_in).ok_or(AmmOutputError::UnknownUnit)?;
     let in_is_lo = unit_in == pool_id.lo();
-    let unit_out = if in_is_lo { pool_id.hi() } else { pool_id.lo() };
+    // `pool_id` was constructed as `PoolId::new(unit_in, unit_out)` by every
+    // caller (see this function's doc comment), so `unit_in` is always one
+    // side of the pair and `other` is always `Some`; the `ok_or` is a
+    // non-panicking guard for a caller violating that precondition.
+    let unit_out = pool_id.other(unit_in).ok_or(AmmOutputError::UnknownUnit)?;
     if !cfg.units.contains_key(&unit_out) {
         return Err(AmmOutputError::UnknownUnit);
     }
@@ -766,9 +770,11 @@ impl ServerModule for Amm {
                 recipient_pk,
                 tweak,
             } => {
-                if unit_in == unit_out {
-                    return Err(AmmOutputError::IdenticalUnits);
-                }
+                // `PoolId::new` returns `None` exactly when `unit_in ==
+                // unit_out`, so this single check is the identical-units
+                // rejection (a previous explicit `unit_in == unit_out` guard
+                // right before it was a redundant copy of the same condition
+                // with the same error).
                 let pool_id =
                     PoolId::new(*unit_in, *unit_out).ok_or(AmmOutputError::IdenticalUnits)?;
                 let mut pool = dbtx

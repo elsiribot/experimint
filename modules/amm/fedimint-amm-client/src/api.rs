@@ -3,11 +3,10 @@
 //!
 //! The pagination helpers are generic over the page-fetching closure rather
 //! than tied to [`DynModuleApi`] directly, so pagination *consumption* —
-//! "stop once `next_cursor` is `None`", "stop as soon as a match is found
-//! without fetching further pages" — is unit-testable against an in-memory
-//! fake pager, without a running federation (task 11's brief: "write unit
-//! tests for everything you reasonably can in-crate ... pagination
-//! consumption").
+//! "stop once `next_cursor` is `None`", "propagate a page-fetch error" — is
+//! unit-testable against an in-memory fake pager, without a running
+//! federation (task 11's brief: "write unit tests for everything you
+//! reasonably can in-crate ... pagination consumption").
 
 use std::future::Future;
 
@@ -120,43 +119,6 @@ where
         match page.next_cursor {
             Some(next) => cursor = Some(next),
             None => return Ok(()),
-        }
-    }
-}
-
-/// Pages through `BALANCE_RECOVERY_ENDPOINT` looking for the first entry
-/// matching `pred`, stopping as soon as one is found rather than paging
-/// through the rest of a (potentially large, spec §9.2) live table.
-///
-/// A swap's Tx1→Tx2 transition used to re-read its own balance this way, but
-/// no longer does (fix pass 3, Important 5): the caller there already knows
-/// the exact `(pubkey, unit)` it is looking for, so [`AmmFederationApi::
-/// amm_balance`]'s point lookup is both correct and considerably cheaper —
-/// see that endpoint's doc comment. This helper remains for the case that
-/// genuinely needs a predicate scan rather than an exact-key lookup (e.g.
-/// finding a balance by tweak-match with the pubkey not yet known), and its
-/// early-exit behavior is still covered by the tests below.
-pub async fn find_balance_recovery_entry<F, Fut, E>(
-    mut fetch_page: F,
-    pred: impl Fn(&BalanceRecoveryEntry) -> bool,
-) -> Result<Option<BalanceRecoveryEntry>, E>
-where
-    F: FnMut(RecoveryPageRequest) -> Fut,
-    Fut: Future<Output = Result<BalanceRecoveryResponse, E>>,
-{
-    let mut cursor = None;
-    loop {
-        let page = fetch_page(RecoveryPageRequest {
-            cursor: cursor.clone(),
-            limit: None,
-        })
-        .await?;
-        if let Some(entry) = page.entries.iter().find(|e| pred(e)) {
-            return Ok(Some(*entry));
-        }
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(None),
         }
     }
 }
@@ -299,39 +261,13 @@ mod tests {
         assert_eq!(*pager.calls.borrow(), 1);
     }
 
+    /// A page-fetch error must abort pagination and propagate (this coverage
+    /// used to ride on the now-deleted `find_balance_recovery_entry`'s error
+    /// test; the `?`-propagation it exercised is still live here).
     #[tokio::test]
-    async fn find_stops_as_soon_as_a_match_is_found() {
-        let pager = FakePager::new(three_pages());
-        let target = test_pubkey(3);
-        let found = find_balance_recovery_entry(|req| pager.fetch(req), |e| e.pubkey == target)
-            .await
-            .unwrap();
-
-        assert_eq!(found, Some(balance_entry(3, 300)));
-        // The match is on page 2 of 3: a correct early exit fetches exactly
-        // two pages, never the third.
-        assert_eq!(
-            *pager.calls.borrow(),
-            2,
-            "must not fetch pages past the match"
-        );
-    }
-
-    #[tokio::test]
-    async fn find_returns_none_after_exhausting_every_page_with_no_match() {
-        let pager = FakePager::new(three_pages());
-        let found =
-            find_balance_recovery_entry(|req| pager.fetch(req), |e| e.pubkey == test_pubkey(99))
-                .await
-                .unwrap();
-        assert_eq!(found, None);
-        assert_eq!(*pager.calls.borrow(), 3);
-    }
-
-    #[tokio::test]
-    async fn find_propagates_a_page_fetch_error() {
+    async fn for_each_propagates_a_page_fetch_error() {
         let pager = FakePager::new(vec![]);
-        let result = find_balance_recovery_entry(|req| pager.fetch(req), |_| true).await;
+        let result = for_each_balance_recovery_entry(|req| pager.fetch(req), |_| {}).await;
         assert!(result.is_err());
     }
 

@@ -48,11 +48,12 @@ pub struct LpPositionKey {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
 pub struct LpPositionPrefix;
 
-/// Partial prefix: all positions in one pool, without scanning every
-/// position in the federation. Needed by both the API and any future audit
-/// path.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
-pub struct LpPositionPoolPrefix(pub PoolId);
+// NOTE: a per-pool partial prefix (`LpPositionPoolPrefix(PoolId)`) used to
+// live here, claiming "needed by both the API and any future audit path" --
+// that was false (the recovery API scans raw byte ranges, and `audit`
+// deliberately excludes LP positions to avoid double-counting reserves), so
+// it was removed as dead code. Reintroduce it only alongside an actual
+// caller.
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Encodable, Decodable)]
 pub struct LpPosition {
@@ -67,11 +68,7 @@ impl_db_record!(
     value = LpPosition,
     db_prefix = DbKeyPrefix::LpPosition
 );
-impl_db_lookup!(
-    key = LpPositionKey,
-    query_prefix = LpPositionPrefix,
-    query_prefix = LpPositionPoolPrefix
-);
+impl_db_lookup!(key = LpPositionKey, query_prefix = LpPositionPrefix);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
 pub struct BalanceKey {
@@ -141,12 +138,13 @@ mod tests {
         dbtx.commit_tx().await;
     }
 
-    /// Positions for one pool must enumerate under a partial prefix — the
-    /// API and any future audit path both need this. Inserting into two
-    /// distinct pools proves the scoping, not just that a prefix scan
-    /// returns *something*.
+    /// All LP positions — across distinct pools and owners — must enumerate
+    /// under the table-wide prefix (used by `dump_database`). The per-pool
+    /// partial-prefix scan this test used to also exercise was removed with
+    /// `LpPositionPoolPrefix` (dead code — see the note at its former
+    /// definition site).
     #[tokio::test]
-    async fn lp_positions_enumerate_by_pool() {
+    async fn lp_positions_enumerate_under_table_prefix() {
         let db = db();
         let mut dbtx = db.begin_transaction().await;
         let a = pool_id(0, 1);
@@ -164,22 +162,6 @@ mod tests {
             )
             .await;
         }
-
-        let in_a: Vec<_> = dbtx
-            .find_by_prefix(&LpPositionPoolPrefix(a))
-            .await
-            .collect()
-            .await;
-        assert_eq!(in_a.len(), 2);
-        assert!(in_a.iter().all(|(k, _)| k.pool == a));
-
-        let in_b: Vec<_> = dbtx
-            .find_by_prefix(&LpPositionPoolPrefix(b))
-            .await
-            .collect()
-            .await;
-        assert_eq!(in_b.len(), 1);
-        assert!(in_b.iter().all(|(k, _)| k.pool == b));
 
         let all: Vec<_> = dbtx.find_by_prefix(&LpPositionPrefix).await.collect().await;
         assert_eq!(all.len(), 3);
