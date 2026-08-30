@@ -568,16 +568,19 @@ impl AmmClientModule {
         // any other identity.
         let tweak = grind_tweak(&self.root_secret);
         let recipient_keypair = derive_keypair(&self.root_secret, CHILD_SWAP, tweak);
-        let recipient_pk = recipient_keypair.public_key();
 
-        let output = AmmOutput::SwapV0 {
+        // Proves we hold the recipient key. Without it anyone could create a
+        // Balance at our key and fix a garbage `tweak` in it, which would
+        // survive our own credit and leave the record unrecoverable from seed
+        // alone (`fedimint-amm-common::pop`).
+        let output = AmmOutput::new_swap_v0(
+            &recipient_keypair,
             unit_in,
             unit_out,
             amount_in,
             min_out,
-            recipient_pk,
             tweak,
-        };
+        );
 
         let client_output = ClientOutput {
             output,
@@ -658,14 +661,18 @@ impl AmmClientModule {
         let owner_keypair = derive_keypair(&self.root_secret, CHILD_LP, tweak);
         let owner_pk = owner_keypair.public_key();
 
-        let output = AmmOutput::DepositV0 {
+        // See the note in `swap`. This matters more for LP positions than for
+        // swap balances: a position is long-lived, so a squatted tweak would
+        // break its seed-only recovery indefinitely rather than for the
+        // seconds between tx1 and tx2.
+        let output = AmmOutput::new_deposit_v0(
+            &owner_keypair,
             pool,
             amount_lo,
             amount_hi,
             min_shares,
-            owner_pk,
             tweak,
-        };
+        );
 
         let amounts = Amounts::ZERO
             .checked_add_unit(amount_lo, pool.lo())

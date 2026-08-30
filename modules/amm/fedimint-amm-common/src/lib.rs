@@ -4,6 +4,7 @@ pub mod config;
 pub mod endpoints;
 pub mod math;
 pub mod pool_id;
+pub mod pop;
 pub mod types;
 
 use fedimint_core::core::{Decoder, ModuleInstanceId, ModuleKind};

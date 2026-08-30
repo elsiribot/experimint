@@ -761,6 +761,20 @@ impl ServerModule for Amm {
         output: &'a AmmOutput,
         _out_point: OutPoint,
     ) -> Result<TransactionItemAmounts, AmmOutputError> {
+        // A proof of possession is the only thing standing between an
+        // attacker and a record at someone else's key, so it is checked
+        // first: before any database read, before any arithmetic, before the
+        // variant's own validation. An output that cannot prove control of
+        // the key it names must not reach module state by any path.
+        //
+        // `Default` (unknown variant) verifies as `false` and is rejected
+        // here rather than falling through to its own arm; the resulting
+        // error differs from `UnknownVariant`, which is harmless — both are
+        // rejections, and neither reveals anything a caller did not submit.
+        if !output.verify_pop() {
+            return Err(AmmOutputError::InvalidProofOfPossession);
+        }
+
         match output {
             AmmOutput::SwapV0 {
                 unit_in,
@@ -769,6 +783,8 @@ impl ServerModule for Amm {
                 min_out,
                 recipient_pk,
                 tweak,
+                // Verified above, before this match.
+                pop: _,
             } => {
                 // `PoolId::new` returns `None` exactly when `unit_in ==
                 // unit_out`, so this single check is the identical-units
@@ -869,7 +885,17 @@ impl ServerModule for Amm {
                         if credited > math::MAX_RESERVE {
                             return Err(AmmOutputError::ReserveCapExceeded);
                         }
-                        (credited, entry.tweak)
+                        // The incoming tweak, not the stored one. The
+                        // proof of possession makes these necessarily equal
+                        // for an honest client — the key is *derived from*
+                        // the tweak, so a given key has exactly one — and
+                        // only the key's owner can write here at all. The
+                        // old first-writer-wins rule existed solely to blunt
+                        // an attacker squatting a victim's key with a garbage
+                        // tweak; that attack no longer exists, so preferring
+                        // the stored value would now only preserve an owner's
+                        // own mistake against their own correction.
+                        (credited, *tweak)
                     }
                     // `dy < reserve_out <= MAX_RESERVE` (guaranteed by
                     // `amount_out` plus the `MAX_RESERVE` cap already
@@ -909,6 +935,8 @@ impl ServerModule for Amm {
                 min_shares,
                 owner_pk,
                 tweak,
+                // Verified above, before this match.
+                pop: _,
             } => {
                 if !self.cfg.units.contains_key(&pool.lo())
                     || !self.cfg.units.contains_key(&pool.hi())
@@ -965,7 +993,10 @@ impl ServerModule for Amm {
                 let shares = existing_shares
                     .checked_add(outcome.to_owner)
                     .ok_or_else(|| AmmOutputError::Curve("share overflow".to_string()))?;
-                let stored_tweak = existing.map_or(*tweak, |p| p.tweak);
+                // The incoming tweak, not the stored one — see the
+                // matching note in the `SwapV0` arm. The proof of possession
+                // retired first-writer-wins.
+                let stored_tweak = *tweak;
 
                 // All checks passed: now, and only now, write.
                 // `mint_shares` already verified reserve_{lo,hi} + amount_{lo,hi}

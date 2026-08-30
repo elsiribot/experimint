@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use fedimint_amm_common::config::{AmmConfigConsensus, UnitParams};
 use fedimint_amm_common::math::{self, MINIMUM_LIQUIDITY};
 use fedimint_amm_common::pool_id::PoolId;
+use fedimint_amm_common::pop;
 use fedimint_amm_common::types::{AmmOutput, AmmOutputError};
 use fedimint_amm_server::Amm;
 use fedimint_amm_server::db::{BalanceEntry, BalanceKey, LpPositionKey, Pool, PoolKey};
@@ -27,10 +28,16 @@ fn unit(n: u64) -> AmountUnit {
     AmountUnit::new_custom(n)
 }
 
-fn test_pubkey(seed: u8) -> secp256k1::PublicKey {
+/// A deterministic keypair per seed. Outputs need a full keypair (not just a
+/// pubkey) since every `SwapV0`/`DepositV0` carries a proof of possession
+/// signed by the key it names — see `fedimint-amm-common`'s `pop` module.
+fn kp(seed: u8) -> Keypair {
     Keypair::from_seckey_slice(SECP256K1, &[seed; 32])
         .expect("a repeated non-zero byte is a valid secret key")
-        .public_key()
+}
+
+fn test_pubkey(seed: u8) -> secp256k1::PublicKey {
+    kp(seed).public_key()
 }
 
 fn out_point() -> OutPoint {
@@ -74,14 +81,14 @@ async fn swap_into_fresh_pool_fails_with_no_such_pool() {
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
-        amount_in: Amount::from_msats(10_000),
-        min_out: Amount::ZERO,
-        recipient_pk: test_pubkey(1),
-        tweak: [0u8; 16],
-    };
+    let output = AmmOutput::new_swap_v0(
+        &kp(1),
+        unit(0),
+        unit(1),
+        Amount::from_msats(10_000),
+        Amount::ZERO,
+        [0u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::NoSuchPool));
@@ -95,20 +102,14 @@ async fn deposit_into_empty_pool_creates_it_and_mints_shares() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
-    let owner = test_pubkey(2);
+    let owner_kp = kp(2);
+    let owner = owner_kp.public_key();
     let pool = pool01();
 
     let da = Amount::from_msats(1_000_000);
     let db_amt = Amount::from_msats(1_000_000);
 
-    let output = AmmOutput::DepositV0 {
-        pool,
-        amount_lo: da,
-        amount_hi: db_amt,
-        min_shares: 0,
-        owner_pk: owner,
-        tweak: [1u8; 16],
-    };
+    let output = AmmOutput::new_deposit_v0(&owner_kp, pool, da, db_amt, 0, [1u8; 16]);
 
     let result = module
         .process_output(&mut dbtx, &output, out_point())
@@ -147,14 +148,14 @@ async fn deposit_below_minimum_liquidity_is_rejected_and_writes_nothing() {
     let pool = pool01();
 
     // isqrt(1_000 * 1_000) == 1_000, which is not > MINIMUM_LIQUIDITY.
-    let output = AmmOutput::DepositV0 {
+    let output = AmmOutput::new_deposit_v0(
+        &kp(3),
         pool,
-        amount_lo: Amount::from_msats(1_000),
-        amount_hi: Amount::from_msats(1_000),
-        min_shares: 0,
-        owner_pk: test_pubkey(3),
-        tweak: [2u8; 16],
-    };
+        Amount::from_msats(1_000),
+        Amount::from_msats(1_000),
+        0,
+        [2u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(
@@ -177,17 +178,20 @@ async fn deposit_with_min_shares_too_high_returns_slippage_exceeded() {
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
     let pool = pool01();
-    let first_owner = test_pubkey(4);
-    let second_owner = test_pubkey(5);
+    // Two DISTINCT owners on purpose: this test is about the second
+    // depositor being rejected without touching the first depositor's state.
+    let first_owner_kp = kp(4);
+    let second_owner_kp = kp(5);
+    let second_owner = second_owner_kp.public_key();
 
-    let first = AmmOutput::DepositV0 {
+    let first = AmmOutput::new_deposit_v0(
+        &first_owner_kp,
         pool,
-        amount_lo: Amount::from_msats(1_000_000),
-        amount_hi: Amount::from_msats(1_000_000),
-        min_shares: 0,
-        owner_pk: first_owner,
-        tweak: [3u8; 16],
-    };
+        Amount::from_msats(1_000_000),
+        Amount::from_msats(1_000_000),
+        0,
+        [3u8; 16],
+    );
     module
         .process_output(&mut dbtx, &first, out_point())
         .await
@@ -196,14 +200,14 @@ async fn deposit_with_min_shares_too_high_returns_slippage_exceeded() {
 
     // Second deposit at the same ratio would mint `100`, so `min_shares` set
     // above that must be rejected.
-    let second = AmmOutput::DepositV0 {
+    let second = AmmOutput::new_deposit_v0(
+        &second_owner_kp,
         pool,
-        amount_lo: Amount::from_msats(100),
-        amount_hi: Amount::from_msats(100),
-        min_shares: u64::MAX,
-        owner_pk: second_owner,
-        tweak: [4u8; 16],
-    };
+        Amount::from_msats(100),
+        Amount::from_msats(100),
+        u64::MAX,
+        [4u8; 16],
+    );
     let result = module.process_output(&mut dbtx, &second, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::SlippageExceeded));
 
@@ -259,14 +263,14 @@ async fn deposit_with_lo_outside_allowlist_is_rejected() {
         "test setup: hi must be the allowed unit"
     );
 
-    let output = AmmOutput::DepositV0 {
+    let output = AmmOutput::new_deposit_v0(
+        &kp(20),
         pool,
-        amount_lo: Amount::from_msats(1_000_000),
-        amount_hi: Amount::from_msats(1_000_000),
-        min_shares: 0,
-        owner_pk: test_pubkey(20),
-        tweak: [20u8; 16],
-    };
+        Amount::from_msats(1_000_000),
+        Amount::from_msats(1_000_000),
+        0,
+        [20u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::UnknownUnit));
@@ -316,14 +320,14 @@ async fn deposit_with_hi_outside_allowlist_is_rejected() {
         "test setup: hi must be the excluded unit"
     );
 
-    let output = AmmOutput::DepositV0 {
+    let output = AmmOutput::new_deposit_v0(
+        &kp(21),
         pool,
-        amount_lo: Amount::from_msats(1_000_000),
-        amount_hi: Amount::from_msats(1_000_000),
-        min_shares: 0,
-        owner_pk: test_pubkey(21),
-        tweak: [21u8; 16],
-    };
+        Amount::from_msats(1_000_000),
+        Amount::from_msats(1_000_000),
+        0,
+        [21u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::UnknownUnit));
@@ -368,15 +372,16 @@ async fn swap_moves_reserves_and_credits_balance_by_the_same_dy() {
     .await;
 
     let amount_in = Amount::from_msats(10_000_000);
-    let recipient = test_pubkey(6);
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    let recipient_kp = kp(6);
+    let recipient = recipient_kp.public_key();
+    let output = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: [5u8; 16],
-    };
+        Amount::ZERO,
+        [5u8; 16],
+    );
 
     let result = module
         .process_output(&mut dbtx, &output, out_point())
@@ -458,15 +463,16 @@ async fn swap_in_hi_direction_moves_reserves_and_credits_balance_by_the_same_dy(
     //   out         = floor(9_970_000_000_000_000 / 1_009_970_000) = 9_871_580
     let amount_in = Amount::from_msats(10_000);
     let expected_dy: u64 = 9_871_580;
-    let recipient = test_pubkey(16);
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(1),
-        unit_out: unit(0),
+    let recipient_kp = kp(16);
+    let recipient = recipient_kp.public_key();
+    let output = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(1),
+        unit(0),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: [13u8; 16],
-    };
+        Amount::ZERO,
+        [13u8; 16],
+    );
 
     let result = module
         .process_output(&mut dbtx, &output, out_point())
@@ -532,16 +538,17 @@ async fn swap_with_min_out_above_dy_returns_slippage_exceeded_and_writes_nothing
 
     let amount_in = Amount::from_msats(10_000_000);
     let dy = math::amount_out(reserve_lo.msats, reserve_hi.msats, amount_in.msats, 3).unwrap();
-    let recipient = test_pubkey(7);
+    let recipient_kp = kp(7);
+    let recipient = recipient_kp.public_key();
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    let output = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::from_msats(dy + 1),
-        recipient_pk: recipient,
-        tweak: [6u8; 16],
-    };
+        Amount::from_msats(dy + 1),
+        [6u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::SlippageExceeded));
@@ -564,14 +571,14 @@ async fn swap_with_identical_units_is_rejected() {
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(0),
-        amount_in: Amount::from_msats(10_000),
-        min_out: Amount::ZERO,
-        recipient_pk: test_pubkey(8),
-        tweak: [7u8; 16],
-    };
+    let output = AmmOutput::new_swap_v0(
+        &kp(8),
+        unit(0),
+        unit(0),
+        Amount::from_msats(10_000),
+        Amount::ZERO,
+        [7u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::IdenticalUnits));
@@ -602,14 +609,14 @@ async fn swap_with_unit_outside_allowlist_is_rejected() {
     )
     .await;
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(99),
-        amount_in: Amount::from_msats(10_000),
-        min_out: Amount::ZERO,
-        recipient_pk: test_pubkey(9),
-        tweak: [8u8; 16],
-    };
+    let output = AmmOutput::new_swap_v0(
+        &kp(9),
+        unit(0),
+        unit(99),
+        Amount::from_msats(10_000),
+        Amount::ZERO,
+        [8u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::UnknownUnit));
@@ -637,14 +644,14 @@ async fn swap_with_unknown_unit_in_is_rejected() {
     )
     .await;
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(99),
-        unit_out: unit(0),
-        amount_in: Amount::from_msats(10_000),
-        min_out: Amount::ZERO,
-        recipient_pk: test_pubkey(17),
-        tweak: [14u8; 16],
-    };
+    let output = AmmOutput::new_swap_v0(
+        &kp(17),
+        unit(99),
+        unit(0),
+        Amount::from_msats(10_000),
+        Amount::ZERO,
+        [14u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::UnknownUnit));
@@ -670,14 +677,14 @@ async fn swap_below_min_swap_in_is_rejected() {
     )
     .await;
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
-        amount_in: Amount::from_msats(500), // cfg's min_swap_in is 1_000
-        min_out: Amount::ZERO,
-        recipient_pk: test_pubkey(10),
-        tweak: [9u8; 16],
-    };
+    let output = AmmOutput::new_swap_v0(
+        &kp(10),
+        unit(0),
+        unit(1),
+        Amount::from_msats(500), // cfg's min_swap_in is 1_000
+        Amount::ZERO,
+        [9u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::BelowMinSwapIn));
@@ -699,15 +706,16 @@ async fn swap_that_would_exceed_max_reserve_is_rejected() {
     };
     dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
 
-    let recipient = test_pubkey(11);
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
-        amount_in: Amount::from_msats(1_000),
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: [10u8; 16],
-    };
+    let recipient_kp = kp(11);
+    let recipient = recipient_kp.public_key();
+    let output = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
+        Amount::from_msats(1_000),
+        Amount::ZERO,
+        [10u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::ReserveCapExceeded));
@@ -745,14 +753,14 @@ async fn deposit_that_would_exceed_max_reserve_is_rejected() {
     };
     dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
 
-    let output = AmmOutput::DepositV0 {
+    let output = AmmOutput::new_deposit_v0(
+        &kp(20),
         pool,
-        amount_lo: Amount::from_msats(1_000),
-        amount_hi: Amount::from_msats(1_000),
-        min_shares: 0,
-        owner_pk: test_pubkey(20),
-        tweak: [0x11u8; 16],
-    };
+        Amount::from_msats(1_000),
+        Amount::from_msats(1_000),
+        0,
+        [0x11u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::ReserveCapExceeded));
@@ -795,7 +803,8 @@ async fn swap_that_would_push_balance_above_max_reserve_is_rejected() {
     // `swap_moves_reserves_and_credits_balance_by_the_same_dy`). Seed an
     // existing balance just under MAX_RESERVE, close enough that adding
     // 9_871 pushes it over.
-    let recipient = test_pubkey(18);
+    let recipient_kp = kp(18);
+    let recipient = recipient_kp.public_key();
     let seeded_balance = BalanceEntry {
         amount: Amount::from_msats(math::MAX_RESERVE - 100),
         tweak: [0x22u8; 16],
@@ -807,14 +816,14 @@ async fn swap_that_would_push_balance_above_max_reserve_is_rejected() {
     dbtx.insert_new_entry(&bkey, &seeded_balance).await;
 
     let amount_in = Amount::from_msats(10_000_000);
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    let output = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: [0x23u8; 16],
-    };
+        Amount::ZERO,
+        [0x23u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(result, Err(AmmOutputError::ReserveCapExceeded));
@@ -843,17 +852,22 @@ async fn second_swap_into_existing_balance_adds_rather_than_replaces() {
     )
     .await;
 
-    let recipient = test_pubkey(12);
+    // ONE keypair for both swaps: this test exercises the accumulate path
+    // (two credits to one balance record), which requires the same
+    // `recipient_pk` — and with the PoP, only that key's holder can produce
+    // both outputs.
+    let recipient_kp = kp(12);
+    let recipient = recipient_kp.public_key();
     let amount_in = Amount::from_msats(10_000_000);
 
-    let first = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    let first = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: [11u8; 16],
-    };
+        Amount::ZERO,
+        [11u8; 16],
+    );
     module
         .process_output(&mut dbtx, &first, out_point())
         .await
@@ -878,14 +892,14 @@ async fn second_swap_into_existing_balance_adds_rather_than_replaces() {
     )
     .unwrap();
 
-    let second = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    let second = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: [12u8; 16],
-    };
+        Amount::ZERO,
+        [12u8; 16],
+    );
     module
         .process_output(&mut dbtx, &second, out_point())
         .await
@@ -899,22 +913,32 @@ async fn second_swap_into_existing_balance_adds_rather_than_replaces() {
         .await
         .unwrap();
     assert_eq!(balance_after_second.amount.msats, dy1 + dy2);
-    // The FIRST tweak wins on the shared balance record: an attacker who
-    // credits someone else's `recipient_pk` with a garbage `tweak` must not
-    // be able to overwrite the tweak the honest owner is relying on for
-    // seed-only recovery (spec §8.2, §13).
-    assert_eq!(balance_after_second.tweak, [11u8; 16]);
+    // The INCOMING (second) tweak wins on the shared balance record. This
+    // used to assert first-writer-wins, which existed to blunt an attacker
+    // squatting a victim's key with a garbage tweak — but the proof of
+    // possession now makes writing at a key you don't hold impossible, so
+    // the first-writer-wins rule was removed: every writer here IS the
+    // owner, and the owner's own later write updates the tweak.
+    assert_eq!(balance_after_second.tweak, [12u8; 16]);
 }
 
 /// 12. A second `SwapV0` into an existing `(recipient_pk, unit)` balance,
-///     carrying a DIFFERENT `tweak`, must NOT overwrite the stored tweak.
-///     This is the attacker-controlled-tweak-overwrite defect (spec §13):
-///     the pubkey and tweak on the wire are unverified, so anyone can
-///     "credit" anyone else's balance with a garbage tweak. Preserving the
-///     first tweak protects the victim's seed-only recovery even though the
-///     attacker's transaction is otherwise a legitimate credit.
+///     carrying a DIFFERENT `tweak`, updates the stored tweak to the
+///     incoming one.
+///
+///     This test previously asserted the OPPOSITE (first-writer-wins): the
+///     pubkey and tweak on the wire used to be unverified, so anyone could
+///     "credit" anyone else's balance with a garbage tweak, and preserving
+///     the first tweak was the defence for the victim's seed-only recovery
+///     (spec §13). The proof of possession retired that rule — only the
+///     key's holder can write at a key at all (see
+///     `swap_naming_a_victims_key_is_rejected_and_creates_no_balance`), so
+///     every writer here is the owner, and first-writer-wins would now only
+///     preserve an owner's own mistake against their own correction. Both
+///     swaps are therefore signed by the SAME keypair, and the later write
+///     must win.
 #[tokio::test]
-async fn balance_tweak_is_preserved_across_accumulation() {
+async fn balance_tweak_is_updated_by_the_owners_later_swap() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
@@ -930,19 +954,22 @@ async fn balance_tweak_is_preserved_across_accumulation() {
     )
     .await;
 
-    let recipient = test_pubkey(13);
+    // ONE keypair for both swaps — the accumulate path needs the same
+    // `recipient_pk`, and the PoP means only its holder can produce both.
+    let recipient_kp = kp(13);
+    let recipient = recipient_kp.public_key();
     let amount_in = Amount::from_msats(10_000_000);
     let tweak_a = [0xAAu8; 16];
     let tweak_b = [0xBBu8; 16];
 
-    let first = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    let first = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: tweak_a,
-    };
+        Amount::ZERO,
+        tweak_a,
+    );
     module
         .process_output(&mut dbtx, &first, out_point())
         .await
@@ -966,15 +993,15 @@ async fn balance_tweak_is_preserved_across_accumulation() {
     )
     .unwrap();
 
-    // Attacker-controlled second swap: same recipient/unit, garbage tweak.
-    let second = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    // The owner's own second swap: same recipient/unit, different tweak.
+    let second = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: recipient,
-        tweak: tweak_b,
-    };
+        Amount::ZERO,
+        tweak_b,
+    );
     module
         .process_output(&mut dbtx, &second, out_point())
         .await
@@ -989,32 +1016,39 @@ async fn balance_tweak_is_preserved_across_accumulation() {
         .unwrap();
     assert_eq!(balance.amount.msats, dy1 + dy2, "amount must accumulate");
     assert_eq!(
-        balance.tweak, tweak_a,
-        "the FIRST tweak must be preserved, not overwritten by the second swap"
+        balance.tweak, tweak_b,
+        "the owner's later write must update the tweak — first-writer-wins was retired \
+         along with the squatting attack the PoP eliminated"
     );
 }
 
 /// 13. A second `DepositV0` into an existing `(pool, owner_pk)` LP position,
-///     carrying a DIFFERENT `tweak`, must NOT overwrite the stored tweak.
-///     Same defect as case 12, but for LP positions (spec §13).
+///     carrying a DIFFERENT `tweak`, updates the stored tweak to the
+///     incoming one. Mirror of case 12 for LP positions — like it, this
+///     previously asserted first-writer-wins, which the proof of possession
+///     retired (see case 12's doc comment): only the owner can write here,
+///     so the owner's own later write must win.
 #[tokio::test]
-async fn lp_position_tweak_is_preserved_across_accumulation() {
+async fn lp_position_tweak_is_updated_by_the_owners_later_deposit() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
     let pool = pool01();
-    let owner = test_pubkey(14);
+    // ONE keypair for both deposits — the accumulate path needs the same
+    // `owner_pk`, and the PoP means only its holder can produce both.
+    let owner_kp = kp(14);
+    let owner = owner_kp.public_key();
     let tweak_a = [0xCCu8; 16];
     let tweak_b = [0xDDu8; 16];
 
-    let first = AmmOutput::DepositV0 {
+    let first = AmmOutput::new_deposit_v0(
+        &owner_kp,
         pool,
-        amount_lo: Amount::from_msats(1_000_000),
-        amount_hi: Amount::from_msats(1_000_000),
-        min_shares: 0,
-        owner_pk: owner,
-        tweak: tweak_a,
-    };
+        Amount::from_msats(1_000_000),
+        Amount::from_msats(1_000_000),
+        0,
+        tweak_a,
+    );
     module
         .process_output(&mut dbtx, &first, out_point())
         .await
@@ -1025,15 +1059,15 @@ async fn lp_position_tweak_is_preserved_across_accumulation() {
         .unwrap()
         .shares;
 
-    // Attacker-controlled second deposit: same pool/owner, garbage tweak.
-    let second = AmmOutput::DepositV0 {
+    // The owner's own second deposit: same pool/owner, different tweak.
+    let second = AmmOutput::new_deposit_v0(
+        &owner_kp,
         pool,
-        amount_lo: Amount::from_msats(100),
-        amount_hi: Amount::from_msats(100),
-        min_shares: 0,
-        owner_pk: owner,
-        tweak: tweak_b,
-    };
+        Amount::from_msats(100),
+        Amount::from_msats(100),
+        0,
+        tweak_b,
+    );
     let result = module
         .process_output(&mut dbtx, &second, out_point())
         .await
@@ -1050,8 +1084,9 @@ async fn lp_position_tweak_is_preserved_across_accumulation() {
         position.shares
     );
     assert_eq!(
-        position.tweak, tweak_a,
-        "the FIRST tweak must be preserved, not overwritten by the second deposit"
+        position.tweak, tweak_b,
+        "the owner's later write must update the tweak — first-writer-wins was retired \
+         along with the squatting attack the PoP eliminated"
     );
 }
 
@@ -1067,16 +1102,19 @@ async fn duplicate_owner_deposit_accumulates_without_panicking() {
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
     let pool = pool01();
-    let owner = test_pubkey(15);
+    // ONE keypair for both deposits — the duplicate-owner collision under
+    // test needs the same `owner_pk` on both outputs.
+    let owner_kp = kp(15);
+    let owner = owner_kp.public_key();
 
-    let first = AmmOutput::DepositV0 {
+    let first = AmmOutput::new_deposit_v0(
+        &owner_kp,
         pool,
-        amount_lo: Amount::from_msats(1_000_000),
-        amount_hi: Amount::from_msats(1_000_000),
-        min_shares: 0,
-        owner_pk: owner,
-        tweak: [0xEEu8; 16],
-    };
+        Amount::from_msats(1_000_000),
+        Amount::from_msats(1_000_000),
+        0,
+        [0xEEu8; 16],
+    );
     module
         .process_output(&mut dbtx, &first, out_point())
         .await
@@ -1088,14 +1126,14 @@ async fn duplicate_owner_deposit_accumulates_without_panicking() {
         .shares;
     let pool_after_first = dbtx.get_value(&PoolKey(pool)).await.unwrap();
 
-    let second = AmmOutput::DepositV0 {
+    let second = AmmOutput::new_deposit_v0(
+        &owner_kp,
         pool,
-        amount_lo: Amount::from_msats(100),
-        amount_hi: Amount::from_msats(100),
-        min_shares: 0,
-        owner_pk: owner,
-        tweak: [0xFFu8; 16],
-    };
+        Amount::from_msats(100),
+        Amount::from_msats(100),
+        0,
+        [0xFFu8; 16],
+    );
     // Must return Ok, not panic, despite `owner_pk` colliding with an
     // existing LP position.
     let result = module.process_output(&mut dbtx, &second, out_point()).await;
@@ -1121,10 +1159,14 @@ async fn duplicate_owner_deposit_accumulates_without_panicking() {
 }
 
 /// 15. `AmmOutput::Default { .. }` — the catch-all for a wire variant this
-///     binary doesn't understand — is rejected with `UnknownVariant`, never
-///     accepted or panicked on.
+///     binary doesn't understand — is rejected, never accepted or panicked
+///     on. Since the PoP gate runs before the variant match and `Default`
+///     has no key to prove (`AmmOutput::verify_pop` returns `false` for it),
+///     the rejection now surfaces as `InvalidProofOfPossession` rather than
+///     the old `UnknownVariant`; both are rejections, and `process_output`'s
+///     own comment documents this deliberately.
 #[tokio::test]
-async fn default_output_variant_is_rejected_as_unknown() {
+async fn default_output_variant_is_rejected() {
     let db = db();
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
@@ -1135,7 +1177,7 @@ async fn default_output_variant_is_rejected_as_unknown() {
     };
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
-    assert_eq!(result, Err(AmmOutputError::UnknownVariant));
+    assert_eq!(result, Err(AmmOutputError::InvalidProofOfPossession));
 }
 
 /// 16. Final-review finding T1: `cfg.fee_overrides` must actually reach
@@ -1199,14 +1241,14 @@ async fn swap_settles_at_the_pool_fee_override_not_the_default() {
     // caught, not accidentally agree by coincidence.
     assert_ne!(expected_dy, 9_871);
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
+    let output = AmmOutput::new_swap_v0(
+        &kp(20),
+        unit(0),
+        unit(1),
         amount_in,
-        min_out: Amount::ZERO,
-        recipient_pk: test_pubkey(20),
-        tweak: [20u8; 16],
-    };
+        Amount::ZERO,
+        [20u8; 16],
+    );
 
     let result = module
         .process_output(&mut dbtx, &output, out_point())
@@ -1276,14 +1318,14 @@ async fn swap_with_fee_zero_and_exact_division_is_accepted() {
     )
     .await;
 
-    let output = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
-        amount_in: Amount::from_msats(1_000),
-        min_out: Amount::ZERO,
-        recipient_pk: test_pubkey(21),
-        tweak: [21u8; 16],
-    };
+    let output = AmmOutput::new_swap_v0(
+        &kp(21),
+        unit(0),
+        unit(1),
+        Amount::from_msats(1_000),
+        Amount::ZERO,
+        [21u8; 16],
+    );
 
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(
@@ -1324,7 +1366,8 @@ async fn later_deposit_too_small_to_mint_any_shares_is_rejected_and_writes_nothi
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
     let pool = pool01();
-    let owner = test_pubkey(22);
+    let owner_kp = kp(22);
+    let owner = owner_kp.public_key();
 
     let seeded_pool = Pool {
         reserve_lo: Amount::from_msats(1_000_000),
@@ -1333,14 +1376,14 @@ async fn later_deposit_too_small_to_mint_any_shares_is_rejected_and_writes_nothi
     };
     dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
 
-    let output = AmmOutput::DepositV0 {
+    let output = AmmOutput::new_deposit_v0(
+        &owner_kp,
         pool,
-        amount_lo: Amount::from_msats(1),
-        amount_hi: Amount::from_msats(1_000_000_000),
-        min_shares: 0,
-        owner_pk: owner,
-        tweak: [22u8; 16],
-    };
+        Amount::from_msats(1),
+        Amount::from_msats(1_000_000_000),
+        0,
+        [22u8; 16],
+    );
     let result = module.process_output(&mut dbtx, &output, out_point()).await;
     assert_eq!(
         result,
@@ -1362,5 +1405,297 @@ async fn later_deposit_too_small_to_mint_any_shares_is_rejected_and_writes_nothi
             .await
             .is_none(),
         "a rejected deposit must not create a 0-share LpPosition"
+    );
+}
+
+/// 19. The squatting attack is dead, deposit side: an attacker who does NOT
+///     hold the victim's key builds a `DepositV0` naming the VICTIM's
+///     `owner_pk` with a garbage tweak, signing the PoP with the ATTACKER's
+///     own key. `process_output` must reject it with
+///     `InvalidProofOfPossession` — and, just as importantly, must leave NO
+///     `LpPosition` row (and no `Pool`) behind for the victim's key: the
+///     attack was never the rejection message, it was the record with the
+///     garbage tweak that destroyed the victim's seed-only recovery.
+///     Case 21 is the positive control proving this pool/amount fixture
+///     would otherwise succeed.
+#[tokio::test]
+async fn deposit_naming_a_victims_key_is_rejected_and_creates_no_position() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    let attacker_kp = kp(30);
+    let victim = test_pubkey(31);
+    let garbage_tweak = [0xF0u8; 16];
+
+    // The attacker's best effort: a REAL signature by the attacker's key
+    // over the exact message the output claims — everything is right except
+    // that the signing key is not the named key.
+    let forged_pop = pop::sign_pop(
+        &attacker_kp,
+        &pop::deposit_pop_message(
+            pool,
+            Amount::from_msats(1_000_000),
+            Amount::from_msats(1_000_000),
+            0,
+            victim,
+            garbage_tweak,
+        ),
+    );
+    let output = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1_000_000),
+        amount_hi: Amount::from_msats(1_000_000),
+        min_shares: 0,
+        owner_pk: victim,
+        tweak: garbage_tweak,
+        pop: forged_pop,
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::InvalidProofOfPossession));
+
+    // The other half of the property: no state at the victim's key. A
+    // rejection that still wrote the LpPosition would leave the squatting
+    // attack fully intact.
+    assert!(
+        dbtx.get_value(&LpPositionKey {
+            pool,
+            owner: victim
+        })
+        .await
+        .is_none(),
+        "a rejected deposit must leave no LpPosition at the victim's key"
+    );
+    assert!(
+        dbtx.get_value(&PoolKey(pool)).await.is_none(),
+        "a rejected deposit must not create the pool either"
+    );
+}
+
+/// 20. The squatting attack is dead, swap side: same as case 19 but for
+///     `SwapV0` / the `Balance` table. The pool is seeded and the swap is
+///     otherwise perfectly valid (case 21 proves it), so the PoP check is
+///     the ONLY thing standing between the attacker and a `BalanceEntry`
+///     with a garbage tweak at the victim's key.
+#[tokio::test]
+async fn swap_naming_a_victims_key_is_rejected_and_creates_no_balance() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    let seeded_pool = Pool {
+        reserve_lo: Amount::from_msats(1_000_000_000),
+        reserve_hi: Amount::from_msats(1_000_000),
+        total_shares: 1_000_000_000,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+
+    let attacker_kp = kp(32);
+    let victim = test_pubkey(33);
+    let garbage_tweak = [0xF1u8; 16];
+    let amount_in = Amount::from_msats(10_000_000);
+
+    let forged_pop = pop::sign_pop(
+        &attacker_kp,
+        &pop::swap_pop_message(
+            unit(0),
+            unit(1),
+            amount_in,
+            Amount::ZERO,
+            victim,
+            garbage_tweak,
+        ),
+    );
+    let output = AmmOutput::SwapV0 {
+        unit_in: unit(0),
+        unit_out: unit(1),
+        amount_in,
+        min_out: Amount::ZERO,
+        recipient_pk: victim,
+        tweak: garbage_tweak,
+        pop: forged_pop,
+    };
+
+    let result = module.process_output(&mut dbtx, &output, out_point()).await;
+    assert_eq!(result, Err(AmmOutputError::InvalidProofOfPossession));
+
+    // No state at the victim's key, and the pool untouched — the rejection
+    // happens before any DB write.
+    assert!(
+        dbtx.get_value(&BalanceKey {
+            owner: victim,
+            unit: unit(1)
+        })
+        .await
+        .is_none(),
+        "a rejected swap must leave no Balance at the victim's key"
+    );
+    assert_eq!(
+        dbtx.get_value(&PoolKey(pool)).await.unwrap(),
+        seeded_pool,
+        "a rejected swap must not move the reserves"
+    );
+}
+
+/// 21. Positive control for cases 19 and 20: the SAME outputs, field for
+///     field, but signed by the key they name, succeed and create the
+///     records. Without this, 19/20 would pass trivially under a
+///     reject-everything `process_output`.
+#[tokio::test]
+async fn the_same_outputs_signed_by_their_own_key_succeed() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    // Case 19's deposit, owner-signed.
+    let owner_kp = kp(31);
+    let deposit = AmmOutput::new_deposit_v0(
+        &owner_kp,
+        pool,
+        Amount::from_msats(1_000_000),
+        Amount::from_msats(1_000_000),
+        0,
+        [0xF0u8; 16],
+    );
+    module
+        .process_output(&mut dbtx, &deposit, out_point())
+        .await
+        .expect("the owner-signed twin of case 19's deposit must succeed");
+    let position = dbtx
+        .get_value(&LpPositionKey {
+            pool,
+            owner: owner_kp.public_key(),
+        })
+        .await
+        .expect("the owner-signed deposit must create the LpPosition");
+    assert_eq!(position.tweak, [0xF0u8; 16]);
+
+    // Case 20's swap, recipient-signed (the deposit above created the pool,
+    // at different reserves than case 20's seed — irrelevant to whether the
+    // output is admitted).
+    let recipient_kp = kp(33);
+    let swap = AmmOutput::new_swap_v0(
+        &recipient_kp,
+        unit(0),
+        unit(1),
+        Amount::from_msats(10_000),
+        Amount::ZERO,
+        [0xF1u8; 16],
+    );
+    module
+        .process_output(&mut dbtx, &swap, out_point())
+        .await
+        .expect("the recipient-signed twin of case 20's swap must succeed");
+    let balance = dbtx
+        .get_value(&BalanceKey {
+            owner: recipient_kp.public_key(),
+            unit: unit(1),
+        })
+        .await
+        .expect("the recipient-signed swap must create the Balance");
+    assert_eq!(balance.tweak, [0xF1u8; 16]);
+}
+
+/// 22. Transplant resistance at the `process_output` level (the unit-level
+///     twin lives in `fedimint-amm-common`'s `pop` tests): a PoP that IS
+///     valid — made by the right key over the right fields — for tweak A
+///     does not admit the same output re-paired with tweak B. This is the
+///     lift-a-pending-transaction's-signature variant of the squatting
+///     attack, and it too must leave no state behind.
+#[tokio::test]
+async fn a_pop_transplanted_to_a_different_tweak_is_rejected_and_writes_nothing() {
+    let db = db();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let module = amm();
+    let pool = pool01();
+
+    let seeded_pool = Pool {
+        reserve_lo: Amount::from_msats(1_000_000_000),
+        reserve_hi: Amount::from_msats(1_000_000),
+        total_shares: 1_000_000_000,
+    };
+    dbtx.insert_new_entry(&PoolKey(pool), &seeded_pool).await;
+
+    let owner_kp = kp(34);
+    let owner = owner_kp.public_key();
+    let honest_tweak = [0x01u8; 16];
+    let garbage_tweak = [0xFFu8; 16];
+    let amount_in = Amount::from_msats(10_000_000);
+
+    // Swap: lift the pop off an honest output, re-pair it with a garbage
+    // tweak.
+    let honest_swap = AmmOutput::new_swap_v0(
+        &owner_kp,
+        unit(0),
+        unit(1),
+        amount_in,
+        Amount::ZERO,
+        honest_tweak,
+    );
+    let AmmOutput::SwapV0 { pop, .. } = honest_swap else {
+        panic!("new_swap_v0 builds a SwapV0");
+    };
+    let transplanted_swap = AmmOutput::SwapV0 {
+        unit_in: unit(0),
+        unit_out: unit(1),
+        amount_in,
+        min_out: Amount::ZERO,
+        recipient_pk: owner,
+        tweak: garbage_tweak,
+        pop,
+    };
+    let result = module
+        .process_output(&mut dbtx, &transplanted_swap, out_point())
+        .await;
+    assert_eq!(result, Err(AmmOutputError::InvalidProofOfPossession));
+    assert!(
+        dbtx.get_value(&BalanceKey {
+            owner,
+            unit: unit(1)
+        })
+        .await
+        .is_none(),
+        "a transplanted swap PoP must leave no Balance behind"
+    );
+    assert_eq!(
+        dbtx.get_value(&PoolKey(pool)).await.unwrap(),
+        seeded_pool,
+        "a transplanted swap PoP must not move the reserves"
+    );
+
+    // Deposit: same lift-and-re-pair, against the LpPosition table.
+    let honest_deposit = AmmOutput::new_deposit_v0(
+        &owner_kp,
+        pool,
+        Amount::from_msats(1_000_000),
+        Amount::from_msats(1_000_000),
+        0,
+        honest_tweak,
+    );
+    let AmmOutput::DepositV0 { pop, .. } = honest_deposit else {
+        panic!("new_deposit_v0 builds a DepositV0");
+    };
+    let transplanted_deposit = AmmOutput::DepositV0 {
+        pool,
+        amount_lo: Amount::from_msats(1_000_000),
+        amount_hi: Amount::from_msats(1_000_000),
+        min_shares: 0,
+        owner_pk: owner,
+        tweak: garbage_tweak,
+        pop,
+    };
+    let result = module
+        .process_output(&mut dbtx, &transplanted_deposit, out_point())
+        .await;
+    assert_eq!(result, Err(AmmOutputError::InvalidProofOfPossession));
+    assert!(
+        dbtx.get_value(&LpPositionKey { pool, owner })
+            .await
+            .is_none(),
+        "a transplanted deposit PoP must leave no LpPosition behind"
     );
 }

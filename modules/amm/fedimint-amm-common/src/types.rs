@@ -32,6 +32,12 @@ pub enum AmmOutput {
         recipient_pk: secp256k1::PublicKey,
         /// Ground per spec §8; stored on the Balance record for recovery.
         tweak: [u8; 16],
+        /// Proof that the submitter holds `recipient_pk`, over every field
+        /// above. See [`crate::pop`] for why an output needs one: core signs
+        /// for inputs only, so without this anyone could create a record at
+        /// anyone's key and fix a garbage `tweak` in it, destroying that
+        /// key's seed-only recoverability.
+        pop: secp256k1::schnorr::Signature,
     },
     /// Add liquidity; create the pool if absent.
     DepositV0 {
@@ -42,9 +48,142 @@ pub enum AmmOutput {
         min_shares: u64,
         owner_pk: secp256k1::PublicKey,
         tweak: [u8; 16],
+        /// Proof that the submitter holds `owner_pk`, over every field above.
+        /// See [`crate::pop`].
+        pop: secp256k1::schnorr::Signature,
     },
     #[encodable_default]
     Default { variant: u64, bytes: Vec<u8> },
+}
+
+impl AmmOutput {
+    /// Build a `SwapV0` that proves possession of its own recipient key.
+    ///
+    /// Takes the keypair rather than the pubkey so that the named key, the
+    /// tweak and the signature cannot disagree: the pubkey is *derived* from
+    /// the keypair here, and the signature is made over the finished field
+    /// set. Constructing the variant literally is still possible (tests that
+    /// want a deliberately invalid proof need it), but every honest caller
+    /// should come through here.
+    #[must_use]
+    pub fn new_swap_v0(
+        keypair: &secp256k1::Keypair,
+        unit_in: AmountUnit,
+        unit_out: AmountUnit,
+        amount_in: Amount,
+        min_out: Amount,
+        tweak: [u8; 16],
+    ) -> Self {
+        let recipient_pk = keypair.public_key();
+        let pop = crate::pop::sign_pop(
+            keypair,
+            &crate::pop::swap_pop_message(
+                unit_in,
+                unit_out,
+                amount_in,
+                min_out,
+                recipient_pk,
+                tweak,
+            ),
+        );
+
+        AmmOutput::SwapV0 {
+            unit_in,
+            unit_out,
+            amount_in,
+            min_out,
+            recipient_pk,
+            tweak,
+            pop,
+        }
+    }
+
+    /// Build a `DepositV0` that proves possession of its own owner key. See
+    /// [`Self::new_swap_v0`].
+    #[must_use]
+    pub fn new_deposit_v0(
+        keypair: &secp256k1::Keypair,
+        pool: PoolId,
+        amount_lo: Amount,
+        amount_hi: Amount,
+        min_shares: u64,
+        tweak: [u8; 16],
+    ) -> Self {
+        let owner_pk = keypair.public_key();
+        let pop = crate::pop::sign_pop(
+            keypair,
+            &crate::pop::deposit_pop_message(
+                pool, amount_lo, amount_hi, min_shares, owner_pk, tweak,
+            ),
+        );
+
+        AmmOutput::DepositV0 {
+            pool,
+            amount_lo,
+            amount_hi,
+            min_shares,
+            owner_pk,
+            tweak,
+            pop,
+        }
+    }
+
+    /// Verify this output's proof of possession against the key it names.
+    ///
+    /// Lives here, next to the variants, so the field list fed to the message
+    /// builder cannot drift from the field list the variant actually has —
+    /// adding a field to a variant without adding it here is the mistake this
+    /// placement is meant to make obvious.
+    ///
+    /// `Default` (an unknown future variant) has no key to prove and returns
+    /// `false`: the server rejects it on the variant match anyway, and a
+    /// permissive answer here would be a trap for any later caller.
+    #[must_use]
+    pub fn verify_pop(&self) -> bool {
+        match self {
+            AmmOutput::SwapV0 {
+                unit_in,
+                unit_out,
+                amount_in,
+                min_out,
+                recipient_pk,
+                tweak,
+                pop,
+            } => crate::pop::verify_pop(
+                pop,
+                &crate::pop::swap_pop_message(
+                    *unit_in,
+                    *unit_out,
+                    *amount_in,
+                    *min_out,
+                    *recipient_pk,
+                    *tweak,
+                ),
+                recipient_pk,
+            ),
+            AmmOutput::DepositV0 {
+                pool,
+                amount_lo,
+                amount_hi,
+                min_shares,
+                owner_pk,
+                tweak,
+                pop,
+            } => crate::pop::verify_pop(
+                pop,
+                &crate::pop::deposit_pop_message(
+                    *pool,
+                    *amount_lo,
+                    *amount_hi,
+                    *min_shares,
+                    *owner_pk,
+                    *tweak,
+                ),
+                owner_pk,
+            ),
+            AmmOutput::Default { .. } => false,
+        }
+    }
 }
 
 impl fmt::Display for AmmOutput {
@@ -188,6 +327,13 @@ pub enum AmmInputError {
 pub enum AmmOutputError {
     #[error("unknown output variant")]
     UnknownVariant,
+    /// The output's `pop` is not a valid signature by the key it names.
+    ///
+    /// Checked before anything else, and before any database read, so an
+    /// output that does not prove control of its destination key never
+    /// influences module state at all.
+    #[error("invalid proof of possession for the named key")]
+    InvalidProofOfPossession,
     #[error("unit_in and unit_out must differ")]
     IdenticalUnits,
     #[error("unit not in the federation's allowlist")]
@@ -239,22 +385,25 @@ mod tests {
     use super::*;
     use crate::pool_id::PoolId;
 
-    fn pk() -> secp256k1::PublicKey {
+    fn kp() -> secp256k1::Keypair {
         secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &[1u8; 32])
             .expect("valid secret key")
-            .public_key()
+    }
+
+    fn pk() -> secp256k1::PublicKey {
+        kp().public_key()
     }
 
     #[test]
     fn swap_output_round_trips() {
-        let out = AmmOutput::SwapV0 {
-            unit_in: AmountUnit::new_custom(0),
-            unit_out: AmountUnit::new_custom(1),
-            amount_in: Amount::from_msats(10_000),
-            min_out: Amount::from_msats(9_000),
-            recipient_pk: pk(),
-            tweak: [7u8; 16],
-        };
+        let out = AmmOutput::new_swap_v0(
+            &kp(),
+            AmountUnit::new_custom(0),
+            AmountUnit::new_custom(1),
+            Amount::from_msats(10_000),
+            Amount::from_msats(9_000),
+            [7u8; 16],
+        );
         let bytes = out.consensus_encode_to_vec();
         let back =
             AmmOutput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).unwrap();
@@ -263,14 +412,14 @@ mod tests {
 
     #[test]
     fn deposit_output_round_trips() {
-        let out = AmmOutput::DepositV0 {
-            pool: PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap(),
-            amount_lo: Amount::from_msats(1_000),
-            amount_hi: Amount::from_msats(2_000),
-            min_shares: 1,
-            owner_pk: pk(),
-            tweak: [9u8; 16],
-        };
+        let out = AmmOutput::new_deposit_v0(
+            &kp(),
+            PoolId::new(AmountUnit::new_custom(0), AmountUnit::new_custom(1)).unwrap(),
+            Amount::from_msats(1_000),
+            Amount::from_msats(2_000),
+            1,
+            [9u8; 16],
+        );
         let bytes = out.consensus_encode_to_vec();
         let back =
             AmmOutput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).unwrap();

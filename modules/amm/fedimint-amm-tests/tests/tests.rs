@@ -478,14 +478,14 @@ async fn min_out_violation_rejects_tx1_and_leaves_the_wallet_unchanged() -> anyh
     // auto-balance path (`submit_output`'s doc comment), so this still
     // exercises the wallet's genuine optimistic-debit/refund-on-reject state
     // machine, not a hand-signed bypass.
-    let output = AmmOutput::SwapV0 {
-        unit_in: faucet_unit(),
-        unit_out: AmountUnit::BITCOIN,
+    let output = AmmOutput::new_swap_v0(
+        &fresh_keypair(),
+        faucet_unit(),
+        AmountUnit::BITCOIN,
         amount_in,
-        min_out: Amount::from_msats(u64::MAX),
-        recipient_pk: fresh_keypair().public_key(),
-        tweak: [0; 16],
-    };
+        Amount::from_msats(u64::MAX),
+        [0; 16],
+    );
 
     let (operation_id, range) = submit_output(
         &trader,
@@ -682,14 +682,14 @@ async fn overpay_between_tx1_and_tx2_forfeits_only_the_surplus() -> anyhow::Resu
     let (operation_id, range) = submit_output(
         &trader,
         amm_instance_id,
-        AmmOutput::SwapV0 {
-            unit_in: AmountUnit::BITCOIN,
-            unit_out: faucet_unit(),
+        AmmOutput::new_swap_v0(
+            &recipient,
+            AmountUnit::BITCOIN,
+            faucet_unit(),
             amount_in,
-            min_out: Amount::ZERO,
-            recipient_pk: recipient.public_key(),
-            tweak: [0; 16],
-        },
+            Amount::ZERO,
+            [0; 16],
+        ),
         Amounts::new_custom(AmountUnit::BITCOIN, amount_in),
         "swap Tx1 for the overpay test",
     )
@@ -715,7 +715,10 @@ async fn overpay_between_tx1_and_tx2_forfeits_only_the_surplus() -> anyhow::Resu
 
     // A second party credits the SAME recipient_pk between Tx1 and Tx2 —
     // the "gift" spec §6.1 says a claim must still capture rather than be
-    // blocked by.
+    // blocked by. Since outputs now carry a proof of possession, a gift
+    // requires the recipient's cooperation: the output itself is signed by
+    // the recipient's key (which this test holds) even though a different
+    // client funds and submits the transaction.
     let other = fed.join_client_with_db(
         fedimint_core::db::mem_impl::MemDatabase::new().into(),
         root_secret(&OTHER_SK),
@@ -729,14 +732,14 @@ async fn overpay_between_tx1_and_tx2_forfeits_only_the_surplus() -> anyhow::Resu
     let (gift_operation_id, gift_range) = submit_output(
         &other,
         other_amm_instance_id,
-        AmmOutput::SwapV0 {
-            unit_in: AmountUnit::BITCOIN,
-            unit_out: faucet_unit(),
-            amount_in: gift_amount,
-            min_out: Amount::ZERO,
-            recipient_pk: recipient.public_key(),
-            tweak: [0; 16],
-        },
+        AmmOutput::new_swap_v0(
+            &recipient,
+            AmountUnit::BITCOIN,
+            faucet_unit(),
+            gift_amount,
+            Amount::ZERO,
+            [0; 16],
+        ),
         Amounts::new_custom(AmountUnit::BITCOIN, gift_amount),
         "gift credit landing between Tx1 and Tx2",
     )
@@ -869,14 +872,14 @@ async fn recovery_finds_and_claims_an_unclaimed_balance_and_an_lp_position() -> 
     let (operation_id, range) = submit_output(
         &client,
         amm_instance_id,
-        AmmOutput::SwapV0 {
-            unit_in: AmountUnit::BITCOIN,
-            unit_out: faucet_unit(),
-            amount_in: swap_amount_in,
-            min_out: Amount::ZERO,
-            recipient_pk: recipient_keypair.public_key(),
+        AmmOutput::new_swap_v0(
+            &recipient_keypair,
+            AmountUnit::BITCOIN,
+            faucet_unit(),
+            swap_amount_in,
+            Amount::ZERO,
             tweak,
-        },
+        ),
         Amounts::new_custom(AmountUnit::BITCOIN, swap_amount_in),
         "unclaimed swap for the recovery test",
     )

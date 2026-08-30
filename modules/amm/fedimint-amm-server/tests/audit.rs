@@ -38,7 +38,7 @@ use fedimint_core::db::{Database, DatabaseTransaction, IDatabaseTransactionOpsCo
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::{AmountUnit, Amounts};
-use fedimint_core::secp256k1::{self, Keypair, SECP256K1};
+use fedimint_core::secp256k1::{Keypair, SECP256K1};
 use fedimint_core::{Amount, BitcoinHash, InPoint, OutPoint, TransactionId};
 use fedimint_server_core::ServerModule;
 
@@ -52,10 +52,12 @@ fn unit(n: u64) -> AmountUnit {
     AmountUnit::new_custom(n)
 }
 
-fn test_pubkey(seed: u8) -> secp256k1::PublicKey {
+/// A deterministic keypair per seed. Outputs need a full keypair (not just a
+/// pubkey) since every `SwapV0`/`DepositV0` carries a proof of possession
+/// signed by the key it names — see `fedimint-amm-common`'s `pop` module.
+fn kp(seed: u8) -> Keypair {
     Keypair::from_seckey_slice(SECP256K1, &[seed; 32])
         .expect("a repeated non-zero byte is a valid secret key")
-        .public_key()
 }
 
 fn out_point() -> OutPoint {
@@ -148,10 +150,12 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
     let module = amm();
     let pool = pool01();
 
-    let owner1 = test_pubkey(1);
-    let owner2 = test_pubkey(2);
-    let swap_recipient_a = test_pubkey(3);
-    let swap_recipient_b = test_pubkey(4);
+    let owner1_kp = kp(1);
+    let owner1 = owner1_kp.public_key();
+    let owner2_kp = kp(2);
+    let swap_recipient_a_kp = kp(3);
+    let swap_recipient_a = swap_recipient_a_kp.public_key();
+    let swap_recipient_b_kp = kp(4);
 
     let mut expected: i64 = 0;
     assert_eq!(
@@ -161,14 +165,14 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
     );
 
     // --- Step 1: first deposit (creates the pool). ---
-    let deposit1 = AmmOutput::DepositV0 {
+    let deposit1 = AmmOutput::new_deposit_v0(
+        &owner1_kp,
         pool,
-        amount_lo: Amount::from_msats(n1),
-        amount_hi: Amount::from_msats(n1),
-        min_shares: 0,
-        owner_pk: owner1,
-        tweak: [1u8; 16],
-    };
+        Amount::from_msats(n1),
+        Amount::from_msats(n1),
+        0,
+        [1u8; 16],
+    );
     let outcome1 = module
         .process_output(&mut dbtx, &deposit1, out_point())
         .await
@@ -188,14 +192,14 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
     // `da2 != db2` by construction of the two call sites below, and the
     // pool's ratio is 1:1 after step 1, so this necessarily deposits at a
     // different ratio than the pool currently holds.
-    let deposit2 = AmmOutput::DepositV0 {
+    let deposit2 = AmmOutput::new_deposit_v0(
+        &owner2_kp,
         pool,
-        amount_lo: Amount::from_msats(da2),
-        amount_hi: Amount::from_msats(db2),
-        min_shares: 0,
-        owner_pk: owner2,
-        tweak: [2u8; 16],
-    };
+        Amount::from_msats(da2),
+        Amount::from_msats(db2),
+        0,
+        [2u8; 16],
+    );
     let outcome2 = module
         .process_output(&mut dbtx, &deposit2, out_point())
         .await
@@ -208,14 +212,14 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
     );
 
     // --- Step 3: swap A -> B. ---
-    let swap1 = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
-        amount_in: Amount::from_msats(swap1_in),
-        min_out: Amount::ZERO,
-        recipient_pk: swap_recipient_a,
-        tweak: [3u8; 16],
-    };
+    let swap1 = AmmOutput::new_swap_v0(
+        &swap_recipient_a_kp,
+        unit(0),
+        unit(1),
+        Amount::from_msats(swap1_in),
+        Amount::ZERO,
+        [3u8; 16],
+    );
     let swap1_outcome = module
         .process_output(&mut dbtx, &swap1, out_point())
         .await
@@ -232,14 +236,14 @@ async fn assert_lifecycle(n1: u64, da2: u64, db2: u64, swap1_in: u64, swap2_in: 
     );
 
     // --- Step 4: swap B -> A. ---
-    let swap2 = AmmOutput::SwapV0 {
-        unit_in: unit(1),
-        unit_out: unit(0),
-        amount_in: Amount::from_msats(swap2_in),
-        min_out: Amount::ZERO,
-        recipient_pk: swap_recipient_b,
-        tweak: [4u8; 16],
-    };
+    let swap2 = AmmOutput::new_swap_v0(
+        &swap_recipient_b_kp,
+        unit(1),
+        unit(0),
+        Amount::from_msats(swap2_in),
+        Amount::ZERO,
+        [4u8; 16],
+    );
     let swap2_outcome = module
         .process_output(&mut dbtx, &swap2, out_point())
         .await
@@ -357,24 +361,26 @@ async fn audit_liability_tracks_lifecycle_at_a_million_to_one_ratio() {
     let mut dbtx = db.begin_transaction_nc().await;
     let module = amm();
     let pool = pool01();
-    let owner1 = test_pubkey(11);
-    let owner2 = test_pubkey(12);
-    let swap_recipient_a = test_pubkey(13);
-    let swap_recipient_b = test_pubkey(14);
+    let owner1_kp = kp(11);
+    let owner1 = owner1_kp.public_key();
+    let owner2_kp = kp(12);
+    let swap_recipient_a_kp = kp(13);
+    let swap_recipient_a = swap_recipient_a_kp.public_key();
+    let swap_recipient_b_kp = kp(14);
 
     let mut expected: i64 = 0;
 
     // Step 1: first deposit, 1_000_000:1 ratio.
     // isqrt(1_000_000_000 * 1_000) == isqrt(1000^2 * 1000^2) == 1_000_000.
     let (da1, db1) = (1_000_000_000u64, 1_000u64);
-    let deposit1 = AmmOutput::DepositV0 {
+    let deposit1 = AmmOutput::new_deposit_v0(
+        &owner1_kp,
         pool,
-        amount_lo: Amount::from_msats(da1),
-        amount_hi: Amount::from_msats(db1),
-        min_shares: 0,
-        owner_pk: owner1,
-        tweak: [1u8; 16],
-    };
+        Amount::from_msats(da1),
+        Amount::from_msats(db1),
+        0,
+        [1u8; 16],
+    );
     let outcome1 = module
         .process_output(&mut dbtx, &deposit1, out_point())
         .await
@@ -392,14 +398,14 @@ async fn audit_liability_tracks_lifecycle_at_a_million_to_one_ratio() {
     //   via_hi = db2 * 1_000_000 / 1_000 = db2 * 1000           -- always
     //            exact, no floor loss possible.
     let (da2, db2) = (5_000u64, 1u64);
-    let deposit2 = AmmOutput::DepositV0 {
+    let deposit2 = AmmOutput::new_deposit_v0(
+        &owner2_kp,
         pool,
-        amount_lo: Amount::from_msats(da2),
-        amount_hi: Amount::from_msats(db2),
-        min_shares: 0,
-        owner_pk: owner2,
-        tweak: [2u8; 16],
-    };
+        Amount::from_msats(da2),
+        Amount::from_msats(db2),
+        0,
+        [2u8; 16],
+    );
     let outcome2 = module
         .process_output(&mut dbtx, &deposit2, out_point())
         .await
@@ -411,14 +417,14 @@ async fn audit_liability_tracks_lifecycle_at_a_million_to_one_ratio() {
     // ~1_000_005_000-unit A side, so the input must be a healthy multiple of
     // the spot-price threshold (~1_000_000 lo per 1 hi) or the output floors
     // to zero.
-    let swap1 = AmmOutput::SwapV0 {
-        unit_in: unit(0),
-        unit_out: unit(1),
-        amount_in: Amount::from_msats(5_000_000),
-        min_out: Amount::ZERO,
-        recipient_pk: swap_recipient_a,
-        tweak: [3u8; 16],
-    };
+    let swap1 = AmmOutput::new_swap_v0(
+        &swap_recipient_a_kp,
+        unit(0),
+        unit(1),
+        Amount::from_msats(5_000_000),
+        Amount::ZERO,
+        [3u8; 16],
+    );
     let swap1_outcome = module
         .process_output(&mut dbtx, &swap1, out_point())
         .await
@@ -428,14 +434,14 @@ async fn audit_liability_tracks_lifecycle_at_a_million_to_one_ratio() {
 
     // Step 4: swap B->A. The B side is thin, so even a tiny input yields a
     // large A-side output — well within reserve_lo, which is now ~1e9.
-    let swap2 = AmmOutput::SwapV0 {
-        unit_in: unit(1),
-        unit_out: unit(0),
-        amount_in: Amount::from_msats(2),
-        min_out: Amount::ZERO,
-        recipient_pk: swap_recipient_b,
-        tweak: [4u8; 16],
-    };
+    let swap2 = AmmOutput::new_swap_v0(
+        &swap_recipient_b_kp,
+        unit(1),
+        unit(0),
+        Amount::from_msats(2),
+        Amount::ZERO,
+        [4u8; 16],
+    );
     let swap2_outcome = module
         .process_output(&mut dbtx, &swap2, out_point())
         .await
