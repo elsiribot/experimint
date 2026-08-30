@@ -31,6 +31,10 @@ jobs:
             # The daemon is the only thing that proves the module set actually
             # links; a lib-only check would not catch a missing module dep.
             cmd: cargo build --locked -p fedimintd-experimint
+          - name: cli-bin
+            # Same argument for the client half: only linking the binary proves
+            # the client module set resolves against one `fedimint-core`.
+            cmd: cargo build --locked -p fedimint-cli-experimint
           - name: clippy
             cmd: cargo clippy --workspace --all-targets --locked -- -D warnings
           - name: fmt

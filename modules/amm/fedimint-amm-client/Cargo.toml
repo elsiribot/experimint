@@ -7,6 +7,12 @@ name = "fedimint-amm-client"
 repository = { workspace = true }
 version = { workspace = true }
 
+[features]
+# `ClientModule::handle_cli_command`, i.e. `fedimint-cli module amm <verb>`.
+# Off by default so a wallet embedding this module never links clap.
+cli = ["dep:clap"]
+default = []
+
 [lib]
 name = "fedimint_amm_client"
 path = "src/lib.rs"
@@ -15,6 +21,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bitcoin_hashes = { workspace = true }
+clap = { workspace = true, optional = true }
 erased-serde = { workspace = true }
 fedimint-amm-common = { workspace = true }
 fedimint-api-client = { workspace = true }
@@ -24,15 +31,17 @@ fedimint-derive-secret = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
+# Not gated behind `cli`: `handle_cli_command` returns `serde_json::Value` from
+# the `ClientModule` trait, and `swap.rs`'s tests use it too, so an optional
+# dependency would only buy `#[cfg]` noise over a crate already in the tree via
+# `fedimint-core`.
+serde_json = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

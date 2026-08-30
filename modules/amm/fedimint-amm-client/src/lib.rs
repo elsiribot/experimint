@@ -38,12 +38,16 @@
 //! directions, not just the one a comment used to claim was covered.
 
 pub mod api;
+#[cfg(feature = "cli")]
+mod cli;
 pub mod db;
 pub mod derivation;
 pub mod single_tx;
 pub mod swap;
 
 use std::collections::BTreeMap;
+#[cfg(feature = "cli")]
+use std::ffi;
 use std::sync::Arc;
 
 use fedimint_amm_common::config::AmmClientConfig;
@@ -490,6 +494,14 @@ impl ClientModule for AmmClientModule {
                 }
             },
         );
+    }
+
+    #[cfg(feature = "cli")]
+    async fn handle_cli_command(
+        &self,
+        args: &[ffi::OsString],
+    ) -> anyhow::Result<serde_json::Value> {
+        cli::handle_cli_command(self, args).await
     }
 }
 
