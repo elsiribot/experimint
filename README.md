@@ -26,6 +26,12 @@ It deliberately omits the v1 `mint`/`wallet`/`ln` modules that a stock
 `fedimintd` also attaches: this binary targets a multi-unit federation, which is
 a v2-only story — the v1 modules predate `AmountUnit`.
 
+[`docs/mainnet-deployment.md`](docs/mainnet-deployment.md) is the runbook for
+standing seven of these up on Bitcoin and Ethereum mainnet: config-gen
+commands, the full env var table, secret provisioning, the DKG ceremony, and
+how to tell whether the usdt module actually reached `BootstrapState::Ready`
+afterwards.
+
 ### The intended topology
 
 | Instance | Purpose |
@@ -189,6 +195,18 @@ Or without entering it:
 ```bash
 nix develop --accept-flake-config --command cargo check --workspace --all-targets
 ```
+
+The daemon is also a flake package, which is what a NixOS host consumes:
+
+```bash
+nix build .#fedimintd-experimint
+./result/bin/fedimintd-experimint --version
+```
+
+It builds only `bin/fedimintd-experimint`, not the `*-tests` crates, and
+vendors from the committed `Cargo.lock` rather than re-resolving — see the trap
+described under [Cargo.lock is seeded from the platform
+branch](#cargolock-is-seeded-from-the-platform-branch).
 
 The shell exists because several dependencies build C from source and need
 specific host tooling: `m4` and `file` for `gmp-mpfr-sys` (via `rug` ←
