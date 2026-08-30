@@ -8,7 +8,7 @@ Two module families live here:
 | Family | Crates | What it is |
 | --- | --- | --- |
 | `modules/amm` | `fedimint-amm-{common,server,client,tests}` | A constant-product AMM (Uniswap V2 as reference implementation) trading between the federation's `AmountUnit`s. See [`modules/amm/fedimint-amm-spec.md`](modules/amm/fedimint-amm-spec.md). |
-| `modules/usdt` | `fedimint-usdt-{common,server,client,tests}` | USDT-on-EVM peg-in/peg-out via threshold ECDSA and ERC-4337. Lifted from the fork; consensus version 0.12, with deployed federations. |
+| `modules/usdt` | `fedimint-usdt-{common,server,client,tests}` | USDT-on-EVM peg-in/peg-out via threshold ECDSA and ERC-4337. Lifted from the fork at consensus version 0.12. |
 | `bin/fedimintd-experimint` | — | A `fedimintd` carrying the v2 core modules, `meta`, and both local modules. |
 
 ## Running a federation
@@ -97,6 +97,19 @@ here just `lnv2`, `meta` and `amm`. The three carrying the interesting topology
 are opt-in via `FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
 `FM_ENABLE_MODULE_USDT`. They are still *available* without those variables; the
 variables only decide what starts pre-selected.
+
+## Nothing here is deployed
+
+No federation runs these modules yet. That is load-bearing for how changes are
+made: consensus behaviour, wire encoding and DB layout can all still change
+freely, and dead consensus paths can be deleted rather than frozen for replay.
+
+The extraction brief this repo started from assumed the opposite — that `usdt`
+had live federations at consensus version 0.12 — and several rounds of work
+were scoped around that constraint. Findings parked as "not actionable without
+a version bump" during those rounds are actionable now. If a deployment does
+happen, this section is the first thing that needs updating, because a good
+deal of judgement downstream keys off it.
 
 ## The platform pin
 
