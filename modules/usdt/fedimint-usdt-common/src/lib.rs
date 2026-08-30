@@ -1238,8 +1238,8 @@ pub struct WithdrawFeeQuoteResponse {
 pub struct DepositFeeQuoteRequest;
 
 /// Response to the `deposit_fee_quote` endpoint, mirroring
-/// [`WithdrawFeeQuoteResponse`]: `fee` is the minimum fee a `UsdtInput::V0`
-/// claiming a credited deposit must offer right now; `valid_blocks` is how
+/// [`WithdrawFeeQuoteResponse`]: `fee` is the minimum fee a deposit claim
+/// ([`UsdtInput::DepositProofV0`]) must offer right now; `valid_blocks` is how
 /// many further guardian-observed EVM blocks the quote should be treated as
 /// valid for before re-querying (fee-vote-median-derived quotes can move as
 /// guardians' `FeeVote`s change), a fixed, non-consensus advisory hint
@@ -1772,12 +1772,29 @@ pub enum UsdtInput {
     /// account (e.g. an exchange's) verifies against a different storage key
     /// and yields a zero delta -- an attacker cannot credit funds they cannot
     /// also derive a `claim_pk` for. Only the newly-proven delta over the
-    /// account's existing high-water `credited` is minted, and core verifies
+    /// account's existing high-water `credited` is credited, and core verifies
     /// the fedimint transaction is signed by `InputMeta.pub_key` = `claim_pk`,
     /// so only the depositor can spend it.
+    ///
+    /// `fee` (in the same [`UsdtAmount`] unit, mirroring [`UsdtInputV0::fee`])
+    /// compensates the federation for the on-chain gas it spends deploying and
+    /// sweeping this deposit account ([`SWEEP_GAS_UNITS`]). The client fetches
+    /// the current quote and supplies it here; the server rejects the input
+    /// (`UsdtInputError::DepositFeeInsufficient`) if `fee` is below its own
+    /// fresh fee-vote-median-derived [`deposit_fee_quote`] -- client-supplies-
+    /// server-validates, so a quote change between fetch and processing
+    /// rejects loudly instead of silently underfunding the transaction -- and
+    /// rejects it (`UsdtInputError::FeeExceedsAmount`) if the newly-proven
+    /// delta does not strictly exceed `fee`. The e-cash minted to the
+    /// depositor is `delta - fee`, while the fee's USDT stays
+    /// credited-but-unissued backing that the sweep pulls into the pool,
+    /// where it becomes withdrawable federation fee revenue
+    /// (`PoolState.accrued_fees`, drawn down by guardian `WithdrawFees`
+    /// payouts).
     DepositProofV0 {
         claim_pk: secp256k1::PublicKey,
         proof: DepositProof,
+        fee: UsdtAmount,
     },
     #[encodable_default]
     Default { variant: u64, bytes: Vec<u8> },
@@ -2412,6 +2429,28 @@ mod tests {
         let bytes = input.consensus_encode_to_vec();
         let decoded = UsdtInput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
             .expect("UsdtInput::V0 should decode what it just encoded");
+
+        assert_eq!(input, decoded);
+    }
+
+    #[test]
+    fn test_usdt_input_deposit_proof_v0_round_trips_through_consensus_encoding() {
+        let claim_pk = secp256k1::SecretKey::from_slice(&[6u8; 32])
+            .unwrap()
+            .public_key(secp256k1::SECP256K1);
+        let input = UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof: DepositProof {
+                block_number: 19_123_456,
+                header_rlp: vec![0xf9, 0x02, 0x00],
+                account_proof: vec![vec![0x01, 0x02]],
+                storage_proof: vec![vec![0xaa]],
+            },
+            fee: UsdtAmount(2_880_000),
+        };
+        let bytes = input.consensus_encode_to_vec();
+        let decoded = UsdtInput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+            .expect("UsdtInput::DepositProofV0 should decode what it just encoded");
 
         assert_eq!(input, decoded);
     }

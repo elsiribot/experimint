@@ -2646,8 +2646,14 @@ impl ServerModule for Usdt {
                     pub_key: refund.refund_pubkey,
                 });
             }
-            UsdtInput::DepositProofV0 { claim_pk, proof } => {
-                return self.process_deposit_proof(dbtx, claim_pk, proof).await;
+            UsdtInput::DepositProofV0 {
+                claim_pk,
+                proof,
+                fee,
+            } => {
+                return self
+                    .process_deposit_proof(dbtx, claim_pk, proof, *fee)
+                    .await;
             }
             UsdtInput::Default { .. } => {
                 return Err(UsdtInputError::UnknownDepositAccount); // unknown/default variant
@@ -4585,26 +4591,38 @@ impl Usdt {
     /// fired here, so the on-chain USDT is deploy-and-swept into the pool
     /// exactly as before.
     ///
-    /// Unlike [`UsdtInput::V0`], no deposit fee is charged here: the input
-    /// carries no `fee` field and its `delta` is minted in full (paired 1:1
-    /// with the transaction's mint output). The deploy+sweep gas is fronted by
-    /// the broadcaster EOA out of band, as it already is for the
-    /// observation-driven path (see [`derive_deposit_account`]'s note on
-    /// broadcaster funding never being reimbursed on-chain).
+    /// A deposit `fee` is charged, mirroring the legacy [`UsdtInput::V0`]
+    /// claim path exactly (this is what compensates the federation for the
+    /// [`fedimint_usdt_common::SWEEP_GAS_UNITS`] of gas the broadcaster
+    /// fronts for this account's deploy+sweep -- see the fee-recovery loop in
+    /// [`UsdtInput::DepositProofV0`]'s doc comment): the client-supplied
+    /// `fee` must clear the federation's fresh fee-vote-median-derived
+    /// [`deposit_fee_quote`] ([`UsdtInputError::DepositFeeInsufficient`]
+    /// otherwise), the newly-proven `delta` must strictly exceed it
+    /// ([`UsdtInputError::FeeExceedsAmount`] otherwise), `claimed` advances
+    /// by the FULL `delta` (the fee's USDT stays credited-but-unissued until
+    /// the sweep pools it), `record.fees_accrued` accrues the fee (credited
+    /// into `PoolState.accrued_fees` when the sweep confirms, see
+    /// [`Usdt::apply_user_op_confirmed`]'s `DeployAndSweep` arm), and the
+    /// returned `InputMeta` declares the input GROSS (`amounts: delta, fees:
+    /// fee`) so the client's NET `delta - fee` mint output balances.
     ///
     /// # Determinism (consensus-critical)
     ///
-    /// A pure function of `(claim_pk, proof, prior consensus DB state,
+    /// A pure function of `(claim_pk, proof, fee, prior consensus DB state,
     /// config)`: `derive_deposit_account` and `verify_deposit_proof` are pure
     /// (keccak/RLP/trie-walk only -- no RPC, no wall-clock, no `our_peer_id`,
-    /// no floats), and the only consensus reads are the block-hash ring anchor
-    /// and this account's [`DepositRecord`]. Every guardian computes the
-    /// identical `Ok`/`Err` and the identical `DepositRecordKey` write.
+    /// no floats), and the only consensus reads are the block-hash ring
+    /// anchor, the fee-vote median (`Usdt::fee_vote_median`, itself a pure
+    /// consensus-DB read), and this account's [`DepositRecord`]. Every
+    /// guardian computes the identical `Ok`/`Err` and the identical
+    /// `DepositRecordKey` write.
     async fn process_deposit_proof(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
         claim_pk: &secp256k1::PublicKey,
         proof: &fedimint_usdt_common::DepositProof,
+        fee: UsdtAmount,
     ) -> Result<InputMeta, UsdtInputError> {
         // The account this proof must be for is derived from `claim_pk`; this
         // IS the claim binding (no separate check needed -- an unrelated
@@ -4661,17 +4679,61 @@ impl Usdt {
             return Err(UsdtInputError::DepositProofStale { proven, credited });
         }
 
+        // Deposit fee gates, mirroring the legacy `UsdtInput::V0` arm's
+        // `median`/`quote` handling exactly: an absent median (no fee vote
+        // has landed yet) or an overflowing quote computation are distinct,
+        // explicit rejections rather than being folded into
+        // `DepositFeeInsufficient` via an effectively-infinite sentinel
+        // quote. The client supplies `fee` (fetched from the quote endpoint)
+        // and the server validates it against ITS OWN fresh quote, so a
+        // quote change between fetch and processing rejects loudly instead
+        // of silently underfunding the federation.
+        let median = self
+            .fee_vote_median(dbtx)
+            .await
+            .ok_or(UsdtInputError::NoFeeQuoteAvailable)?;
+        let quote = deposit_fee_quote(&median).ok_or(UsdtInputError::FeeQuoteOverflow)?;
+        if fee.0 < quote.0 {
+            return Err(UsdtInputError::DepositFeeInsufficient {
+                quote,
+                offered: fee,
+            });
+        }
+        if delta <= fee.0 {
+            return Err(UsdtInputError::FeeExceedsAmount {
+                amount: UsdtAmount(delta),
+                fee,
+            });
+        }
+
         // Advance the monotonic high-water `credited` to the proven balance
-        // AND advance `claimed` by the minted delta (`claimed <= credited`
-        // stays invariant, keeping `audit` conservative and the `V0` over-claim
-        // guard tight against re-minting this same value).
+        // AND advance `claimed` by the FULL delta (`claimed <= credited`
+        // stays invariant, keeping `audit` conservative and the over-claim
+        // guard tight against re-minting this same value). `claimed`
+        // deliberately advances by `delta`, not `delta - fee`: the fee's
+        // USDT remains part of this deposit's credited-but-unissued balance
+        // until the sweep pulls the whole thing into the pool, at which
+        // point it becomes federation fee revenue (see `audit`'s doc
+        // comment and the legacy `V0` arm's identical bookkeeping).
         record.credited = proven;
         record.claimed = UsdtAmount(record.claimed.0.saturating_add(delta));
         record.last_observed_block = proof.block_number;
+
+        // Accrue the deposit fee onto this account's record. It is credited
+        // into `PoolState.accrued_fees` (and reset) only when the sweep
+        // confirms (see `apply_user_op_confirmed`'s DeployAndSweep arm), so
+        // a deposit fee becomes withdrawable revenue only once its USDT is
+        // physically pooled.
+        record.fees_accrued = UsdtAmount(record.fees_accrued.0.saturating_add(fee.0));
         dbtx.insert_entry(&DepositRecordKey(account), &record).await;
 
         // Same deterministic sweep trigger the observation path fires on
         // credit: enqueue the deploy-and-sweep `UserOp` for this account.
+        // The dust gate inside (`remainder <= deposit_fee_quote`) stays
+        // consistent with what was just charged: `delta > fee >= quote` was
+        // enforced above against the SAME median this trigger prices from
+        // (same ordered transaction, same consensus DB), so a freshly
+        // fee-paying credit always clears the gate.
         self.maybe_trigger_sweep(dbtx, account).await;
 
         info!(
@@ -4679,17 +4741,19 @@ impl Usdt {
             account = %account,
             proven = proven.0,
             delta,
+            fee = fee.0,
             block = proof.block_number,
-            "deposit credited from verified proof; delta minted to depositor"
+            "deposit credited from verified proof; delta minted net of the deposit fee"
         );
 
-        // The delta funds `USDT_UNIT` value into the transaction, which the
-        // client pairs 1:1 with a mint output (deposit + claim atomic). No
-        // fee: `fees` is `ZERO`.
+        // The delta funds `USDT_UNIT` value into the transaction GROSS
+        // (`amounts: delta, fees: fee`), which the client pairs with a NET
+        // `delta - fee` mint output (deposit + claim atomic) -- mirroring
+        // the legacy `V0` arm's gross/net split so the transaction balances.
         Ok(InputMeta {
             amount: TransactionItemAmounts {
                 amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(UsdtAmount(delta))),
-                fees: Amounts::ZERO,
+                fees: Amounts::new_custom(USDT_UNIT, usdt_amount(fee)),
             },
             pub_key: *claim_pk,
         })
@@ -10947,11 +11011,13 @@ mod tests {
 
     /// Happy path: a proof of a genuinely-derived deposit account's on-chain
     /// balance, anchored in the ring, credits the newly-proven delta as
-    /// spendable e-cash, advances the monotonic high-water `credited` to the
-    /// proven balance, and advances `claimed` by the same delta (so the minted
-    /// value cannot be re-claimed). A resubmission of the same proof is
-    /// rejected (delta 0), while a later proof of a HIGHER balance credits
-    /// only the additional delta.
+    /// spendable e-cash (declared GROSS, with the deposit fee as `fees`),
+    /// advances the monotonic high-water `credited` to the proven balance,
+    /// advances `claimed` by the same delta (so the minted value cannot be
+    /// re-claimed), and accrues EXACTLY the fee onto `record.fees_accrued`.
+    /// A resubmission of the same proof is rejected (delta 0), while a later
+    /// proof of a HIGHER balance credits only the additional delta (accruing
+    /// a second fee).
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn deposit_proof_input_credits_delta_and_sets_high_water() {
@@ -10960,6 +11026,11 @@ mod tests {
         let claim_pk = test_pubkey(0x71);
         let account = derived_account(&module, &claim_pk);
         let usdt_contract = module.cfg.consensus.usdt_contract;
+
+        // A `FeeVote` median must exist for the proof path to quote a deposit
+        // fee (mirroring the legacy claim path's requirement).
+        seed_fee_votes(db, 4, sample_fee_vote()).await;
+        let fee = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
 
         // First proof: 500 USDT (in 1e-6 units) at block 100.
         let (proof1, hash1) = synthetic_deposit_proof(usdt_contract, account, 500_000_000, 100);
@@ -10976,6 +11047,7 @@ mod tests {
                 &UsdtInput::DepositProofV0 {
                     claim_pk,
                     proof: proof1.clone(),
+                    fee,
                 },
                 test_in_point(),
             )
@@ -10984,12 +11056,13 @@ mod tests {
         assert_eq!(
             meta.amount.amounts,
             Amounts::new_custom(USDT_UNIT, Amount::from_msats(500_000_000)),
-            "the full newly-proven delta funds USDT_UNIT value (paired 1:1 with a mint output)"
+            "amounts is the FULL/gross newly-proven delta, mirroring the legacy claim path's \
+             gross declaration -- FundingVerifier nets the separate `fees` pool"
         );
         assert_eq!(
             meta.amount.fees,
-            Amounts::ZERO,
-            "deposit-by-proof charges no fee"
+            Amounts::new_custom(USDT_UNIT, Amount::from_msats(fee.0)),
+            "the deposit fee is declared as the input's fees"
         );
         assert_eq!(
             meta.pub_key, claim_pk,
@@ -11011,7 +11084,12 @@ mod tests {
         assert_eq!(
             record.claimed,
             UsdtAmount(500_000_000),
-            "claimed advanced by the minted delta"
+            "claimed advanced by the FULL delta (the fee stays credited-but-unissued until the \
+             sweep pools it)"
+        );
+        assert_eq!(
+            record.fees_accrued, fee,
+            "exactly the charged fee accrues onto the record"
         );
         assert_eq!(record.last_observed_block, 100);
 
@@ -11023,6 +11101,7 @@ mod tests {
                 &UsdtInput::DepositProofV0 {
                     claim_pk,
                     proof: proof1,
+                    fee,
                 },
                 test_in_point(),
             )
@@ -11052,6 +11131,7 @@ mod tests {
                 &UsdtInput::DepositProofV0 {
                     claim_pk,
                     proof: proof2,
+                    fee,
                 },
                 test_in_point(),
             )
@@ -11060,7 +11140,7 @@ mod tests {
         assert_eq!(
             meta.amount.amounts,
             Amounts::new_custom(USDT_UNIT, Amount::from_msats(300_000_000)),
-            "only the 300M delta over the 500M high-water is minted"
+            "only the 300M delta over the 500M high-water is credited"
         );
         dbtx.commit_tx().await;
 
@@ -11072,7 +11152,327 @@ mod tests {
             .expect("record still exists");
         assert_eq!(record.credited, UsdtAmount(800_000_000));
         assert_eq!(record.claimed, UsdtAmount(800_000_000));
+        assert_eq!(
+            record.fees_accrued,
+            UsdtAmount(fee.0 * 2),
+            "each credit accrues its own fee"
+        );
         assert_eq!(record.last_observed_block, 110);
+    }
+
+    /// A deposit proof whose `fee` is below the federation's fresh
+    /// fee-vote-median-derived quote must be rejected
+    /// (`DepositFeeInsufficient`), crediting nothing -- the proof path is
+    /// fee-gated exactly like the legacy claim path (the whole point of
+    /// charging on this path: every real deposit compensates the
+    /// federation's deploy+sweep gas).
+    #[tokio::test]
+    async fn deposit_proof_input_rejects_fee_below_quote() {
+        let module = test_module_with_block_count(4, 0).await;
+        let db = module.db_for_test();
+        let claim_pk = test_pubkey(0x76);
+        let account = derived_account(&module, &claim_pk);
+
+        seed_fee_votes(db, 4, sample_fee_vote()).await;
+        let quote = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
+
+        let (proof, hash) = synthetic_deposit_proof(
+            module.cfg.consensus.usdt_contract,
+            account,
+            500_000_000,
+            100,
+        );
+        {
+            let mut dbtx = db.begin_transaction().await;
+            write_block_hash_ring(&mut dbtx.to_ref_nc(), 100, hash).await;
+            dbtx.commit_tx().await;
+        }
+
+        let mut dbtx = db.begin_transaction().await;
+        let err = module
+            .process_input(
+                &mut dbtx.to_ref_nc(),
+                &UsdtInput::DepositProofV0 {
+                    claim_pk,
+                    proof,
+                    fee: UsdtAmount(quote.0 - 1),
+                },
+                test_in_point(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            UsdtInputError::DepositFeeInsufficient {
+                quote,
+                offered: UsdtAmount(quote.0 - 1),
+            }
+        );
+
+        // The rejected input must not have created/credited the record.
+        assert!(
+            dbtx.to_ref_nc()
+                .get_value(&DepositRecordKey(account))
+                .await
+                .is_none(),
+            "a fee-insufficient proof must credit nothing"
+        );
+    }
+
+    /// A deposit proof whose newly-proven delta does not STRICTLY exceed its
+    /// `fee` must be rejected (`FeeExceedsAmount`) -- the deposit would fund
+    /// nothing (or negative value) after the fee, so it must not silently
+    /// mint zero e-cash. Exercises the `delta == fee` boundary.
+    #[tokio::test]
+    async fn deposit_proof_input_rejects_delta_not_exceeding_fee() {
+        let module = test_module_with_block_count(4, 0).await;
+        let db = module.db_for_test();
+        let claim_pk = test_pubkey(0x77);
+        let account = derived_account(&module, &claim_pk);
+
+        seed_fee_votes(db, 4, sample_fee_vote()).await;
+        let quote = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
+
+        // The on-chain balance (== delta, fresh account) is exactly the fee.
+        let (proof, hash) =
+            synthetic_deposit_proof(module.cfg.consensus.usdt_contract, account, quote.0, 100);
+        {
+            let mut dbtx = db.begin_transaction().await;
+            write_block_hash_ring(&mut dbtx.to_ref_nc(), 100, hash).await;
+            dbtx.commit_tx().await;
+        }
+
+        let mut dbtx = db.begin_transaction().await;
+        let err = module
+            .process_input(
+                &mut dbtx.to_ref_nc(),
+                &UsdtInput::DepositProofV0 {
+                    claim_pk,
+                    proof,
+                    fee: quote,
+                },
+                test_in_point(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            UsdtInputError::FeeExceedsAmount {
+                amount: quote,
+                fee: quote,
+            }
+        );
+
+        assert!(
+            dbtx.to_ref_nc()
+                .get_value(&DepositRecordKey(account))
+                .await
+                .is_none(),
+            "an uneconomical proof must credit nothing"
+        );
+    }
+
+    /// With no `FeeVote` median at all, a deposit proof is rejected with the
+    /// distinct, explicit `NoFeeQuoteAvailable` (mirroring the legacy claim
+    /// path and `process_output`) rather than being folded into
+    /// `DepositFeeInsufficient` via a sentinel quote.
+    #[tokio::test]
+    async fn deposit_proof_input_rejects_when_no_fee_median_exists() {
+        let module = test_module_with_block_count(4, 0).await;
+        let db = module.db_for_test();
+        let claim_pk = test_pubkey(0x78);
+        let account = derived_account(&module, &claim_pk);
+
+        // Deliberately no `seed_fee_votes` call: no median exists yet.
+        let (proof, hash) = synthetic_deposit_proof(
+            module.cfg.consensus.usdt_contract,
+            account,
+            500_000_000,
+            100,
+        );
+        {
+            let mut dbtx = db.begin_transaction().await;
+            write_block_hash_ring(&mut dbtx.to_ref_nc(), 100, hash).await;
+            dbtx.commit_tx().await;
+        }
+
+        let mut dbtx = db.begin_transaction().await;
+        let err = module
+            .process_input(
+                &mut dbtx.to_ref_nc(),
+                &UsdtInput::DepositProofV0 {
+                    claim_pk,
+                    proof,
+                    fee: UsdtAmount(u64::MAX - 1),
+                },
+                test_in_point(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, UsdtInputError::NoFeeQuoteAvailable);
+
+        assert!(
+            dbtx.to_ref_nc()
+                .get_value(&DepositRecordKey(account))
+                .await
+                .is_none(),
+            "no credit may happen while deposits cannot be fee-quoted"
+        );
+    }
+
+    /// **The economic loop this module's fee model rests on**, end to end
+    /// through the REAL code paths: a fee-paying deposit proof accrues its
+    /// fee onto `DepositRecord.fees_accrued` and auto-enqueues the
+    /// deploy-and-sweep op (`maybe_trigger_sweep`, fired inside
+    /// `process_input`); when that sweep CONFIRMS
+    /// (`apply_user_op_confirmed`'s `DeployAndSweep` arm), the accrued fee
+    /// moves into `PoolState.accrued_fees` (and the record's counter
+    /// resets); and a 2f+1 `WithdrawFeesVote` threshold for exactly that
+    /// amount then enqueues a `WithdrawFees` payout op -- proving the fee
+    /// charged on the proof path really is withdrawable guardian revenue,
+    /// not a stranded counter.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn deposit_proof_fee_reaches_pool_accrued_fees_and_is_withdrawable() {
+        let module = test_module_with_block_count(4, 0).await;
+        let db = module.db_for_test();
+        let claim_pk = test_pubkey(0x79);
+        let account = derived_account(&module, &claim_pk);
+
+        seed_block_count_votes(db, 4, 10).await;
+        seed_fee_votes(db, 4, sample_fee_vote()).await;
+        let fee = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
+        let proven = UsdtAmount(500_000_000);
+
+        // 1. Credit via a fee-paying proof; the sweep trigger fires inside
+        //    `process_input` (delta > fee >= quote clears the dust gate
+        //    against the same median, so the sweep MUST be enqueued).
+        let (proof, hash) =
+            synthetic_deposit_proof(module.cfg.consensus.usdt_contract, account, proven.0, 100);
+        {
+            let mut dbtx = db.begin_transaction().await;
+            write_block_hash_ring(&mut dbtx.to_ref_nc(), 100, hash).await;
+            dbtx.commit_tx().await;
+        }
+        {
+            let mut dbtx = db.begin_transaction().await;
+            module
+                .process_input(
+                    &mut dbtx.to_ref_nc(),
+                    &UsdtInput::DepositProofV0 {
+                        claim_pk,
+                        proof,
+                        fee,
+                    },
+                    test_in_point(),
+                )
+                .await
+                .expect("fee-paying proof must credit");
+            dbtx.commit_tx().await;
+        }
+        let record = db
+            .begin_transaction_nc()
+            .await
+            .get_value(&DepositRecordKey(account))
+            .await
+            .expect("credit created the record");
+        assert_eq!(record.fees_accrued, fee);
+        let (op_hash, op) = {
+            let mut dbtx = db.begin_transaction_nc().await;
+            let (hash, op) = single_pending_deploy_and_sweep(&mut dbtx.to_ref_nc(), account).await;
+            (hash, op)
+        };
+        assert_eq!(
+            crate::user_op::decode_transfer_amount(&op).expect("op call_data decodes"),
+            proven,
+            "the auto-triggered sweep moves the FULL credited balance (fee included)"
+        );
+
+        // 2. Simulate the federation-signed sweep confirming on-chain:
+        //    promote the pending op to Submitted (as the MPC-completion path
+        //    would) and apply a threshold-agreed confirmation. The accrued
+        //    fee moves into PoolState.accrued_fees and the record resets.
+        {
+            let mut dbtx = db.begin_transaction().await;
+            dbtx.remove_entry(&PendingUserOpKey(op_hash)).await;
+            dbtx.insert_new_entry(
+                &SubmittedUserOpKey(op_hash),
+                &SubmittedUserOp {
+                    signed: fedimint_usdt_common::user_op::SignedUserOp {
+                        unsigned: op,
+                        signature: vec![0x22; 65],
+                    },
+                    purpose: UserOpPurpose::DeployAndSweep { source: account },
+                    submitted_block: 1,
+                    superseded: false,
+                },
+            )
+            .await;
+            module
+                .apply_user_op_confirmed(
+                    &mut dbtx.to_ref_nc(),
+                    op_hash,
+                    &UserOpConfirmedObservation {
+                        success: true,
+                        block: 10,
+                        block_hash: [0u8; 32],
+                        swept: proven,
+                        actual_gas_cost_wei: UsdtAmount(0),
+                    },
+                )
+                .await;
+            dbtx.commit_tx().await;
+        }
+        let pool = db
+            .begin_transaction_nc()
+            .await
+            .get_value(&PoolStateKey)
+            .await
+            .expect("sweep confirmation created the pool state");
+        assert_eq!(pool.balance, proven, "the full deposit is pooled");
+        assert_eq!(
+            pool.accrued_fees, fee,
+            "the proof path's deposit fee becomes realized pool fee revenue on sweep confirm"
+        );
+        let record = db
+            .begin_transaction_nc()
+            .await
+            .get_value(&DepositRecordKey(account))
+            .await
+            .expect("record still exists");
+        assert_eq!(
+            record.fees_accrued,
+            UsdtAmount(0),
+            "the per-record counter resets once credited into the pool"
+        );
+
+        // 3. A 2f+1 threshold of guardians voting to withdraw exactly the
+        //    accrued fee enqueues a WithdrawFees payout op -- the revenue is
+        //    genuinely withdrawable.
+        let recipient = EvmAddress([0xcd; 20]);
+        let mut dbtx = db.begin_transaction().await;
+        for p in [0u16, 1, 2] {
+            module
+                .process_consensus_item(
+                    &mut dbtx.to_ref_nc(),
+                    UsdtConsensusItem::WithdrawFeesVote(fedimint_usdt_common::WithdrawFeesVote {
+                        recipient,
+                        amount: fee,
+                    }),
+                    PeerId::from(p),
+                )
+                .await
+                .unwrap();
+        }
+        let op = pending_withdraw_fees(&mut dbtx.to_ref_nc())
+            .await
+            .expect("a threshold vote for the accrued fee must enqueue a WithdrawFees op");
+        assert!(matches!(
+            op.purpose,
+            UserOpPurpose::WithdrawFees { recipient: r, amount: a }
+                if r == recipient && a == fee
+        ));
+        dbtx.commit_tx().await;
     }
 
     /// A proof for a block the federation has not anchored in its block-hash
@@ -11093,7 +11493,12 @@ mod tests {
         let err = module
             .process_input(
                 &mut dbtx.to_ref_nc(),
-                &UsdtInput::DepositProofV0 { claim_pk, proof },
+                &UsdtInput::DepositProofV0 {
+                    claim_pk,
+                    proof,
+                    // Rejected at the anchor lookup, BEFORE fee validation.
+                    fee: UsdtAmount(0),
+                },
                 test_in_point(),
             )
             .await
@@ -11129,7 +11534,12 @@ mod tests {
         let err = module
             .process_input(
                 &mut dbtx.to_ref_nc(),
-                &UsdtInput::DepositProofV0 { claim_pk, proof },
+                &UsdtInput::DepositProofV0 {
+                    claim_pk,
+                    proof,
+                    // Rejected at verification, BEFORE fee validation.
+                    fee: UsdtAmount(0),
+                },
                 test_in_point(),
             )
             .await
@@ -11178,7 +11588,12 @@ mod tests {
         let err = module
             .process_input(
                 &mut dbtx.to_ref_nc(),
-                &UsdtInput::DepositProofV0 { claim_pk, proof },
+                &UsdtInput::DepositProofV0 {
+                    claim_pk,
+                    proof,
+                    // Rejected on the zero delta, BEFORE fee validation.
+                    fee: UsdtAmount(0),
+                },
                 test_in_point(),
             )
             .await
@@ -11209,6 +11624,11 @@ mod tests {
         let account = derived_account(&module, &claim_pk);
         let usdt_contract = module.cfg.consensus.usdt_contract;
 
+        // The proof path now charges a deposit fee, so a fee median must
+        // exist for the credit to be accepted at all.
+        seed_fee_votes(db, 4, sample_fee_vote()).await;
+        let fee = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
+
         // Anchor and submit a proof of a 500 USDT (1e-6 units) on-chain balance.
         let (proof, hash) = synthetic_deposit_proof(usdt_contract, account, 500_000_000, 100);
         {
@@ -11224,6 +11644,7 @@ mod tests {
                 &UsdtInput::DepositProofV0 {
                     claim_pk,
                     proof: proof.clone(),
+                    fee,
                 },
                 test_in_point(),
             )
@@ -11232,7 +11653,8 @@ mod tests {
         assert_eq!(
             meta.amount.amounts,
             Amounts::new_custom(USDT_UNIT, Amount::from_msats(500_000_000)),
-            "the proof mints the full delta"
+            "the proof credits the full delta (gross; the fee is netted by the client's mint \
+             output)"
         );
         dbtx.commit_tx().await;
 
@@ -11257,9 +11679,9 @@ mod tests {
         // Now attempt a legacy V0 claim on the SAME account. `available =
         // credited - claimed` must be 0: the proof already minted this value,
         // so there is nothing left for a V0 input to re-mint. Even a
-        // 1-unit claim must be rejected as insufficient credit; no fee vote
-        // is seeded because the `InsufficientCredit` check runs before the
-        // fee-quote lookup in `process_input`, so it cannot mask this guard.
+        // 1-unit claim must be rejected as insufficient credit; the
+        // `InsufficientCredit` check runs before the fee-quote lookup in
+        // `process_input`, so the seeded median cannot mask this guard.
         let mut dbtx = db.begin_transaction().await;
         let err = module
             .process_input(

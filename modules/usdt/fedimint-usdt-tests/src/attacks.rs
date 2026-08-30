@@ -177,7 +177,15 @@ pub fn attack_forged_balance(
         name: "forged-balance",
         description: "proof claims a larger on-chain balance than the anchored state root commits \
                       to (anchor mismatch)",
-        input: UsdtInput::DepositProofV0 { claim_pk, proof },
+        input: UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof,
+            // A zero fee is fine here: every proof attack below is rejected
+            // BEFORE `process_deposit_proof`'s fee validation (anchor/
+            // verification/stale-delta checks all precede it), so the fee
+            // field never gates the expected rejection.
+            fee: UsdtAmount(0),
+        },
         declared: forged,
         // Rely on `block` being anchored to its genuine hash (!= the forged
         // hash) -> verification fails at the block-hash check.
@@ -208,7 +216,15 @@ pub fn attack_wrong_account(
     Attack {
         name: "wrong-account",
         description: "genuine proof of account A's balance submitted with claim_pk for account B",
-        input: UsdtInput::DepositProofV0 { claim_pk, proof },
+        input: UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof,
+            // A zero fee is fine here: every proof attack below is rejected
+            // BEFORE `process_deposit_proof`'s fee validation (anchor/
+            // verification/stale-delta checks all precede it), so the fee
+            // field never gates the expected rejection.
+            fee: UsdtAmount(0),
+        },
         declared: balance,
         hermetic_anchor: Some((block, hash)),
         expected: ExpectedRejection::Stale,
@@ -231,7 +247,15 @@ pub fn attack_unanchored(
     Attack {
         name: "unanchored-block",
         description: "proof targets a block that is not in the guardians' block-hash ring",
-        input: UsdtInput::DepositProofV0 { claim_pk, proof },
+        input: UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof,
+            // A zero fee is fine here: every proof attack below is rejected
+            // BEFORE `process_deposit_proof`'s fee validation (anchor/
+            // verification/stale-delta checks all precede it), so the fee
+            // field never gates the expected rejection.
+            fee: UsdtAmount(0),
+        },
         declared: balance,
         hermetic_anchor: None,
         expected: ExpectedRejection::NotAnchored,
@@ -257,7 +281,15 @@ pub fn attack_forged_header(
     Attack {
         name: "forged-header",
         description: "header_rlp tampered so keccak(header) != the anchored ring hash",
-        input: UsdtInput::DepositProofV0 { claim_pk, proof },
+        input: UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof,
+            // A zero fee is fine here: every proof attack below is rejected
+            // BEFORE `process_deposit_proof`'s fee validation (anchor/
+            // verification/stale-delta checks all precede it), so the fee
+            // field never gates the expected rejection.
+            fee: UsdtAmount(0),
+        },
         declared: balance,
         // Anchor the ORIGINAL hash so the tampered header specifically fails the
         // block-hash check.
@@ -287,7 +319,15 @@ pub fn attack_oversize(
     Attack {
         name: "oversize",
         description: "proof exceeds MAX_DEPOSIT_PROOF_BYTES (rejected before verification)",
-        input: UsdtInput::DepositProofV0 { claim_pk, proof },
+        input: UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof,
+            // A zero fee is fine here: every proof attack below is rejected
+            // BEFORE `process_deposit_proof`'s fee validation (anchor/
+            // verification/stale-delta checks all precede it), so the fee
+            // field never gates the expected rejection.
+            fee: UsdtAmount(0),
+        },
         declared: balance,
         hermetic_anchor: None,
         expected: ExpectedRejection::Invalid,
@@ -326,7 +366,15 @@ pub fn attack_replay(claim_pk: PublicKey, proof: DepositProof, credited: UsdtAmo
     Attack {
         name: "replay",
         description: "resubmit an already-credited proof (delta 0)",
-        input: UsdtInput::DepositProofV0 { claim_pk, proof },
+        input: UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof,
+            // A zero fee is fine here: every proof attack below is rejected
+            // BEFORE `process_deposit_proof`'s fee validation (anchor/
+            // verification/stale-delta checks all precede it), so the fee
+            // field never gates the expected rejection.
+            fee: UsdtAmount(0),
+        },
         // A replay proves the same balance; the attacker declares it hoping to
         // double-credit. The server's delta is 0, so a breach would mint this.
         declared: credited,
@@ -354,7 +402,15 @@ pub fn attack_stale_growth(
     Attack {
         name: "stale-growth",
         description: "prove an older block with a smaller balance than the current high-water",
-        input: UsdtInput::DepositProofV0 { claim_pk, proof },
+        input: UsdtInput::DepositProofV0 {
+            claim_pk,
+            proof,
+            // A zero fee is fine here: every proof attack below is rejected
+            // BEFORE `process_deposit_proof`'s fee validation (anchor/
+            // verification/stale-delta checks all precede it), so the fee
+            // field never gates the expected rejection.
+            fee: UsdtAmount(0),
+        },
         // A high-water/monotonicity bug that re-credited the older proof would
         // mint exactly the (smaller) balance it proves.
         declared: smaller_balance,

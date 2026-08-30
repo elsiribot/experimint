@@ -255,9 +255,8 @@ async fn withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoin
     // gates `allocate_deposit` on it.
     common::await_usdt_ready(&usdt, Duration::from_secs(60)).await?;
 
-    // Deposit-by-proof charges NO fee (unlike the legacy observe-then-claim
-    // path): the full on-chain balance is credited AND minted in one
-    // transaction, so the on-chain deposit needs no fee margin.
+    // Deposit-by-proof charges the federation's live deposit fee, so the
+    // on-chain deposit below is padded by the live quote with margin.
     // `_claim_keypair` is unused because crediting is driven by seed-derivation
     // index (0) below, not the keypair object.
     let (_claim_keypair, deposit_account) = usdt.allocate_deposit().await?;
@@ -282,11 +281,26 @@ async fn withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoin
     //
     //    `min_net_deposit_amount` is the NET e-cash this test needs for the
     //    later withdrawal (`5_120_000 == 512 * 10_000`, 512-msat-aligned per the
-    //    Task-1/tests.rs convention). Deposit-by-proof mints the FULL balance
-    //    with no fee, so no funding margin is needed and `net_deposit_amount ==
-    //    deposit_amount`.
+    //    Task-1/tests.rs convention). Deposit-by-proof mints the balance NET of
+    //    the federation's live deposit fee (a real anvil-gas + $4000-feed
+    //    derived quote, not scriptable), so pad the on-chain deposit with 2x
+    //    the current quote as margin -- gas can only realistically fall over
+    //    the idle blocks that follow, so the double-quote pad comfortably
+    //    covers the fee actually charged at processing time.
     let min_net_deposit_amount = UsdtAmount(5_120_000);
-    let deposit_amount = min_net_deposit_amount;
+    let live_deposit_fee = {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(quote) = usdt.deposit_fee_quote().await {
+                break quote.fee;
+            }
+            if Instant::now() >= deadline {
+                bail!("deposit_fee_quote never became available before the deadline");
+            }
+            sleep(Duration::from_millis(300)).await;
+        }
+    };
+    let deposit_amount = UsdtAmount(min_net_deposit_amount.0 + 2 * live_deposit_fee.0);
     common::transfer_erc20_from_account_1(&anvil, stack.usdt, deposit_account, deposit_amount)
         .await
         .context("failed to fund the counterfactual deposit account with USDT")?;
@@ -296,8 +310,8 @@ async fn withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoin
     //    e2e anvil -- NO guardian `balanceOf` poll anywhere in the loop (the
     //    scanner is gone; crediting is proof-only). `allocate_deposit` handed out
     //    seed-derivation index 0, so `submit_deposit_proof(0)` re-derives the same
-    //    claim key/account and mints the full `deposit_amount` as `USDT_UNIT`
-    //    e-cash in one no-fee transaction.
+    //    claim key/account and mints `deposit_amount` net of the live deposit
+    //    fee as `USDT_UNIT` e-cash in one transaction.
     common::credit_deposit_via_anvil_proof(&usdt, &anvil, 0, Duration::from_secs(180)).await?;
     let claimed_deadline = Instant::now() + Duration::from_secs(30);
     let net_deposit_amount = loop {
@@ -319,9 +333,8 @@ async fn withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoin
     // 8. The automatic deploy-and-sweep pipeline (Phase 7) deploys the deposit
     //    account and sweeps it to the pool via a real MPC-signed UserOp -- poll to
     //    convergence on every guardian, exactly like `deploy_and_sweep_e2e.rs`. The
-    //    pool receives the FULL on-chain `deposit_amount`, which deposit-by-proof
-    //    credited AND minted in one no-fee transaction (so `net_deposit_amount ==
-    //    deposit_amount`).
+    //    pool receives the FULL on-chain `deposit_amount` (the deposit fee is an
+    //    accounting split within it, not a separate on-chain movement).
     for &peer in &peers {
         let deadline = Instant::now() + Duration::from_secs(600);
         loop {

@@ -19,11 +19,16 @@ enum Opts {
     DepositStatus { claim_pk: secp256k1::PublicKey },
     /// Fetch an on-chain balance proof for the deposit account at
     /// seed-derivation `index` and submit it, crediting AND minting the
-    /// newly-proven balance as USDT e-cash in one transaction
-    /// (deposit-by-proof). No claim step or deposit fee: the full proven delta
-    /// is minted. The client fetches `eth_getProof`/`eth_getBlockByNumber` from
-    /// `--evm-rpc-url` (or the client-configured/default endpoint), targeting
-    /// the federation's newest anchored confirmation-deep block.
+    /// newly-proven balance (net of the federation's deposit fee quote) as
+    /// USDT e-cash in one transaction (deposit-by-proof). The client fetches
+    /// `eth_getProof`/`eth_getBlockByNumber` from `--evm-rpc-url` (or the
+    /// client-configured/default endpoint), targeting the federation's newest
+    /// anchored confirmation-deep block.
+    ///
+    /// By default, refuses to submit if the federation's deposit fee quote
+    /// is more than 25% of the newly-proven delta (security finding 07) --
+    /// pass `--accept-high-fee` to proceed anyway, or `--max-deposit-fee` to
+    /// set an explicit hard cap instead of the default sanity guard.
     SubmitDepositProof {
         #[arg(long)]
         index: u64,
@@ -31,6 +36,16 @@ enum Opts {
         /// client-configured or built-in default endpoint for this call only).
         #[arg(long)]
         evm_rpc_url: Option<String>,
+        /// Refuse to submit if the federation's deposit fee quote exceeds
+        /// this many smallest-on-chain-USDT-units. A hard ceiling: unlike
+        /// the default sanity guard, `--accept-high-fee` cannot override it.
+        #[arg(long)]
+        max_deposit_fee: Option<u64>,
+        /// Bypass the default 25%-of-amount sanity guard when no
+        /// `--max-deposit-fee` is given. Has no effect if `--max-deposit-fee`
+        /// is set.
+        #[arg(long)]
+        accept_high_fee: bool,
     },
     /// Persist (or, with no URL, clear) the client's Ethereum JSON-RPC
     /// endpoint used by `submit-deposit-proof` when no per-call
@@ -208,10 +223,27 @@ pub(crate) async fn handle_cli_command(
             }))
         }
         Opts::DepositStatus { claim_pk } => json(usdt.deposit_status(claim_pk).await?),
-        Opts::SubmitDepositProof { index, evm_rpc_url } => {
+        Opts::SubmitDepositProof {
+            index,
+            evm_rpc_url,
+            max_deposit_fee,
+            accept_high_fee,
+        } => {
             let claim_keypair = usdt.claim_keypair_for_index(index);
             let account = usdt.deposit_address(&claim_keypair.public_key());
-            let operation_id = usdt.submit_deposit_proof(index, evm_rpc_url).await?;
+            // The security finding 07 fee-cap guard runs inside
+            // `submit_deposit_proof` (via `submit_prebuilt_deposit_proof`),
+            // BEFORE any e-cash is minted -- it needs the freshly fetched
+            // deposit-fee quote, which is only available once the submit
+            // flow fetches it internally.
+            let operation_id = usdt
+                .submit_deposit_proof(
+                    index,
+                    evm_rpc_url,
+                    max_deposit_fee.map(UsdtAmount),
+                    accept_high_fee,
+                )
+                .await?;
             json(serde_json::json!({
                 "index": index,
                 "claim_pk": claim_keypair.public_key(),
@@ -323,11 +355,15 @@ mod tests {
 
     #[test]
     fn parses_submit_deposit_proof() {
+        // Bare invocation: no explicit fee cap, sanity guard not bypassed --
+        // the security finding 07 default sanity guard applies.
         assert!(matches!(
             Opts::try_parse_from(["usdt", "submit-deposit-proof", "--index", "3"]).expect("parses"),
             Opts::SubmitDepositProof {
                 index: 3,
                 evm_rpc_url: None,
+                max_deposit_fee: None,
+                accept_high_fee: false,
             }
         ));
         assert!(matches!(
@@ -343,6 +379,44 @@ mod tests {
             Opts::SubmitDepositProof {
                 index: 3,
                 evm_rpc_url: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_submit_deposit_proof_with_fee_cap_flags() {
+        assert!(matches!(
+            Opts::try_parse_from([
+                "usdt",
+                "submit-deposit-proof",
+                "--index",
+                "3",
+                "--max-deposit-fee",
+                "1000",
+            ])
+            .expect("parses"),
+            Opts::SubmitDepositProof {
+                index: 3,
+                max_deposit_fee: Some(1000),
+                accept_high_fee: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Opts::try_parse_from([
+                "usdt",
+                "submit-deposit-proof",
+                "--index",
+                "3",
+                "--accept-high-fee",
+            ])
+            .expect("parses"),
+            Opts::SubmitDepositProof {
+                index: 3,
+                max_deposit_fee: None,
+                accept_high_fee: true,
+                ..
             }
         ));
     }

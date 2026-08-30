@@ -259,8 +259,10 @@ async fn deposit_account_is_deployed_and_swept_via_real_mpc_and_real_entrypoint(
         .context("failed to confirm EntryPoint.depositTo(deposit_account)")?;
 
     // 6. Fund the counterfactual deposit account with USDT ONLY (no ETH) -- the
-    //    whole point of the ERC-4337 model this module uses.
-    let deposit_amount = UsdtAmount(4_000_000);
+    //    whole point of the ERC-4337 model this module uses. Comfortably above
+    //    the live anvil-gas-derived deposit fee the proof path now charges (a
+    //    few USDT at anvil gas prices / the $3000 fallback).
+    let deposit_amount = UsdtAmount(40_000_000);
     common::transfer_erc20_from_account_1(&anvil, stack.usdt, deposit_account, deposit_amount)
         .await
         .context("failed to fund the counterfactual deposit account with USDT")?;
@@ -292,7 +294,8 @@ async fn deposit_account_is_deployed_and_swept_via_real_mpc_and_real_entrypoint(
     //    scanner is gone; crediting is proof-only). `allocate_deposit` above handed
     //    out seed-derivation index 0 (the first allocation), so
     //    `submit_deposit_proof(0, ..)` re-derives the SAME claim key/account and
-    //    credits + mints the proven balance in one no-fee transaction.
+    //    credits the proven balance (minting it net of the live deposit fee) in
+    //    one transaction.
     common::credit_deposit_via_anvil_proof(&usdt, &anvil, 0, Duration::from_secs(180)).await?;
 
     // The proof credited the account's high-water `credited` to the full
