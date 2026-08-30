@@ -206,6 +206,22 @@ pub trait IServerEvmRpc: std::fmt::Debug + Send + Sync + 'static {
         at_block: u64,
     ) -> anyhow::Result<UsdtAmount>;
 
+    /// The raw 32-byte EVM storage word at `key` of contract `addr`,
+    /// evaluated *as of* `at_block` (`eth_getStorageAt`). Used by the
+    /// guardian-local balances-slot consistency check
+    /// (`Usdt::spawn_balances_slot_checker`) to verify that the configured
+    /// token really keeps its balances mapping at
+    /// `fedimint_usdt_common::USDT_BALANCES_SLOT` -- the slot every
+    /// deposit-proof storage key is derived from -- by comparing this raw
+    /// read against the same block's `balanceOf`. Never part of a consensus
+    /// decision.
+    async fn get_storage_at(
+        &self,
+        addr: EvmAddress,
+        key: [u8; 32],
+        at_block: u64,
+    ) -> anyhow::Result<[u8; 32]>;
+
     /// The token's Tether-style `basisPointsRate` transfer-fee parameter, used
     /// by the startup solvency check ([`crate::UsdtInit::init`]). Returns `Err`
     /// if the token does not implement it (a standard ERC-20 — the
@@ -639,6 +655,21 @@ impl IServerEvmRpc for AlloyEvmRpc {
         })?;
 
         Ok(UsdtAmount(balance))
+    }
+
+    async fn get_storage_at(
+        &self,
+        addr: EvmAddress,
+        key: [u8; 32],
+        at_block: u64,
+    ) -> anyhow::Result<[u8; 32]> {
+        let word: U256 = self
+            .provider
+            .get_storage_at(Address::from(addr.0), U256::from_be_bytes(key))
+            .block_id(BlockId::number(at_block))
+            .await
+            .with_context(|| format!("eth_getStorageAt on {addr} at block {at_block}"))?;
+        Ok(word.to_be_bytes())
     }
 
     async fn get_erc20_basis_points_rate(&self, token: EvmAddress) -> anyhow::Result<u64> {

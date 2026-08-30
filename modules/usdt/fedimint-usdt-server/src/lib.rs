@@ -68,9 +68,10 @@ use fedimint_usdt_common::{
     UsdtModuleTypes, UsdtOutput, UsdtOutputError, UsdtOutputOutcome, UserOpStatus,
     UserOpStatusRequest, UserOpStatusResponse, WithdrawFeeQuoteRequest, WithdrawFeeQuoteResponse,
     WithdrawFeesRequest, WithdrawalStatus, WithdrawalStatusRequest, WithdrawalStatusResponse,
-    deposit_fee_quote, deposit_salt, derive_deposit_account, derive_pool_account, evm_address,
-    fee_vote_in_sane_range, is_dev_chain, pool_salt, signing_session_id, usdt_amount,
-    validate_usdt_params, wei_gas_cost_to_usdt, withdrawal_fee_quote,
+    balances_storage_key, deposit_fee_quote, deposit_salt, derive_deposit_account,
+    derive_pool_account, evm_address, fee_vote_in_sane_range, is_dev_chain, pool_salt,
+    signing_session_id, usdt_amount, validate_usdt_params, wei_gas_cost_to_usdt,
+    withdrawal_fee_quote,
 };
 use futures::{FutureExt as _, StreamExt as _};
 use rand::rngs::OsRng;
@@ -690,6 +691,83 @@ async fn rpc_deadline_with<T>(
         Ok(result) => result,
         Err(_elapsed) => Err(anyhow::anyhow!("RPC call timed out after {deadline:?}")),
     }
+}
+
+/// Outcome of one balances-slot consistency probe ([`probe_balances_slot`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BalancesSlotProbe {
+    /// `balanceOf(account)` and the `USDT_BALANCES_SLOT`-derived storage word
+    /// agree on a NONZERO balance: the configured token really keeps its
+    /// balances mapping at the hardcoded slot. Conclusive; checking can stop.
+    Verified {
+        account: fedimint_usdt_common::EvmAddress,
+    },
+    /// The two same-block reads disagree: the token's balances mapping is
+    /// NOT at `USDT_BALANCES_SLOT` (wrong token layout, or a proxy whose
+    /// storage lives elsewhere). Conclusive config error -- every deposit
+    /// proof would verify an empty slot and credit 0.
+    Mismatch {
+        account: fedimint_usdt_common::EvmAddress,
+        balance_of: u64,
+        slot_word: [u8; 32],
+    },
+    /// Every sampled account read zero through BOTH paths. A wrong slot also
+    /// reads zero, so nothing was proven either way; retry later.
+    Inconclusive,
+}
+
+/// The 32-byte storage word a canonical `mapping(address => uint256)`
+/// balances slot holds for a balance of `balance_of`: the value big-endian,
+/// left-padded to the full word. Pure; unit-tested below.
+fn balance_storage_word(balance_of: u64) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[24..].copy_from_slice(&balance_of.to_be_bytes());
+    word
+}
+
+/// One probe of the guardian-local balances-slot consistency check (see
+/// [`Usdt::spawn_balances_slot_checker`] for the footgun this guards
+/// against): for each sampled account, read the token's ERC-20
+/// `balanceOf(account)` AND the raw storage word at
+/// [`balances_storage_key`]`(account)` -- the exact key every deposit proof
+/// verifies against -- at the SAME block (so a transfer landing between the
+/// two reads cannot fake a mismatch), and compare.
+///
+/// Any disagreement is a conclusive [`BalancesSlotProbe::Mismatch`];
+/// agreement on a nonzero balance is a conclusive
+/// [`BalancesSlotProbe::Verified`]; agreement on zero for every sample
+/// proves nothing (a wrong slot also reads zero) and is
+/// [`BalancesSlotProbe::Inconclusive`]. Any RPC failure surfaces as `Err`
+/// ("cannot check"), which the caller MUST treat as retry-later, never as a
+/// failed check (fail-safe). Guardian-LOCAL: read-only RPC, no consensus
+/// interaction whatsoever.
+async fn probe_balances_slot(
+    evm_rpc: &DynServerEvmRpc,
+    usdt_contract: fedimint_usdt_common::EvmAddress,
+    sample_accounts: &[fedimint_usdt_common::EvmAddress],
+) -> anyhow::Result<BalancesSlotProbe> {
+    let block = rpc_deadline(evm_rpc.get_block_number()).await?;
+    for &account in sample_accounts {
+        let balance =
+            rpc_deadline(evm_rpc.get_erc20_balance(usdt_contract, account, block)).await?;
+        let slot_word = rpc_deadline(evm_rpc.get_storage_at(
+            usdt_contract,
+            balances_storage_key(&account),
+            block,
+        ))
+        .await?;
+        if slot_word != balance_storage_word(balance.0) {
+            return Ok(BalancesSlotProbe::Mismatch {
+                account,
+                balance_of: balance.0,
+                slot_word,
+            });
+        }
+        if balance.0 != 0 {
+            return Ok(BalancesSlotProbe::Verified { account });
+        }
+    }
+    Ok(BalancesSlotProbe::Inconclusive)
 }
 
 /// Startup chain-id sanity check (sec-15/17): confirms `evm_rpc` actually
@@ -3183,6 +3261,27 @@ impl Usdt {
             },
         );
 
+        // Guardian-local balances-slot consistency check (config footgun
+        // guard; see `spawn_balances_slot_checker`). Sampled accounts, in
+        // probe order: the token contract itself FIRST (canonical mainnet
+        // Tether keeps its un-issued supply in `balances[address(this)]`, so
+        // this is conclusive from day one there), then the federation's pool
+        // account (accumulates swept deposits, so it eventually goes nonzero
+        // on any chain).
+        Self::spawn_balances_slot_checker(
+            &task_group,
+            evm_rpc.clone(),
+            cfg.consensus.usdt_contract,
+            vec![
+                cfg.consensus.usdt_contract,
+                derive_pool_account(
+                    &cfg.consensus.group_public_key,
+                    cfg.consensus.account_factory,
+                    cfg.consensus.simple_account_impl,
+                ),
+            ],
+        );
+
         Usdt {
             cfg,
             evm_rpc,
@@ -3350,6 +3449,94 @@ impl Usdt {
     /// (unhealthy) value, so a guardian whose node is unreachable votes
     /// itself out of the readiness quorum rather than silently reporting
     /// stale readiness.
+    /// Spawns the guardian-local balances-slot consistency checker (config
+    /// footgun guard): `USDT_BALANCES_SLOT` is hardcoded to `2` (canonical
+    /// mainnet Tether), but `usdt_contract` is operator-supplied and
+    /// validated for shape only. Point a federation at a token/proxy whose
+    /// balances mapping is NOT at slot 2 and every deposit proof verifies an
+    /// empty storage slot, credits 0, and silently strands funds -- with no
+    /// error anywhere. This checker probes the live token (see
+    /// [`probe_balances_slot`]) and, on a CONFIRMED mismatch, logs a loud,
+    /// actionable `error!` every tick until fixed.
+    ///
+    /// FAIL-SAFE by construction: an unreachable/erroring RPC only `warn!`s
+    /// and retries -- "cannot check" is never treated as "check failed", and
+    /// nothing here gates startup, readiness, or any consensus write. Once
+    /// the slot is conclusively VERIFIED (both reads agree on a nonzero
+    /// balance) the task logs success and exits; while every sample reads
+    /// zero through both paths (e.g. a brand-new federation before its first
+    /// deposit) the probe is inconclusive and simply retries later.
+    fn spawn_balances_slot_checker(
+        task_group: &TaskGroup,
+        evm_rpc: DynServerEvmRpc,
+        usdt_contract: fedimint_usdt_common::EvmAddress,
+        sample_accounts: Vec<fedimint_usdt_common::EvmAddress>,
+    ) {
+        task_group.spawn_cancellable("usdt-balances-slot-checker", async move {
+            loop {
+                match probe_balances_slot(&evm_rpc, usdt_contract, &sample_accounts).await {
+                    Ok(BalancesSlotProbe::Verified { account }) => {
+                        info!(
+                            target: "usdt",
+                            %usdt_contract,
+                            %account,
+                            "balances-slot consistency check passed: balanceOf and the \
+                             USDT_BALANCES_SLOT-derived storage word agree on a nonzero balance; \
+                             deposit proofs verify against the correct slot"
+                        );
+                        return;
+                    }
+                    Ok(BalancesSlotProbe::Mismatch {
+                        account,
+                        balance_of,
+                        slot_word,
+                    }) => {
+                        error!(
+                            target: "usdt",
+                            %usdt_contract,
+                            %account,
+                            balance_of,
+                            slot_word = %alloy::hex::encode(slot_word),
+                            slot = fedimint_usdt_common::USDT_BALANCES_SLOT,
+                            "CONFIGURED TOKEN DOES NOT KEEP ITS BALANCES MAPPING AT THE HARDCODED \
+                             STORAGE SLOT: balanceOf() disagrees with the slot-derived storage \
+                             word read at the same block. Deposit proofs verify raw storage at \
+                             this slot, so EVERY deposit will verify an empty slot, credit 0, and \
+                             silently strand user funds. Likely cause: `usdt_contract` points at \
+                             a token or proxy whose balances mapping is not at slot 2 (only \
+                             canonical mainnet-Tether-layout tokens are supported). Fix the \
+                             federation's token configuration before accepting deposits"
+                        );
+                        // Keep looping (and erroring) rather than exiting: the
+                        // condition is operator-actionable and must stay loud.
+                    }
+                    Ok(BalancesSlotProbe::Inconclusive) => {
+                        debug!(
+                            target: "usdt",
+                            %usdt_contract,
+                            "balances-slot consistency check inconclusive (every sampled account \
+                             reads zero through both paths); retrying later"
+                        );
+                    }
+                    // FAIL-SAFE: an RPC failure is "cannot check", never
+                    // "check failed" -- warn and retry, do not brick the
+                    // guardian.
+                    Err(err) => {
+                        warn!(
+                            target: "usdt",
+                            %usdt_contract,
+                            err = %err.fmt_compact_anyhow(),
+                            "balances-slot consistency check could not run (RPC unreachable or \
+                             erroring); retrying later"
+                        );
+                    }
+                }
+
+                fedimint_core::runtime::sleep(Duration::from_secs(slow_poll_interval_secs())).await;
+            }
+        });
+    }
+
     fn spawn_bootstrap_observer(task_group: &TaskGroup, handles: BootstrapObserverHandles) {
         let BootstrapObserverHandles {
             evm_rpc,
@@ -8155,6 +8342,27 @@ mod tests {
         /// `account` (finding A residual recovery). Unset accounts read as `0`.
         entrypoint_deposits:
             Mutex<std::collections::HashMap<fedimint_usdt_common::EvmAddress, u128>>,
+        /// Scripted `get_erc20_balance` responses, keyed by `(token,
+        /// holder)`; unset pairs read as `0` (the balances-slot probe tests
+        /// script these; consensus-logic tests never need a balance).
+        erc20_balances: Mutex<
+            std::collections::HashMap<
+                (
+                    fedimint_usdt_common::EvmAddress,
+                    fedimint_usdt_common::EvmAddress,
+                ),
+                u64,
+            >,
+        >,
+        /// Scripted `get_storage_at` responses, keyed by `(addr, key)`;
+        /// unset keys read as the all-zero word (an empty EVM storage slot).
+        #[allow(clippy::type_complexity)]
+        storage_words: Mutex<
+            std::collections::HashMap<(fedimint_usdt_common::EvmAddress, [u8; 32]), [u8; 32]>,
+        >,
+        /// When `true`, `get_storage_at` returns `Err` -- for exercising the
+        /// balances-slot probe's fail-safe "cannot check" path.
+        storage_err: Mutex<bool>,
     }
 
     /// Deterministic, block-number-derived stand-in for a canonical block hash
@@ -8242,6 +8450,43 @@ mod tests {
                 .clone()
         }
 
+        /// Scripts the balance returned by `get_erc20_balance(token, holder,
+        /// _)`. Unset pairs read as `0`.
+        #[allow(dead_code)]
+        fn set_erc20_balance(
+            &self,
+            token: fedimint_usdt_common::EvmAddress,
+            holder: fedimint_usdt_common::EvmAddress,
+            balance: u64,
+        ) {
+            self.erc20_balances
+                .lock()
+                .expect("not poisoned")
+                .insert((token, holder), balance);
+        }
+
+        /// Scripts the raw word returned by `get_storage_at(addr, key, _)`.
+        /// Unset keys read as the all-zero word.
+        #[allow(dead_code)]
+        fn set_storage_word(
+            &self,
+            addr: fedimint_usdt_common::EvmAddress,
+            key: [u8; 32],
+            word: [u8; 32],
+        ) {
+            self.storage_words
+                .lock()
+                .expect("not poisoned")
+                .insert((addr, key), word);
+        }
+
+        /// Scripts `get_storage_at` to return `Err` (unreachable-RPC model
+        /// for the balances-slot probe's fail-safe path).
+        #[allow(dead_code)]
+        fn set_storage_error(&self) {
+            *self.storage_err.lock().expect("not poisoned") = true;
+        }
+
         /// Scripts `get_chain_id()` to return `Ok(chain_id)`.
         fn set_chain_id(&self, chain_id: u64) {
             *self.chain_id.lock().expect("not poisoned") = chain_id;
@@ -8319,14 +8564,40 @@ mod tests {
 
         async fn get_erc20_balance(
             &self,
-            _token: fedimint_usdt_common::EvmAddress,
-            _holder: fedimint_usdt_common::EvmAddress,
+            token: fedimint_usdt_common::EvmAddress,
+            holder: fedimint_usdt_common::EvmAddress,
             _at_block: u64,
         ) -> anyhow::Result<fedimint_usdt_common::UsdtAmount> {
-            // No balance polling in these consensus-logic tests (the deposit
-            // scanner that read this was removed with the guardian-poll path);
-            // deposit crediting is now proof-driven via `process_deposit_proof`.
-            Ok(fedimint_usdt_common::UsdtAmount(0))
+            // Consensus-logic tests never script a balance (deposit crediting
+            // is proof-driven via `process_deposit_proof`); the balances-slot
+            // probe tests do. Unset pairs read as `0`, preserving the old
+            // always-zero behavior for every pre-existing test.
+            Ok(fedimint_usdt_common::UsdtAmount(
+                self.erc20_balances
+                    .lock()
+                    .expect("not poisoned")
+                    .get(&(token, holder))
+                    .copied()
+                    .unwrap_or(0),
+            ))
+        }
+
+        async fn get_storage_at(
+            &self,
+            addr: fedimint_usdt_common::EvmAddress,
+            key: [u8; 32],
+            _at_block: u64,
+        ) -> anyhow::Result<[u8; 32]> {
+            if *self.storage_err.lock().expect("not poisoned") {
+                anyhow::bail!("mock RPC: storage read failed");
+            }
+            Ok(self
+                .storage_words
+                .lock()
+                .expect("not poisoned")
+                .get(&(addr, key))
+                .copied()
+                .unwrap_or([0u8; 32]))
         }
 
         async fn get_erc20_basis_points_rate(
@@ -18931,6 +19202,116 @@ mod tests {
             "priority fee must be clamped to max_fee_per_gas"
         );
         assert_eq!(fees.gas_cost_wei, 800_000 * 110_000_000_000);
+    }
+
+    /// [`balance_storage_word`] must produce the canonical Solidity storage
+    /// encoding for a `uint256` balance: big-endian, left-padded to 32 bytes.
+    #[test]
+    fn balance_storage_word_pads_big_endian() {
+        assert_eq!(balance_storage_word(0), [0u8; 32]);
+        let word = balance_storage_word(0x0102_0304_0506_0708);
+        let mut expected = [0u8; 32];
+        expected[24..].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(word, expected);
+    }
+
+    /// Balances-slot consistency probe (config footgun guard): agreement on
+    /// a nonzero balance is conclusively `Verified`; the probe stops at the
+    /// first conclusive sample.
+    #[tokio::test]
+    async fn probe_balances_slot_verifies_matching_nonzero_balance() {
+        let token = EvmAddress([0xAA; 20]);
+        let account = EvmAddress([0xBB; 20]);
+        let mock = MockEvmRpc::default();
+        mock.set_erc20_balance(token, account, 1_000_000);
+        mock.set_storage_word(
+            token,
+            fedimint_usdt_common::balances_storage_key(&account),
+            balance_storage_word(1_000_000),
+        );
+        let rpc = mock.into_dyn();
+
+        assert_eq!(
+            probe_balances_slot(&rpc, token, &[account])
+                .await
+                .expect("mock RPC never fails here"),
+            BalancesSlotProbe::Verified { account }
+        );
+    }
+
+    /// A token whose balances mapping is NOT at `USDT_BALANCES_SLOT`
+    /// (`balanceOf` nonzero while the slot-derived word is empty -- the
+    /// deposits-credit-0 footgun -- or the reverse) must be conclusively
+    /// flagged as a `Mismatch`.
+    #[tokio::test]
+    async fn probe_balances_slot_flags_mismatch() {
+        let token = EvmAddress([0xAA; 20]);
+        let account = EvmAddress([0xBB; 20]);
+
+        // balanceOf sees funds; the slot the deposit proofs verify is empty.
+        let mock = MockEvmRpc::default();
+        mock.set_erc20_balance(token, account, 1_000_000);
+        let rpc = mock.into_dyn();
+        assert!(matches!(
+            probe_balances_slot(&rpc, token, &[account])
+                .await
+                .expect("mock RPC never fails here"),
+            BalancesSlotProbe::Mismatch {
+                balance_of: 1_000_000,
+                ..
+            }
+        ));
+
+        // The reverse disagreement is just as conclusive.
+        let mock = MockEvmRpc::default();
+        mock.set_storage_word(
+            token,
+            fedimint_usdt_common::balances_storage_key(&account),
+            balance_storage_word(5),
+        );
+        let rpc = mock.into_dyn();
+        assert!(matches!(
+            probe_balances_slot(&rpc, token, &[account])
+                .await
+                .expect("mock RPC never fails here"),
+            BalancesSlotProbe::Mismatch { balance_of: 0, .. }
+        ));
+    }
+
+    /// All-zero agreement proves nothing (a wrong slot also reads zero):
+    /// the probe must report `Inconclusive`, never a false `Verified`.
+    #[tokio::test]
+    async fn probe_balances_slot_inconclusive_on_all_zero() {
+        let token = EvmAddress([0xAA; 20]);
+        let rpc = MockEvmRpc::default().into_dyn();
+        assert_eq!(
+            probe_balances_slot(
+                &rpc,
+                token,
+                &[EvmAddress([0xBB; 20]), EvmAddress([0xCC; 20])]
+            )
+            .await
+            .expect("mock RPC never fails here"),
+            BalancesSlotProbe::Inconclusive
+        );
+    }
+
+    /// FAIL-SAFE: an erroring RPC surfaces as `Err` ("cannot check"), which
+    /// the checker loop maps to warn-and-retry -- it must never be
+    /// classified as a conclusive result in either direction.
+    #[tokio::test]
+    async fn probe_balances_slot_errs_when_rpc_fails() {
+        let token = EvmAddress([0xAA; 20]);
+        let account = EvmAddress([0xBB; 20]);
+        let mock = MockEvmRpc::default();
+        mock.set_erc20_balance(token, account, 1_000_000);
+        mock.set_storage_error();
+        let rpc = mock.into_dyn();
+
+        assert!(
+            probe_balances_slot(&rpc, token, &[account]).await.is_err(),
+            "an unreachable RPC must surface as Err, not as a verdict"
+        );
     }
 
     /// A real, decodable `DeployAndSweep` [`UnsignedUserOp`] whose
