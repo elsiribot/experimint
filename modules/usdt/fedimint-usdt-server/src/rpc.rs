@@ -189,11 +189,11 @@ pub trait IServerEvmRpc: std::fmt::Debug + Send + Sync + 'static {
     async fn get_block_number(&self) -> anyhow::Result<u64>;
 
     /// The canonical block hash of `block` (security findings 04/12): used by
-    /// the deposit scanner to bind a
-    /// [`fedimint_usdt_common::DepositObservation`] to a specific fork, so
+    /// the block-hash observer to bind a
+    /// [`fedimint_usdt_common::BlockHashObservation`] to a specific fork, so
     /// observations read on different forks at the same height cannot
-    /// aggregate toward a threshold credit. `Err` if `block` is unknown to
-    /// the node (e.g. beyond its head) or the node is unreachable.
+    /// aggregate toward a threshold ring anchor. `Err` if `block` is unknown
+    /// to the node (e.g. beyond its head) or the node is unreachable.
     async fn get_block_hash(&self, block: u64) -> anyhow::Result<[u8; 32]>;
 
     /// The ERC-20 `balanceOf(holder)` for `token`, evaluated *as of*

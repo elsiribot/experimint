@@ -205,13 +205,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Wait for a live `FeeVote` median to exist (the guardians' 1s poller
-        // reads the real anvil gas price): `process_input` rejects a claim
-        // with `DepositFeeInsufficient` before any median exists (the quote
-        // endpoint reports a `0` sentinel until then), mirroring
-        // `withdraw_e2e.rs`'s identical wait.
-        // Deposit-by-proof charges NO fee, but the later withdrawal leg needs a
-        // live `FeeVote` median to exist; poll `deposit-fee-quote` purely as
-        // that warmup gate (its value no longer sizes the deposit).
+        // reads the real anvil gas price): `process_input` rejects a
+        // deposit-proof credit with `NoFeeQuoteAvailable` before any median
+        // exists (the quote endpoint reports a `0` sentinel until then), and
+        // the live quote is what sizes the deposit's fee pad below --
+        // mirroring `withdraw_e2e.rs`'s identical wait.
         info!("Polling deposit-fee-quote until a nonzero quote is available (FeeVote warmup)...");
         let fee_deadline = fedimint_core::time::now() + Duration::from_secs(60);
         loop {

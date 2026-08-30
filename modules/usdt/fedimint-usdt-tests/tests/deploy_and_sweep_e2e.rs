@@ -174,7 +174,6 @@ async fn deposit_account_is_deployed_and_swept_via_real_mpc_and_real_entrypoint(
         entry_point: stack.entry_point,
         account_factory,
         simple_account_impl,
-        check_ttl_blocks: 10_000,
         // Must be > 0 (sec-17 config validation); the broadcaster is the
         // anvil-funded account, so any low value is trivially satisfied.
         broadcaster_min_balance_wei: 1,

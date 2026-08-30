@@ -60,18 +60,17 @@ use fedimint_usdt_common::user_op::{
 };
 use fedimint_usdt_common::{
     AnchoredBlockResponse, BLOCK_HASH_RING_LEN, BlockHashObservation, BootstrapObservation,
-    BootstrapState, DepositFeeQuoteRequest, DepositFeeQuoteResponse, DepositObservation,
-    DepositStatusRequest, DepositStatusResponse, FeeVote, MAX_MPC_CHUNKS, MAX_MPC_ROUND_BYTES,
-    MODULE_CONSENSUS_VERSION, MPC_ROUND_CHUNK_SIZE, MpcRoundItem, PoolStateResponse, RefundInfo,
-    RefundStatusRequest, RefundStatusResponse, SigningSessionId, StatusResponse, USDT_UNIT,
-    UsdtAmount, UsdtCommonInit, UsdtConsensusItem, UsdtGenParams, UsdtInput, UsdtInputError,
-    UsdtModuleTypes, UsdtOutput, UsdtOutputError, UsdtOutputOutcome, UserOpStatus,
-    UserOpStatusRequest, UserOpStatusResponse, WithdrawFeeQuoteRequest, WithdrawFeeQuoteResponse,
-    WithdrawFeesRequest, WithdrawalStatus, WithdrawalStatusRequest, WithdrawalStatusResponse,
-    balances_storage_key, deposit_fee_quote, deposit_salt, derive_deposit_account,
-    derive_pool_account, evm_address, fee_vote_in_sane_range, is_dev_chain, pool_salt,
-    signing_session_id, usdt_amount, validate_usdt_params, wei_gas_cost_to_usdt,
-    withdrawal_fee_quote,
+    BootstrapState, DepositFeeQuoteRequest, DepositFeeQuoteResponse, DepositStatusRequest,
+    DepositStatusResponse, FeeVote, MAX_MPC_CHUNKS, MAX_MPC_ROUND_BYTES, MODULE_CONSENSUS_VERSION,
+    MPC_ROUND_CHUNK_SIZE, MpcRoundItem, PoolStateResponse, RefundInfo, RefundStatusRequest,
+    RefundStatusResponse, SigningSessionId, StatusResponse, USDT_UNIT, UsdtAmount, UsdtCommonInit,
+    UsdtConsensusItem, UsdtGenParams, UsdtInput, UsdtInputError, UsdtModuleTypes, UsdtOutput,
+    UsdtOutputError, UsdtOutputOutcome, UserOpStatus, UserOpStatusRequest, UserOpStatusResponse,
+    WithdrawFeeQuoteRequest, WithdrawFeeQuoteResponse, WithdrawFeesRequest, WithdrawalStatus,
+    WithdrawalStatusRequest, WithdrawalStatusResponse, balances_storage_key, deposit_fee_quote,
+    deposit_salt, derive_deposit_account, derive_pool_account, evm_address, fee_vote_in_sane_range,
+    is_dev_chain, pool_salt, signing_session_id, usdt_amount, validate_usdt_params,
+    wei_gas_cost_to_usdt, withdrawal_fee_quote,
 };
 use futures::{FutureExt as _, StreamExt as _};
 use rand::rngs::OsRng;
@@ -82,7 +81,6 @@ use crate::config::{UsdtConfig, UsdtConfigConsensus, UsdtConfigLocal, UsdtConfig
 use crate::db::{
     BlockCountVoteKey, BlockCountVotePrefix, BlockHashRingKey, BlockHashRingPrefix,
     BlockHashVoteKey, BlockHashVotePrefix, BootstrapVoteKey, BootstrapVotePrefix, DbKeyPrefix,
-    DepositObservationVoteAccountPrefix, DepositObservationVoteKey, DepositObservationVotePrefix,
     DepositRecord, DepositRecordKey, DepositRecordPrefix, FeeVoteKey, FeeVotePrefix,
     HasEverBeenReadyKey, HasEverBeenReadyPrefix, MpcRoundChunk, MpcRoundChunkKey,
     MpcRoundChunkPrefix, MpcRoundChunkSessionPrefix, MpcRoundChunkSessionRoundPeerPrefix,
@@ -210,16 +208,6 @@ impl ModuleInit for UsdtInit {
                         DepositRecord,
                         items,
                         "Deposit Records"
-                    );
-                }
-                DbKeyPrefix::DepositObservationVote => {
-                    push_db_pair_items!(
-                        dbtx,
-                        DepositObservationVotePrefix,
-                        crate::db::DepositObservationVoteKey,
-                        DepositObservation,
-                        items,
-                        "Deposit Observation Votes"
                     );
                 }
                 DbKeyPrefix::SigningSession => {
@@ -1169,7 +1157,6 @@ impl ServerModuleInit for UsdtInit {
                         entry_point: params.entry_point,
                         account_factory: params.account_factory,
                         simple_account_impl: params.simple_account_impl,
-                        check_ttl_blocks: params.check_ttl_blocks,
                         broadcaster_min_balance_wei: params.broadcaster_min_balance_wei,
                         eth_usd_price_feed: params.eth_usd_price_feed,
                         price_feed_max_staleness_secs: params.price_feed_max_staleness_secs,
@@ -1239,7 +1226,6 @@ impl ServerModuleInit for UsdtInit {
             entry_point: config.consensus.entry_point,
             account_factory: config.consensus.account_factory,
             simple_account_impl: config.consensus.simple_account_impl,
-            check_ttl_blocks: config.consensus.check_ttl_blocks,
             broadcaster_min_balance_wei: config.consensus.broadcaster_min_balance_wei,
             eth_usd_price_feed: config.consensus.eth_usd_price_feed,
             price_feed_max_staleness_secs: config.consensus.price_feed_max_staleness_secs,
@@ -1259,8 +1245,8 @@ impl ServerModuleInit for UsdtInit {
     /// [`migrate_db_v0`] for why this migration drops rather than rewrites
     /// the old-format rows.
     ///
-    /// `DatabaseVersion(1)` (security findings 04/12/15): both
-    /// [`DepositObservation`](fedimint_usdt_common::DepositObservation) and
+    /// `DatabaseVersion(1)` (security findings 04/12/15): both the (since-
+    /// removed) `DepositObservation` and
     /// [`UserOpConfirmedObservation`](crate::db::UserOpConfirmedObservation)
     /// gained a `block_hash` field. See [`migrate_db_v1`] for why this
     /// migration drops (rather than rewrites) the old-format vote rows.
@@ -1358,29 +1344,31 @@ async fn migrate_db_v0(mut ctx: ServerModuleDbMigrationFnContext<'_, Usdt>) -> a
 }
 
 /// Migrates the deposit- and userop-observation vote tables' value shapes for
-/// the `block_hash` binding (security findings 04/12/15):
-/// [`DepositObservationVoteKey`](crate::db::DepositObservationVoteKey)'s value
-/// ([`DepositObservation`](fedimint_usdt_common::DepositObservation)) and
+/// the `block_hash` binding (security findings 04/12/15): the value of the
+/// since-removed `DepositObservationVote` table
+/// ([`REMOVED_DEPOSIT_OBSERVATION_VOTE_PREFIX`], `0x04` -- its
+/// `DepositObservation` value type is gone along with the whole legacy
+/// guardian-poll deposit path) and
 /// [`UserOpConfirmedVoteKey`](crate::db::UserOpConfirmedVoteKey)'s value
 /// ([`UserOpConfirmedObservation`](crate::db::UserOpConfirmedObservation)) each
-/// gained a `block_hash` field.
+/// gained a `block_hash` field at this version.
 ///
 /// Like [`migrate_db_v0`], this DROPS every existing row of both tables rather
-/// than reinterpreting the old-format bytes. These are transient, guardian-
-/// local observation votes: the deposit scanner re-proposes each pending
-/// account's observation every scan tick, and the user-op submitter re-polls
-/// and re-proposes every `SubmittedUserOp`'s receipt every submit tick -- both
-/// now stamped with a real `block_hash` -- so both vote quorums re-establish
-/// themselves within one tick of upgrading. Fabricating a `block_hash` for the
+/// than reinterpreting the old-format bytes. These were transient, guardian-
+/// local observation votes, re-proposed every scan/submit tick -- so the
+/// quorums re-established themselves within one tick of upgrading.
+/// Fabricating a `block_hash` for the
 /// old rows (e.g. all-zero) would be worse than dropping them: a zero hash is
 /// not any real fork's hash, so those rows could never full-field-equal a
 /// freshly-observed vote and would just linger as dead weight until expired.
 /// Dropping them outright (mirroring `fedimint-mint-server`'s `migrate_db_v1`,
 /// which also `raw_remove_by_prefix`es a stale-format table) is simpler and
-/// loses nothing meaningful.
+/// loses nothing meaningful. The `0x04` drop is kept byte-identical (now via
+/// the raw prefix const) so the committed `usdt-server-v0` snapshot keeps
+/// replaying cleanly.
 async fn migrate_db_v1(mut ctx: ServerModuleDbMigrationFnContext<'_, Usdt>) -> anyhow::Result<()> {
     ctx.dbtx()
-        .raw_remove_by_prefix(&[DbKeyPrefix::DepositObservationVote as u8])
+        .raw_remove_by_prefix(&[REMOVED_DEPOSIT_OBSERVATION_VOTE_PREFIX])
         .await
         .expect("DB error");
     ctx.dbtx()
@@ -1494,6 +1482,21 @@ async fn migrate_db_v3(mut ctx: ServerModuleDbMigrationFnContext<'_, Usdt>) -> a
     }
     Ok(())
 }
+
+/// The DB prefix (`0x04`) of the removed `DepositObservationVote` table.
+///
+/// This table held the per-peer balance-observation votes of the legacy
+/// guardian-poll deposit path (`UsdtConsensusItem::Deposit`, the processing
+/// arm of which survived, frozen, until the whole legacy observation path was
+/// deleted -- deposit crediting is proof-driven via
+/// [`UsdtInput::DepositProofV0`](fedimint_usdt_common::UsdtInput)). With the
+/// arm gone, nothing reads or writes `0x04` any more, leaving it a permanent
+/// GAP in [`DbKeyPrefix`], exactly like [`REMOVED_PENDING_CHECK_PREFIX`]
+/// (`0x05`). Named here (rather than keeping a dead `DbKeyPrefix` variant)
+/// purely so [`migrate_db_v1`] -- which already dropped this table's
+/// old-shape rows at `DatabaseVersion(1)` -- keeps compiling and keeps
+/// replaying the committed `usdt-server-v0` snapshot byte-identically.
+const REMOVED_DEPOSIT_OBSERVATION_VOTE_PREFIX: u8 = 0x04;
 
 /// The DB prefix (`0x05`) of the removed guardian-poll `PendingCheck` table.
 ///
@@ -1695,9 +1698,8 @@ pub struct Usdt {
 /// One guardian-local observation of a submitted `UserOp`'s on-chain outcome
 /// (Phase 7, Task 5), gathered by [`Usdt::spawn_user_op_submitter`] and
 /// drained into `UsdtConsensusItem::UserOpConfirmed` proposals by
-/// `consensus_proposal`. Plain data -- mirrors
-/// [`fedimint_usdt_common::DepositObservation`]'s role for the deposit-side
-/// quorum.
+/// `consensus_proposal`. Plain data carried whole in the vote so the tally
+/// is a pure function of consensus data.
 #[derive(Debug, Clone)]
 struct UserOpConfirmedProposal {
     op_hash: [u8; 32],
@@ -2172,123 +2174,13 @@ impl ServerModule for Usdt {
                 // right here, checks whether the withdrawal-batch policy
                 // fires now that this vote may have moved the consensus
                 // block-count median forward -- mirrors
-                // `Usdt::maybe_trigger_sweep`'s placement in the `Deposit`
-                // arm (a pure function of the item, prior consensus-DB
-                // state, and config; see `Usdt::maybe_trigger_withdrawal_batch`'s
-                // own doc comment for the full determinism argument).
+                // `Usdt::maybe_trigger_sweep`'s placement inside the ordered
+                // deposit-credit path (a pure function of the item, prior
+                // consensus-DB state, and config; see
+                // `Usdt::maybe_trigger_withdrawal_batch`'s own doc comment
+                // for the full determinism argument).
                 self.maybe_trigger_withdrawal_batch(dbtx).await;
 
-                Ok(())
-            }
-            UsdtConsensusItem::Deposit(obs) => {
-                // LEGACY ARM -- FROZEN BY REPLAY, NOT LIVE. Like the
-                // `UsdtConsensusItem::Deposit` variant itself (see its doc
-                // comment in `fedimint-usdt-common`), this whole arm belongs
-                // to the REMOVED guardian-poll deposit path: deposit
-                // crediting is proof-driven now (`UsdtInput::DepositProofV0`)
-                // and NO honest guardian proposes `Deposit` items any more.
-                // This arm still fires for exactly two inputs: (a) replay of
-                // historical consensus sessions ordered before the removal,
-                // which MUST re-execute byte-identically, and (b) a Byzantine
-                // peer proposing the legacy item today, which must keep being
-                // judged exactly as it always was. Both freeze this arm at
-                // its current behavior for the deployed
-                // MODULE_CONSENSUS_VERSION (0.12): do not modify, "fix", or
-                // remove it, and do not wire new logic into it.
-                //
-                // Security finding 14: self-authenticate BEFORE storing the
-                // vote, not only later inside `credit_deposit` (which runs
-                // only once threshold-many IDENTICAL votes accumulate). A
-                // pure function of `obs` and this module's consensus config
-                // (`group_public_key`/`account_factory`/
-                // `simple_account_impl`), so every honest guardian computes
-                // the same result. Returning `Err` here makes a malformed
-                // observation non-state-changing, so it is never persisted
-                // as a `DepositObservationVoteKey` and never retained in
-                // consensus history -- otherwise a Byzantine guardian could
-                // bloat the vote table forever with fresh random accounts
-                // that never reach threshold (see
-                // `security-review/14-low-junk-consensus-votes-db-bloat.md`).
-                ensure!(
-                    fedimint_usdt_common::derive_deposit_account(
-                        &self.cfg.consensus.group_public_key,
-                        self.cfg.consensus.account_factory,
-                        self.cfg.consensus.simple_account_impl,
-                        &obs.claim_pk,
-                    ) == obs.account,
-                    "deposit observation claim_pk does not derive its account"
-                );
-
-                // Security finding 12: FRESHNESS gate. Reject (non-state-
-                // changing `Err`, BEFORE any DB mutation) an observation that
-                // is outside the acceptable window relative to consensus:
-                //   * too NEW: `obs.block` must be at least `confirmation_depth` behind the
-                //     consensus block count (mirrors the deposit scanner's own read height), so
-                //     an observation cannot be credited before it is confirmation-deep; and
-                //   * too OLD: `obs.block` must be within `confirmation_depth +
-                //     DEPOSIT_VOTE_MAX_AGE_BLOCKS` of the consensus block count, so a very old
-                //     pre-reorg vote can never complete a threshold long after the fact (the
-                //     deep- reorg stale-vote scenario). Purely a function of `obs` +
-                //     `consensus_block_count(dbtx)` + config, so every honest guardian decides
-                //     identically.
-                let confirmation_depth = self.cfg.consensus.confirmation_depth;
-                let ccount = self.consensus_block_count(dbtx).await;
-                ensure!(
-                    obs.block <= ccount.saturating_sub(confirmation_depth),
-                    "deposit observation block is not yet confirmation-deep"
-                );
-                ensure!(
-                    ccount.saturating_sub(obs.block)
-                        <= confirmation_depth + DEPOSIT_VOTE_MAX_AGE_BLOCKS,
-                    "deposit observation is too old (outside the freshness window)"
-                );
-
-                // Store this peer's vote; redundancy guard (unbounded-history rule).
-                let key = DepositObservationVoteKey(obs.account, peer_id);
-                if dbtx.insert_entry(&key, &obs).await.as_ref() == Some(&obs) {
-                    bail!("Deposit observation vote is redundant");
-                }
-
-                // Security finding 12: EXPIRY + SUPERSESSION of stale/older
-                // stored votes for this account (deterministic hygiene, reads
-                // only `ccount` + the stored votes + `obs`). Remove any stored
-                // vote that is now either outside the freshness window (so a
-                // sub-threshold set of stale votes cannot linger and later
-                // complete a threshold after a deep reorg) OR at a strictly
-                // LOWER block than this fresh observation (a higher-block
-                // observation supersedes older, now-divergent ones). This never
-                // removes `obs` itself (equal block, in-window) and only ever
-                // removes votes that could NOT have counted toward `obs`'s tally
-                // anyway (a different `block`/`block_hash` cannot full-field-
-                // equal `obs`), so it cannot change THIS credit decision -- it
-                // only prevents stale accumulation. `credited` stays monotonic.
-                let stored: Vec<(DepositObservationVoteKey, DepositObservation)> = dbtx
-                    .find_by_prefix(&DepositObservationVoteAccountPrefix(obs.account))
-                    .await
-                    .collect()
-                    .await;
-                for (vote_key, vote) in &stored {
-                    let too_old = ccount.saturating_sub(vote.block)
-                        > confirmation_depth + DEPOSIT_VOTE_MAX_AGE_BLOCKS;
-                    let superseded = vote.block < obs.block && *vote != obs;
-                    if too_old || superseded {
-                        dbtx.remove_entry(vote_key).await;
-                    }
-                }
-
-                // Count identical observations for this account (over what
-                // survives the expiry/supersession sweep above).
-                let votes: Vec<DepositObservation> = dbtx
-                    .find_by_prefix(&DepositObservationVoteAccountPrefix(obs.account))
-                    .await
-                    .map(|(_, v)| v)
-                    .collect()
-                    .await;
-                let agreeing = votes.iter().filter(|v| **v == obs).count();
-
-                if agreeing >= self.num_peers.threshold() {
-                    self.credit_deposit(dbtx, &obs).await?;
-                }
                 Ok(())
             }
             UsdtConsensusItem::MpcRound(item) => self.process_mpc_round(dbtx, item, peer_id).await,
@@ -2446,8 +2338,7 @@ impl ServerModule for Usdt {
             UsdtConsensusItem::BlockHash(obs) => {
                 // Deposit-by-proof anchor: persist a threshold-agreed
                 // confirmation-depth `(height, block_hash)` into the block-hash
-                // ring. DETERMINISTIC, mirroring the `Deposit` arm's discipline
-                // exactly -- a pure function of the ordered item, prior
+                // ring. DETERMINISTIC -- a pure function of the ordered item, prior
                 // consensus DB state, and `cfg.consensus` (no RPC/wall-clock/
                 // `our_peer_id`, so every honest guardian decides identically).
                 //
@@ -2589,30 +2480,25 @@ impl ServerModule for Usdt {
         }
     }
 
-    /// Claims (a portion of) a `credited` deposit, funding
-    /// `input.amount - input.fee` (in [`USDT_UNIT`]) into the submitting
-    /// transaction. `input.fee` must clear the federation's current
-    /// fee-vote-median-derived deposit quote
-    /// ([`fedimint_usdt_common::deposit_fee_quote`]), mirroring
-    /// `process_output`'s `max_fee`/[`withdrawal_fee_quote`] check; the fee
-    /// stays credited-but-unissued and is later swept into the pool as
-    /// federation fee revenue (Task 3).
+    /// Dispatches the module's two live input variants: a
+    /// [`UsdtInput::DepositProofV0`] deposit credit+claim (see
+    /// [`Self::process_deposit_proof`]) and a [`UsdtInput::RefundV0`]
+    /// terminally-failed-withdrawal refund claim (security finding 09).
     ///
     /// # Determinism (consensus-critical)
     ///
     /// A pure function of `(input, prior consensus DB state, config)`: reads
-    /// only the fee-vote median (`Usdt::fee_vote_median`) -- no RPC, no
-    /// wall-clock, no `our_peer_id`. Every guardian processing the same
-    /// ordered input against the same prior DB state computes the identical
-    /// `Ok`/`Err` and the identical `DepositRecordKey` write.
+    /// only consensus DB (fee-vote median / block-hash ring / refund and
+    /// deposit records) -- no RPC, no wall-clock, no `our_peer_id`. Every
+    /// guardian processing the same ordered input against the same prior DB
+    /// state computes the identical `Ok`/`Err` and the identical writes.
     async fn process_input<'a, 'b, 'c>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'c>,
         input: &'b UsdtInput,
         _in_point: InPoint,
     ) -> Result<InputMeta, UsdtInputError> {
-        let input = match input {
-            UsdtInput::V0(input) => input,
+        match input {
             UsdtInput::RefundV0 { out_point } => {
                 // Security finding 09: claim a terminally-failed withdrawal's
                 // reissued e-cash. Look up (and REMOVE) the refund record so it
@@ -2638,92 +2524,24 @@ impl ServerModule for Usdt {
                     amount = refund.amount.0,
                     "withdrawal refund CLAIMED; reissued e-cash minted to the original withdrawer"
                 );
-                return Ok(InputMeta {
+                Ok(InputMeta {
                     amount: TransactionItemAmounts {
                         amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(refund.amount)),
                         fees: Amounts::ZERO,
                     },
                     pub_key: refund.refund_pubkey,
-                });
+                })
             }
             UsdtInput::DepositProofV0 {
                 claim_pk,
                 proof,
                 fee,
             } => {
-                return self
-                    .process_deposit_proof(dbtx, claim_pk, proof, *fee)
-                    .await;
+                self.process_deposit_proof(dbtx, claim_pk, proof, *fee)
+                    .await
             }
-            UsdtInput::Default { .. } => {
-                return Err(UsdtInputError::UnknownDepositAccount); // unknown/default variant
-            }
-        };
-        let mut record = dbtx
-            .get_value(&DepositRecordKey(input.account))
-            .await
-            .ok_or(UsdtInputError::UnknownDepositAccount)?;
-        let available = record.credited.0.saturating_sub(record.claimed.0);
-        if input.amount.0 > available {
-            return Err(UsdtInputError::InsufficientCredit {
-                available: UsdtAmount(available),
-                requested: input.amount,
-            });
+            UsdtInput::Default { .. } => Err(UsdtInputError::UnsupportedInputVariant),
         }
-
-        // Mirrors `process_output`'s `median`/`quote` handling exactly: an
-        // absent median (no fee vote has landed yet) or an overflowing quote
-        // computation are distinct, explicit rejections rather than being
-        // folded into `DepositFeeInsufficient` via an effectively-infinite
-        // sentinel quote.
-        let median = self
-            .fee_vote_median(dbtx)
-            .await
-            .ok_or(UsdtInputError::NoFeeQuoteAvailable)?;
-        let quote = deposit_fee_quote(&median).ok_or(UsdtInputError::FeeQuoteOverflow)?;
-        if input.fee.0 < quote.0 {
-            return Err(UsdtInputError::DepositFeeInsufficient {
-                quote,
-                offered: input.fee,
-            });
-        }
-        if input.amount.0 <= input.fee.0 {
-            return Err(UsdtInputError::FeeExceedsAmount {
-                amount: input.amount,
-                fee: input.fee,
-            });
-        }
-
-        // `saturating_add` (Phase 9, Task 1 hardening, N1): `claimed` is
-        // already bounded above by `credited` (a real, finite on-chain
-        // balance) via the `available` check just above, so this can never
-        // actually saturate -- but a deterministic saturate is strictly
-        // safer than a deterministic panic on the (unreachable in practice)
-        // chance of a `u64` overflow, and saturation is exactly as
-        // reproducible across guardians as a raw `+` would be (still a pure
-        // function of the two operands). Note `claimed` advances by the
-        // FULL `input.amount` (not `amount - fee`): the fee's USDT remains
-        // part of this deposit's credited-but-unissued balance until the
-        // sweep pulls the whole thing into the pool, at which point it
-        // becomes federation fee revenue (see `audit`'s doc comment).
-        record.claimed = UsdtAmount(record.claimed.0.saturating_add(input.amount.0));
-
-        // Accrue the deposit fee onto this account's record. It is credited
-        // into PoolState.accrued_fees (and reset) only when the sweep confirms
-        // (see apply_user_op_confirmed's DeployAndSweep arm), so a deposit fee
-        // becomes withdrawable revenue only once its USDT is physically pooled.
-        record.fees_accrued = UsdtAmount(record.fees_accrued.0.saturating_add(input.fee.0));
-
-        dbtx.insert_entry(&DepositRecordKey(input.account), &record)
-            .await;
-
-        Ok(InputMeta {
-            amount: TransactionItemAmounts {
-                amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(input.amount)),
-                fees: Amounts::new_custom(USDT_UNIT, usdt_amount(input.fee)),
-            },
-            pub_key: record.claim_pk,
-        })
     }
 
     /// Debits `output.amount + output.max_fee` (in [`USDT_UNIT`]) from the
@@ -3154,17 +2972,17 @@ const FEE_VOTE_TTL_BLOCKS: u64 = 50;
 const FEE_VOTE_REFRESH_BLOCKS: u64 = 20;
 
 /// Extra age (in consensus blocks, ON TOP of `confirmation_depth`) a stored
-/// [`DepositObservation`] vote may have and still be accepted / counted
-/// toward a threshold credit (security finding 12). A vote is FRESH only while
-/// `consensus_block_count - obs.block <= confirmation_depth +
-/// DEPOSIT_VOTE_MAX_AGE_BLOCKS`; older votes are rejected at store time and
-/// opportunistically expired from the vote table when a later `Deposit` item
-/// for the same account is processed. This closes the "a very old pre-reorg
-/// vote completes a threshold much later, after a deep reorg removed the
-/// deposit" gap: even a Byzantine or delayed-honest duplicate of a stale
-/// observation can no longer credit funds once the observation has aged out of
-/// this window. Computed purely from `consensus_block_count(dbtx)` (never
-/// wall-clock), so every guardian agrees.
+/// [`BlockHashObservation`] vote may have and still be accepted / counted
+/// toward the ring anchor (security finding 12; originally shared with the
+/// removed legacy deposit-observation votes, whose freshness window this
+/// gate was designed for). A vote is FRESH only while
+/// `consensus_block_count - height <= confirmation_depth +
+/// DEPOSIT_VOTE_MAX_AGE_BLOCKS`; older votes are rejected at store time.
+/// This closes the "a very old pre-reorg vote completes a threshold much
+/// later, after a deep reorg" gap: even a Byzantine or delayed-honest
+/// duplicate of a stale observation can no longer anchor once it has aged
+/// out of this window. Computed purely from `consensus_block_count(dbtx)`
+/// (never wall-clock), so every guardian agrees.
 const DEPOSIT_VOTE_MAX_AGE_BLOCKS: u64 = 100;
 
 /// A fixed, compiled-in `secp256k1` public key -- the point for secret scalar
@@ -4577,22 +4395,18 @@ impl Usdt {
     /// [`UsdtInput::DepositProofV0`] arm of [`Self::process_input`].
     ///
     /// The `account` whose balance is verified is DERIVED from `claim_pk`
-    /// ([`derive_deposit_account`]) -- the exact same binding
-    /// [`Self::credit_deposit`] enforces for the observation path -- so a
+    /// ([`derive_deposit_account`]), so a
     /// proof of any account a submitter cannot also derive a `claim_pk` for
     /// (e.g. an exchange's hot wallet) verifies against a different storage
     /// key and yields a zero delta. Only the newly-proven delta over the
     /// account's existing high-water `credited` becomes spendable e-cash, and
     /// `claimed` is advanced by that same delta so the freshly-minted value
-    /// can never be re-claimed a second time through the [`UsdtInput::V0`]
-    /// path (whose over-claim guard reads `credited - claimed`). The high-water
-    /// `credited` is advanced to the proven balance and the SAME
-    /// [`Self::maybe_trigger_sweep`] bookkeeping the observation path fires is
-    /// fired here, so the on-chain USDT is deploy-and-swept into the pool
-    /// exactly as before.
+    /// can never be re-claimed (a resubmitted proof reads a zero delta). The
+    /// high-water `credited` is advanced to the proven balance and
+    /// [`Self::maybe_trigger_sweep`] is
+    /// fired here, so the on-chain USDT is deploy-and-swept into the pool.
     ///
-    /// A deposit `fee` is charged, mirroring the legacy [`UsdtInput::V0`]
-    /// claim path exactly (this is what compensates the federation for the
+    /// A deposit `fee` is charged (this is what compensates the federation for the
     /// [`fedimint_usdt_common::SWEEP_GAS_UNITS`] of gas the broadcaster
     /// fronts for this account's deploy+sweep -- see the fee-recovery loop in
     /// [`UsdtInput::DepositProofV0`]'s doc comment): the client-supplied
@@ -4679,8 +4493,8 @@ impl Usdt {
             return Err(UsdtInputError::DepositProofStale { proven, credited });
         }
 
-        // Deposit fee gates, mirroring the legacy `UsdtInput::V0` arm's
-        // `median`/`quote` handling exactly: an absent median (no fee vote
+        // Deposit fee gates, mirroring `process_output`'s `median`/`quote`
+        // handling exactly: an absent median (no fee vote
         // has landed yet) or an overflowing quote computation are distinct,
         // explicit rejections rather than being folded into
         // `DepositFeeInsufficient` via an effectively-infinite sentinel
@@ -4714,7 +4528,7 @@ impl Usdt {
         // USDT remains part of this deposit's credited-but-unissued balance
         // until the sweep pulls the whole thing into the pool, at which
         // point it becomes federation fee revenue (see `audit`'s doc
-        // comment and the legacy `V0` arm's identical bookkeeping).
+        // comment).
         record.credited = proven;
         record.claimed = UsdtAmount(record.claimed.0.saturating_add(delta));
         record.last_observed_block = proof.block_number;
@@ -4748,8 +4562,8 @@ impl Usdt {
 
         // The delta funds `USDT_UNIT` value into the transaction GROSS
         // (`amounts: delta, fees: fee`), which the client pairs with a NET
-        // `delta - fee` mint output (deposit + claim atomic) -- mirroring
-        // the legacy `V0` arm's gross/net split so the transaction balances.
+        // `delta - fee` mint output (deposit + claim atomic) -- the same
+        // gross/net split `process_output` uses, so the transaction balances.
         Ok(InputMeta {
             amount: TransactionItemAmounts {
                 amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(UsdtAmount(delta))),
@@ -4759,117 +4573,12 @@ impl Usdt {
         })
     }
 
-    /// Credits a deposit observation that has reached threshold agreement:
-    /// creates the account's [`DepositRecord`] (using `obs.claim_pk`) if it
-    /// does not exist yet, advances `credited` monotonically forward to
-    /// `obs.balance` (balance is monotonic between sweeps since only the
-    /// federation moves funds out), updates `last_observed_block`, and
-    /// clears the round's votes.
-    ///
-    /// # No longer reachable via honest `consensus_proposal` (proof-driven
-    /// crediting, sec-13)
-    ///
-    /// The guardian-local polling task that used to scan per-account
-    /// guardian-poll records and propose `UsdtConsensusItem::Deposit` items
-    /// for this to process has been removed entirely: it committed consensus DB
-    /// state from an uncoordinated background task racing the ordered
-    /// `process_consensus_item` path (and, separately, the other guardian
-    /// pollers), which is exactly the `WriteConflict` crash security finding 13
-    /// fixed. Deposits are now credited by the client submitting a verified
-    /// [`fedimint_usdt_common::DepositProof`] as a
-    /// [`fedimint_usdt_common::UsdtInput::DepositProofV0`] (see
-    /// `Self::process_deposit_proof`), which performs the equivalent
-    /// high-water/sweep bookkeeping inline inside the ordered transaction-
-    /// processing path -- never from a spawned task.
-    ///
-    /// `UsdtConsensusItem::Deposit`/[`DepositObservation`] and this method are
-    /// kept (rather than deleted) purely for consensus wire-format stability:
-    /// this crate's `#[derive(Encodable, Decodable)]` assigns enum variant
-    /// tags positionally (0-indexed among non-`#[encodable_default]`
-    /// variants) when no variant carries an explicit
-    /// `#[encodable(index = N)]`, as none do here -- deleting a variant from
-    /// the middle of [`fedimint_usdt_common::UsdtConsensusItem`] would
-    /// silently shift every later-declared variant's wire tag, corrupting
-    /// decode of existing consensus history for `MpcRound`, `MpcSignature`,
-    /// `RotateSigning`, `UserOpConfirmed`, `FeeVote`,
-    /// `BootstrapObservation`, `ReplaceUserOp`, and `BlockHash` unless every
-    /// one of them were re-pinned with an explicit index (a
-    /// `MODULE_CONSENSUS_VERSION`-bump-scale change, out of scope here). No
-    /// honest guardian proposes a `Deposit` item any more; this arm now only
-    /// matters if a byzantine guardian replays one, in which case it must
-    /// still behave exactly as before (self-authenticating, threshold-gated,
-    /// deterministic) rather than silently misbehave.
-    ///
-    /// # Determinism (consensus-critical)
-    ///
-    /// `process_consensus_item` must be a pure function of `(ordered
-    /// consensus items, prior consensus DB state)` — byte-identical on every
-    /// honest guardian. The claim key therefore MUST come from `obs` itself,
-    /// never from an existing [`DepositRecord`].
-    ///
-    /// `ensure!` below is a self-authentication check, not a local-state
-    /// read: it is a pure function of `obs` and this module's consensus
-    /// config (`group_public_key`), so every honest guardian computes the
-    /// same result. It also prevents a byzantine guardian from proposing an
-    /// observation whose `claim_pk` does not actually derive `account`
-    /// (which would let it credit an attacker-chosen claim key for someone
-    /// else's deposit account).
-    async fn credit_deposit(
-        &self,
-        dbtx: &mut DatabaseTransaction<'_>,
-        obs: &DepositObservation,
-    ) -> anyhow::Result<()> {
-        let claim_pk = obs.claim_pk;
-        ensure!(
-            fedimint_usdt_common::derive_deposit_account(
-                &self.cfg.consensus.group_public_key,
-                self.cfg.consensus.account_factory,
-                self.cfg.consensus.simple_account_impl,
-                &claim_pk
-            ) == obs.account,
-            "observation claim_pk does not derive its account"
-        );
-
-        let mut record = dbtx
-            .get_value(&DepositRecordKey(obs.account))
-            .await
-            .unwrap_or(DepositRecord {
-                claim_pk,
-                credited: UsdtAmount(0),
-                claimed: UsdtAmount(0),
-                last_observed_block: 0,
-                swept: UsdtAmount(0),
-                nonce: 0,
-                fees_accrued: UsdtAmount(0),
-            });
-        // Only credit forward; balance is monotonic between sweeps.
-        if obs.balance.0 > record.credited.0 {
-            record.credited = obs.balance;
-        }
-        record.last_observed_block = obs.block;
-        dbtx.insert_entry(&DepositRecordKey(obs.account), &record)
-            .await;
-        // Clear the round's votes.
-        dbtx.remove_by_prefix(&DepositObservationVoteAccountPrefix(obs.account))
-            .await;
-
-        // Deterministic trigger (Phase 7, Task 5): every guardian, right
-        // here, enqueues the deploy-and-sweep `UserOp` for this account and
-        // starts its MPC signing session -- a pure function of the just-
-        // written `DepositRecord` (consensus DB) and this module's config.
-        // See `maybe_trigger_sweep`'s own doc comment for the full
-        // determinism argument and the first-sweep-only scope of this phase.
-        self.maybe_trigger_sweep(dbtx, obs.account).await;
-
-        Ok(())
-    }
-
     /// Deterministically enqueues the deploy-and-sweep [`PendingUserOp`] for
     /// `account` and starts its `SigningPurpose::UserOp` signing session, if
     /// `account`'s [`DepositRecord`] has an un-swept remainder
     /// (`credited - swept > 0`) that is not already being swept by an
-    /// in-flight op. Called from [`Usdt::credit_deposit`] right after the
-    /// credit write, and re-called from [`Usdt::apply_user_op_confirmed`]
+    /// in-flight op. Called from [`Usdt::process_deposit_proof`] right after
+    /// the credit write, and re-called from [`Usdt::apply_user_op_confirmed`]
     /// right after a successful sweep confirms, so it always observes the
     /// freshest `DepositRecord`.
     ///
@@ -4913,13 +4622,14 @@ impl Usdt {
     ///
     /// # Scope / known limitation
     ///
-    /// The credit rule (`Usdt::credit_deposit`) is intentionally raw-balance
-    /// (`balance > credited`), not `swept + balance`, to stay race-free
-    /// against an observation straddling a sweep. A brand-new deposit paid to
-    /// an address whose balance has already been fully swept back to `0`
-    /// therefore stays a documented limitation (it would not raise `credited`
-    /// above the already-swept total); this method only re-sweeps the
-    /// `credited - swept` remainder that the credit rule does record.
+    /// The credit rule (`Usdt::process_deposit_proof`'s high-water mark) is
+    /// intentionally raw-balance (`proven > credited`), not `swept +
+    /// balance`, to stay race-free against a proof straddling a sweep. A
+    /// brand-new deposit paid to an address whose balance has already been
+    /// fully swept back to `0` therefore stays a documented limitation (it
+    /// would not raise `credited` above the already-swept total); this method
+    /// only re-sweeps the `credited - swept` remainder that the credit rule
+    /// does record.
     async fn maybe_trigger_sweep(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
@@ -5972,7 +5682,7 @@ impl Usdt {
         // tight-loop, re-enqueuing and burning gas every confirmation cycle.
         // On failure the remainder simply stays `credited - swept` (solvent,
         // still on-chain) and is retried only by a LATER deposit observation on
-        // this account (`credit_deposit` -> `maybe_trigger_sweep`). NOTE: if no
+        // this account (`process_deposit_proof` -> `maybe_trigger_sweep`). NOTE: if no
         // such future deposit ever arrives, the remainder stays un-swept
         // indefinitely -- there is no standalone sweep-retry -- which can wedge
         // any already-burned withdrawal that was relying on it (documented
@@ -8176,7 +7886,7 @@ async fn handle_latest_anchored_block(dbtx: &mut DatabaseTransaction<'_>) -> Anc
 mod tests {
     use fedimint_core::bitcoin::Network;
     use fedimint_core::{Amount, BitcoinHash, PeerId, TransactionId};
-    use fedimint_usdt_common::{EvmAddress, UsdtInputV0};
+    use fedimint_usdt_common::EvmAddress;
 
     use super::*;
     use crate::db::WithdrawFeesVoteKey;
@@ -8310,7 +8020,6 @@ mod tests {
             entry_point: fedimint_usdt_common::EvmAddress([0xcd; 20]),
             account_factory: fedimint_usdt_common::EvmAddress([0xce; 20]),
             simple_account_impl: fedimint_usdt_common::EvmAddress([0xcf; 20]),
-            check_ttl_blocks: 500,
             broadcaster_min_balance_wei: 1_000,
             eth_usd_price_feed: fedimint_usdt_common::EvmAddress([0xd0; 20]),
             price_feed_max_staleness_secs: 3_600,
@@ -8330,7 +8039,6 @@ mod tests {
             cfg0.consensus.simple_account_impl,
             params.simple_account_impl
         );
-        assert_eq!(cfg0.consensus.check_ttl_blocks, 500);
         assert_eq!(
             cfg0.consensus.residual_recovery_recipient,
             params.residual_recovery_recipient
@@ -9196,7 +8904,7 @@ mod tests {
         assert_eq!(ring_hash_at(&mut dbtx.to_ref_nc(), height).await, None);
     }
 
-    /// The freshness gate (mirroring the `Deposit` arm) rejects observations
+    /// The freshness gate rejects observations
     /// that are not yet confirmation-deep or that have aged out, and the
     /// redundancy guard rejects an exact repeat -- all BEFORE any ring write.
     #[tokio::test]
@@ -9600,264 +9308,6 @@ mod tests {
         secp256k1::SecretKey::from_slice(&[byte; 32])
             .expect("valid scalar")
             .public_key(&secp)
-    }
-
-    #[tokio::test]
-    async fn deposit_credited_only_at_threshold_of_identical_observations() {
-        let module = test_module_with_block_count(4, 0).await; // threshold = 3
-        let db = module.db_for_test();
-        // Security finding 12: the freshness gate requires the observation's
-        // block (50) to be `confirmation_depth`-deep and within the freshness
-        // window relative to consensus, so seed a consensus block count at
-        // `50 + confirmation_depth`.
-        seed_block_count_votes(db, 4, 50 + module.cfg.consensus.confirmation_depth).await;
-        let claim_pk = test_pubkey(0xaa);
-        let account = derive_deposit_account(
-            &module.cfg.consensus.group_public_key,
-            module.cfg.consensus.account_factory,
-            module.cfg.consensus.simple_account_impl,
-            &claim_pk,
-        );
-
-        let obs = DepositObservation {
-            account,
-            balance: UsdtAmount(2_000_000),
-            block: 50,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-        let mut dbtx = db.begin_transaction().await;
-
-        // Two identical votes: no credit yet.
-        for p in [0u16, 1] {
-            module
-                .process_consensus_item(
-                    &mut dbtx.to_ref_nc(),
-                    UsdtConsensusItem::Deposit(obs.clone()),
-                    PeerId::from(p),
-                )
-                .await
-                .unwrap();
-        }
-        assert!(
-            dbtx.to_ref_nc()
-                .get_value(&DepositRecordKey(account))
-                .await
-                .is_none()
-        );
-
-        // A DIFFERENT balance from peer 2 does not count toward the 2M quorum.
-        module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(DepositObservation {
-                    balance: UsdtAmount(9),
-                    ..obs.clone()
-                }),
-                PeerId::from(2),
-            )
-            .await
-            .unwrap();
-        assert!(
-            dbtx.to_ref_nc()
-                .get_value(&DepositRecordKey(account))
-                .await
-                .is_none()
-        );
-
-        // Third identical 2M vote reaches threshold → credited, votes cleared.
-        module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(obs.clone()),
-                PeerId::from(3),
-            )
-            .await
-            .unwrap();
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .unwrap();
-        assert_eq!(record.credited, UsdtAmount(2_000_000));
-        assert_eq!(record.claimed, UsdtAmount(0));
-        assert_eq!(
-            dbtx.to_ref_nc()
-                .find_by_prefix(&DepositObservationVoteAccountPrefix(account))
-                .await
-                .count()
-                .await,
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn redundant_deposit_vote_errors() {
-        // Same peer submitting the same observation twice must Err.
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        // Freshness gate (finding 12): keep the block-10 observation in-window.
-        seed_block_count_votes(db, 4, 10 + module.cfg.consensus.confirmation_depth).await;
-        let claim_pk = test_pubkey(0xbb);
-        let account = derive_deposit_account(
-            &module.cfg.consensus.group_public_key,
-            module.cfg.consensus.account_factory,
-            module.cfg.consensus.simple_account_impl,
-            &claim_pk,
-        );
-
-        let obs = DepositObservation {
-            account,
-            balance: UsdtAmount(1_000_000),
-            block: 10,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-        let mut dbtx = db.begin_transaction().await;
-
-        module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(obs.clone()),
-                PeerId::from(0),
-            )
-            .await
-            .unwrap();
-
-        let err = module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(obs.clone()),
-                PeerId::from(0),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("redundant"));
-    }
-
-    /// **Security finding 14.** A `Deposit` observation whose `claim_pk`
-    /// does NOT derive `account` must be rejected with `Err` BEFORE the
-    /// vote is stored, so a Byzantine guardian cannot bloat
-    /// `DepositObservationVote` with junk observations for random accounts
-    /// that never reach threshold (that check previously ran only inside
-    /// `credit_deposit`, i.e. only after threshold-many identical votes).
-    #[tokio::test]
-    async fn deposit_vote_with_mismatched_claim_pk_is_rejected() {
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let claim_pk = test_pubkey(0xcc);
-        // `account` is derived from a DIFFERENT claim_pk, so `obs.claim_pk`
-        // (below) does not derive it.
-        let other_claim_pk = test_pubkey(0xdd);
-        let account = derive_deposit_account(
-            &module.cfg.consensus.group_public_key,
-            module.cfg.consensus.account_factory,
-            module.cfg.consensus.simple_account_impl,
-            &other_claim_pk,
-        );
-
-        let obs = DepositObservation {
-            account,
-            balance: UsdtAmount(1_000_000),
-            block: 10,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-        let mut dbtx = db.begin_transaction().await;
-
-        let err = module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(obs.clone()),
-                PeerId::from(0),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("claim_pk"),
-            "unexpected error: {err}"
-        );
-
-        assert!(
-            dbtx.to_ref_nc()
-                .get_value(&DepositObservationVoteKey(account, PeerId::from(0)))
-                .await
-                .is_none(),
-            "malformed observation must not be stored as a vote"
-        );
-    }
-
-    /// A `Deposit` observation whose `claim_pk` does not actually derive its
-    /// `account` must be rejected by the self-authentication check in
-    /// `credit_deposit`, deterministically (a pure function of `obs` and the
-    /// consensus config, so every honest guardian rejects it identically —
-    /// this also guards against a byzantine guardian crediting an
-    /// attacker-chosen claim key onto someone else's deposit account).
-    #[tokio::test]
-    async fn deposit_with_mismatched_claim_pk_is_rejected() {
-        // Security finding 14 (Task 2.2) moved this self-authentication
-        // check from `credit_deposit` (threshold time) to the very top of
-        // the `Deposit` arm of `process_consensus_item`, so a mismatched
-        // `claim_pk`/`account` pairing is now rejected on the FIRST vote --
-        // it can no longer accumulate below-threshold votes at all. This
-        // test now covers `credit_deposit`'s own check directly (called
-        // out-of-band, bypassing `process_consensus_item`) as the
-        // defense-in-depth path the brief asked to keep; see
-        // `deposit_vote_with_mismatched_claim_pk_is_rejected` for the
-        // arm-level, vote-storage-time coverage of the same finding.
-        let module = test_module_with_block_count(4, 0).await; // threshold = 3
-        let db = module.db_for_test();
-        let claim_pk = test_pubkey(0x43);
-        let wrong_account = EvmAddress([0x99; 20]); // does NOT derive from claim_pk
-
-        let obs = DepositObservation {
-            account: wrong_account,
-            balance: UsdtAmount(2_000_000),
-            block: 50,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-
-        // Every vote for this malformed observation is rejected immediately
-        // -- it never reaches the vote table, so it can never accumulate
-        // towards threshold.
-        let mut dbtx = db.begin_transaction().await;
-        for p in [0u16, 1, 2] {
-            let err = module
-                .process_consensus_item(
-                    &mut dbtx.to_ref_nc(),
-                    UsdtConsensusItem::Deposit(obs.clone()),
-                    PeerId::from(p),
-                )
-                .await
-                .unwrap_err();
-            assert!(err.to_string().contains("does not derive its account"));
-        }
-        assert!(
-            dbtx.to_ref_nc()
-                .get_value(&DepositRecordKey(wrong_account))
-                .await
-                .is_none(),
-            "no DepositRecord must be created for a self-authentication failure"
-        );
-        assert_eq!(
-            dbtx.to_ref_nc()
-                .find_by_prefix(&DepositObservationVoteAccountPrefix(wrong_account))
-                .await
-                .count()
-                .await,
-            0,
-            "a malformed observation must never be stored as a vote"
-        );
-
-        // Defense-in-depth: `credit_deposit` itself still rejects the same
-        // mismatch if ever reached directly (e.g. in a future code path
-        // that calls it other than via the arm-level check above).
-        let err = module
-            .credit_deposit(&mut dbtx.to_ref_nc(), &obs)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("does not derive its account"));
     }
 
     /// Sets up a fresh in-memory DB with `BlockCountVote`s from a majority of
@@ -10824,13 +10274,13 @@ mod tests {
     // removed alongside the polling machinery they exercised; that gating is
     // now covered structurally by the block-hash-ring anchor + proof tests.
     //
-    // What remains worth proving here is the deep-reorg boundary: once a
-    // deposit HAS been credited, `credited` is monotonic-forward-only (see
-    // [`Usdt::credit_deposit`]'s own doc comment: "Only credit forward;
-    // balance is monotonic between sweeps") and there is no consensus arm that
-    // un-credits it.
-    // `drill_a_credited_deposit_is_monotonic_and_never_moves_backward` below
-    // proves that monotonicity directly. Whether to build a credit-reversal
+    // What remains worth noting here is the deep-reorg boundary: once a
+    // deposit HAS been credited, `credited` is a monotonic-forward-only
+    // high-water mark (`process_deposit_proof` only ever advances it to a
+    // larger proven balance -- proven directly by
+    // `deposit_proof_input_credits_delta_and_sets_high_water` and the
+    // stale-growth adversary test) and there is no consensus arm that
+    // un-credits it. Whether to build a credit-reversal
     // path for the deep-reorg case (which also has to interact with
     // already-claimed e-cash) is the maintainer policy decision recorded in
     // the Phase-9 plan's "Reorg credit-reversal policy" sign-off item
@@ -10838,94 +10288,6 @@ mod tests {
     // rely on an operator choosing `confirmation_depth` conservatively
     // enough, for the target chain, that a reorg past it is not practically
     // achievable.
-
-    #[tokio::test]
-    async fn drill_a_credited_deposit_is_monotonic_and_never_moves_backward() {
-        // Once a deposit has been credited, `credited` is monotonic-
-        // forward-only (see `Usdt::credit_deposit`'s own doc comment) --
-        // there is no credit-reversal consensus arm. This proves that
-        // guarantee directly: even if a LATER threshold-agreed
-        // `DepositObservation` reports a LOWER balance for the same account
-        // (on a real deployment, that would require a reorg deep enough to
-        // have reduced the balance below what was already credited a
-        // confirmation_depth-satisfying read ago -- see this section's
-        // header comment for why that specific scenario cannot arise from a
-        // reorg SHALLOWER than confirmation_depth), the module's `credited`
-        // field never moves down.
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        // Freshness gate (finding 12): seed a consensus block count that keeps
-        // BOTH the block-50 and (later) block-80 observations in-window.
-        seed_block_count_votes(db, 4, 80 + module.cfg.consensus.confirmation_depth).await;
-        let claim_pk = test_pubkey(0x75);
-        let account = derive_deposit_account(
-            &module.cfg.consensus.group_public_key,
-            module.cfg.consensus.account_factory,
-            module.cfg.consensus.simple_account_impl,
-            &claim_pk,
-        );
-
-        let high_obs = DepositObservation {
-            account,
-            balance: UsdtAmount(2_000_000),
-            block: 50,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-        let mut dbtx = db.begin_transaction().await;
-        for p in [0u16, 1, 2] {
-            module
-                .process_consensus_item(
-                    &mut dbtx.to_ref_nc(),
-                    UsdtConsensusItem::Deposit(high_obs.clone()),
-                    PeerId::from(p),
-                )
-                .await
-                .unwrap();
-        }
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("threshold reached, record must exist");
-        assert_eq!(record.credited, UsdtAmount(2_000_000));
-
-        // A later round observes a LOWER balance at a later block (modeling
-        // a deep reorg, or a byzantine/erroneous read) -- reaching the SAME
-        // 3-of-4 threshold.
-        let low_obs = DepositObservation {
-            account,
-            balance: UsdtAmount(500_000),
-            block: 80,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-        for p in [0u16, 1, 2] {
-            module
-                .process_consensus_item(
-                    &mut dbtx.to_ref_nc(),
-                    UsdtConsensusItem::Deposit(low_obs.clone()),
-                    PeerId::from(p),
-                )
-                .await
-                .unwrap();
-        }
-
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(
-            record.credited,
-            UsdtAmount(2_000_000),
-            "credited must never move backward even given a later, lower-balance \
-             threshold-agreed observation"
-        );
-        // Freshness tracking (`last_observed_block`) is independent of the
-        // monotonic credit amount, and does still advance.
-        assert_eq!(record.last_observed_block, 80);
-    }
 
     /// Builds a synthetic single-leaf Merkle-Patricia deposit proof that the
     /// real [`crate::proof::verify_deposit_proof`] accepts, wholly offline: a
@@ -11608,479 +10970,6 @@ mod tests {
         );
     }
 
-    /// SECURITY (Task 5 review): the whole point of `DepositProofV0` bumping
-    /// `claimed` alongside `credited` is to close off a legacy `UsdtInput::V0`
-    /// claim on the SAME account for the value the proof just minted. Prove
-    /// that end-to-end: credit an account via a proof, then immediately
-    /// attempt a real `V0` claim against it and confirm there is nothing left
-    /// to claim (`available == 0`). If `process_deposit_proof` only bumped
-    /// `credited` (forgetting `claimed += delta`), this V0 claim would
-    /// succeed and re-mint the already-minted 500M -- a double-spend.
-    #[tokio::test]
-    async fn deposit_proof_then_v0_cannot_double_claim() {
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let claim_pk = test_pubkey(0x75);
-        let account = derived_account(&module, &claim_pk);
-        let usdt_contract = module.cfg.consensus.usdt_contract;
-
-        // The proof path now charges a deposit fee, so a fee median must
-        // exist for the credit to be accepted at all.
-        seed_fee_votes(db, 4, sample_fee_vote()).await;
-        let fee = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
-
-        // Anchor and submit a proof of a 500 USDT (1e-6 units) on-chain balance.
-        let (proof, hash) = synthetic_deposit_proof(usdt_contract, account, 500_000_000, 100);
-        {
-            let mut dbtx = db.begin_transaction().await;
-            write_block_hash_ring(&mut dbtx.to_ref_nc(), 100, hash).await;
-            dbtx.commit_tx().await;
-        }
-
-        let mut dbtx = db.begin_transaction().await;
-        let meta = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::DepositProofV0 {
-                    claim_pk,
-                    proof: proof.clone(),
-                    fee,
-                },
-                test_in_point(),
-            )
-            .await
-            .expect("anchored proof of a derived account must credit");
-        assert_eq!(
-            meta.amount.amounts,
-            Amounts::new_custom(USDT_UNIT, Amount::from_msats(500_000_000)),
-            "the proof credits the full delta (gross; the fee is netted by the client's mint \
-             output)"
-        );
-        dbtx.commit_tx().await;
-
-        let record = db
-            .begin_transaction_nc()
-            .await
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("credit created the record");
-        assert_eq!(
-            record.credited,
-            UsdtAmount(500_000_000),
-            "credited = proven"
-        );
-        assert_eq!(
-            record.claimed,
-            UsdtAmount(500_000_000),
-            "claimed advanced by the SAME delta the proof minted -- this is the \
-             guard under test"
-        );
-
-        // Now attempt a legacy V0 claim on the SAME account. `available =
-        // credited - claimed` must be 0: the proof already minted this value,
-        // so there is nothing left for a V0 input to re-mint. Even a
-        // 1-unit claim must be rejected as insufficient credit; the
-        // `InsufficientCredit` check runs before the fee-quote lookup in
-        // `process_input`, so the seeded median cannot mask this guard.
-        let mut dbtx = db.begin_transaction().await;
-        let err = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(1),
-                    fee: UsdtAmount(0),
-                }),
-                test_in_point(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err,
-            UsdtInputError::InsufficientCredit {
-                available: UsdtAmount(0),
-                requested: UsdtAmount(1),
-            },
-            "a V0 claim must not be able to re-mint value a DepositProofV0 \
-             already minted for this account"
-        );
-
-        // `claimed` (and `credited`) must be unchanged by the rejected claim.
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(record.credited, UsdtAmount(500_000_000));
-        assert_eq!(record.claimed, UsdtAmount(500_000_000));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn process_input_claims_credited_deposit_and_guards_against_double_claim() {
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let account = EvmAddress([0x55; 20]);
-        let claim_pk = test_pubkey(0xee);
-
-        // A `FeeVote` median must exist for `process_input` to quote a
-        // deposit fee at all (mirrors `process_output_debits_and_enqueues_
-        // withdrawal` seeding a median before withdrawing).
-        seed_fee_votes(db, 4, sample_fee_vote()).await;
-        let fee = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
-
-        {
-            let mut dbtx = db.begin_transaction().await;
-            dbtx.insert_new_entry(
-                &DepositRecordKey(account),
-                &DepositRecord {
-                    claim_pk,
-                    credited: UsdtAmount(500_000_000),
-                    claimed: UsdtAmount(0),
-                    last_observed_block: 0,
-                    swept: UsdtAmount(0),
-                    nonce: 0,
-                    fees_accrued: UsdtAmount(0),
-                },
-            )
-            .await;
-            dbtx.commit_tx().await;
-        }
-
-        // First claim of 200M (paying exactly the quoted fee) succeeds,
-        // funding USDT_UNIT and bumping `claimed` by the FULL amount (the
-        // fee stays credited-but-unissued until the sweep, per
-        // `process_input`'s doc comment).
-        let mut dbtx = db.begin_transaction().await;
-        let meta = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(200_000_000),
-                    fee,
-                }),
-                test_in_point(),
-            )
-            .await
-            .expect("first claim within credited balance must succeed");
-        assert_eq!(
-            meta.amount.amounts,
-            Amounts::new_custom(USDT_UNIT, Amount::from_msats(200_000_000)),
-            "amounts is the FULL/gross claimed amount, mirroring process_output's \
-             amounts -- FundingVerifier nets the separate `fees` pool"
-        );
-        assert_eq!(
-            meta.amount.fees,
-            Amounts::new_custom(USDT_UNIT, Amount::from_msats(fee.0))
-        );
-        assert_eq!(meta.pub_key, claim_pk);
-        dbtx.commit_tx().await;
-
-        let record = db
-            .begin_transaction_nc()
-            .await
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(record.claimed, UsdtAmount(200_000_000));
-
-        // Second claim of 200M succeeds (400M of 500M now claimed).
-        let mut dbtx = db.begin_transaction().await;
-        module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(200_000_000),
-                    fee,
-                }),
-                test_in_point(),
-            )
-            .await
-            .expect("second claim within remaining credited balance must succeed");
-        dbtx.commit_tx().await;
-
-        let record = db
-            .begin_transaction_nc()
-            .await
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(record.claimed, UsdtAmount(400_000_000));
-
-        // Third claim of 200M exceeds the remaining 100M: double-claim/over-claim
-        // guard.
-        let mut dbtx = db.begin_transaction().await;
-        let err = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(200_000_000),
-                    fee,
-                }),
-                test_in_point(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err,
-            UsdtInputError::InsufficientCredit {
-                available: UsdtAmount(100_000_000),
-                requested: UsdtAmount(200_000_000),
-            }
-        );
-
-        // `claimed` must not have been bumped by the rejected claim.
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(record.claimed, UsdtAmount(400_000_000));
-    }
-
-    #[tokio::test]
-    async fn process_input_rejects_deposit_fee_below_quote() {
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let account = EvmAddress([0x57; 20]);
-        let claim_pk = test_pubkey(0xef);
-
-        seed_fee_votes(db, 4, sample_fee_vote()).await;
-        let quote = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
-
-        {
-            let mut dbtx = db.begin_transaction().await;
-            dbtx.insert_new_entry(
-                &DepositRecordKey(account),
-                &DepositRecord {
-                    claim_pk,
-                    credited: UsdtAmount(500_000_000),
-                    claimed: UsdtAmount(0),
-                    last_observed_block: 0,
-                    swept: UsdtAmount(0),
-                    nonce: 0,
-                    fees_accrued: UsdtAmount(0),
-                },
-            )
-            .await;
-            dbtx.commit_tx().await;
-        }
-
-        let mut dbtx = db.begin_transaction().await;
-        let err = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(200_000_000),
-                    fee: UsdtAmount(quote.0 - 1),
-                }),
-                test_in_point(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err,
-            UsdtInputError::DepositFeeInsufficient {
-                quote,
-                offered: UsdtAmount(quote.0 - 1),
-            }
-        );
-
-        // Rejected claim must not have bumped `claimed`.
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(record.claimed, UsdtAmount(0));
-    }
-
-    #[tokio::test]
-    async fn process_input_accrues_deposit_fee_onto_record() {
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let account = EvmAddress([0x57; 20]);
-        seed_fee_votes(db, 4, sample_fee_vote()).await;
-        let quote = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
-
-        {
-            let mut dbtx = db.begin_transaction().await;
-            dbtx.insert_new_entry(
-                &DepositRecordKey(account),
-                &DepositRecord {
-                    claim_pk: test_pubkey(0xef),
-                    credited: UsdtAmount(500_000_000),
-                    claimed: UsdtAmount(0),
-                    last_observed_block: 0,
-                    swept: UsdtAmount(0),
-                    nonce: 0,
-                    fees_accrued: UsdtAmount(0),
-                },
-            )
-            .await;
-            dbtx.commit_tx().await;
-        }
-
-        let mut dbtx = db.begin_transaction().await;
-        module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(200_000_000),
-                    fee: quote,
-                }),
-                test_in_point(),
-            )
-            .await
-            .expect("valid claim");
-        let rec = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .unwrap();
-        assert_eq!(rec.fees_accrued, quote);
-        assert_eq!(rec.claimed, UsdtAmount(200_000_000));
-    }
-
-    #[tokio::test]
-    async fn process_input_rejects_fee_gte_amount() {
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let account = EvmAddress([0x58; 20]);
-        let claim_pk = test_pubkey(0xf0);
-
-        seed_fee_votes(db, 4, sample_fee_vote()).await;
-        let quote = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
-
-        {
-            let mut dbtx = db.begin_transaction().await;
-            dbtx.insert_new_entry(
-                &DepositRecordKey(account),
-                &DepositRecord {
-                    claim_pk,
-                    credited: UsdtAmount(500_000_000),
-                    claimed: UsdtAmount(0),
-                    last_observed_block: 0,
-                    swept: UsdtAmount(0),
-                    nonce: 0,
-                    fees_accrued: UsdtAmount(0),
-                },
-            )
-            .await;
-            dbtx.commit_tx().await;
-        }
-
-        // `amount == fee` exactly: the deposit would fund nothing after the
-        // fee, so it must be rejected rather than silently minting zero
-        // e-cash.
-        let mut dbtx = db.begin_transaction().await;
-        let err = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: quote,
-                    fee: quote,
-                }),
-                test_in_point(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err,
-            UsdtInputError::FeeExceedsAmount {
-                amount: quote,
-                fee: quote,
-            }
-        );
-
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(record.claimed, UsdtAmount(0));
-    }
-
-    #[tokio::test]
-    async fn process_input_rejects_when_no_fee_median_exists() {
-        // Mirrors `process_output_rejects_when_no_fee_median_exists` exactly:
-        // an absent median is now a distinct, explicit rejection
-        // (`NoFeeQuoteAvailable`) rather than being folded into
-        // `DepositFeeInsufficient` via an effectively-infinite sentinel quote.
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let account = EvmAddress([0x59; 20]);
-        let claim_pk = test_pubkey(0xf1);
-
-        {
-            let mut dbtx = db.begin_transaction().await;
-            dbtx.insert_new_entry(
-                &DepositRecordKey(account),
-                &DepositRecord {
-                    claim_pk,
-                    credited: UsdtAmount(500_000_000),
-                    claimed: UsdtAmount(0),
-                    last_observed_block: 0,
-                    swept: UsdtAmount(0),
-                    nonce: 0,
-                    fees_accrued: UsdtAmount(0),
-                },
-            )
-            .await;
-            dbtx.commit_tx().await;
-        }
-
-        let mut dbtx = db.begin_transaction().await;
-        let err = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(200_000_000),
-                    fee: UsdtAmount(u64::MAX - 1),
-                }),
-                test_in_point(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err, UsdtInputError::NoFeeQuoteAvailable);
-
-        let record = dbtx
-            .to_ref_nc()
-            .get_value(&DepositRecordKey(account))
-            .await
-            .expect("record still exists");
-        assert_eq!(record.claimed, UsdtAmount(0));
-    }
-
-    #[tokio::test]
-    async fn process_input_unknown_account_errors() {
-        let module = test_module_with_block_count(4, 0).await;
-        let db = module.db_for_test();
-        let account = EvmAddress([0x66; 20]);
-
-        let mut dbtx = db.begin_transaction().await;
-        let err = module
-            .process_input(
-                &mut dbtx.to_ref_nc(),
-                &UsdtInput::V0(UsdtInputV0 {
-                    account,
-                    amount: UsdtAmount(1),
-                    fee: UsdtAmount(0),
-                }),
-                test_in_point(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err, UsdtInputError::UnknownDepositAccount);
-    }
-
     #[tokio::test]
     async fn process_input_default_variant_errors() {
         let module = test_module_with_block_count(4, 0).await;
@@ -12098,7 +10987,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err, UsdtInputError::UnknownDepositAccount);
+        assert_eq!(err, UsdtInputError::UnsupportedInputVariant);
     }
 
     fn test_out_point(idx: u64) -> OutPoint {
@@ -14303,52 +13192,56 @@ mod tests {
             &claim_pk,
         );
 
-        let obs = DepositObservation {
-            account,
-            balance: UsdtAmount(4_500_000),
-            block: 5,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-
-        // Security finding 02 (Task 4.3): `maybe_trigger_sweep` now defers
+        // Security finding 02 (Task 4.3): `maybe_trigger_sweep` defers
         // any sweep until a fee median exists (it cannot economically gate
         // an unpriceable op), so every guardian needs one FIRST. A low
         // (0.1 gwei) median still 2x's below the 1 gwei op-fee floor, so
         // this preserves the gas-pricing regression assertion below (floor,
         // not the 30 gwei devnet constant) while quoting a deposit fee
-        // (~288_000, well under the 4_500_000 balance) that clears the new
-        // dust gate.
+        // (288_000, well under the 4_500_000 balance) that clears both the
+        // proof path's fee gates and the dust gate.
         let low_fee_vote = fedimint_usdt_common::FeeVote {
             max_fee_per_gas_wei: 100_000_000,
             usdt_per_eth_e6: 3_000_000_000,
         };
         for module in modules.values() {
             seed_fee_votes(module.db_for_test(), N, low_fee_vote).await;
-            // Security finding 12 freshness gate: keep the block-5 deposit
-            // observation in-window on every guardian.
             seed_block_count_votes(
                 module.db_for_test(),
                 N,
-                5 + module.cfg.consensus.confirmation_depth,
+                5 + modules[&peers[0]].cfg.consensus.confirmation_depth,
             )
             .await;
         }
+        let deposit_fee = deposit_fee_quote(&low_fee_vote).expect("low vote must quote");
 
         // Every guardian independently processes the identical ordered
-        // Deposit votes (threshold 3-of-4), triggering `maybe_trigger_sweep`.
+        // fee-paying deposit-proof input (the live crediting path: crediting
+        // runs inside ordered transaction processing on every guardian),
+        // triggering `maybe_trigger_sweep`. Each guardian's ring is anchored
+        // to the same synthetic proof hash first, exactly as the block-hash
+        // observer quorum would.
+        let (proof, proof_hash) = synthetic_deposit_proof(
+            modules[&peers[0]].cfg.consensus.usdt_contract,
+            account,
+            4_500_000,
+            5,
+        );
         for module in modules.values() {
             let mut dbtx = module.db_for_test().begin_transaction().await;
-            for &voter in &[PeerId::from(0), PeerId::from(1), PeerId::from(2)] {
-                module
-                    .process_consensus_item(
-                        &mut dbtx.to_ref_nc(),
-                        UsdtConsensusItem::Deposit(obs.clone()),
-                        voter,
-                    )
-                    .await
-                    .expect("Deposit item processes cleanly");
-            }
+            write_block_hash_ring(&mut dbtx.to_ref_nc(), 5, proof_hash).await;
+            module
+                .process_input(
+                    &mut dbtx.to_ref_nc(),
+                    &UsdtInput::DepositProofV0 {
+                        claim_pk,
+                        proof: proof.clone(),
+                        fee: deposit_fee,
+                    },
+                    test_in_point(),
+                )
+                .await
+                .expect("fee-paying deposit proof credits cleanly");
             dbtx.commit_tx().await;
         }
 
@@ -14668,8 +13561,7 @@ mod tests {
         );
 
         // `apply_user_op_confirmed` clears the ENTIRE vote prefix AND the
-        // `SubmittedUserOp` itself once threshold is reached (mirroring
-        // `credit_deposit`'s `DepositObservationVoteAccountPrefix` clear).
+        // `SubmittedUserOp` itself once threshold is reached.
         // Security finding 14 (Task 2.2) requires every `UserOpConfirmed`
         // vote to correspond to a live `SubmittedUserOp`, so a vote
         // re-delivered for this op AFTER it has already been fully applied
@@ -15956,7 +14848,11 @@ mod tests {
     /// `PendingUserOp`, forcing the broadcaster to front ETH for each. After
     /// the fix, none of them are economically sweepable, so ZERO
     /// `DeployAndSweep` ops are ever created -- the drain is structurally
-    /// impossible, not just rate-limited.
+    /// impossible, not just rate-limited. (The dust records are written
+    /// directly and the trigger called per account, mirroring the other
+    /// dust-gate tests; a live dust deposit could not even be CREDITED any
+    /// more, since the proof path rejects `delta <= fee` outright -- this
+    /// test proves the sweep trigger's own independent gate.)
     #[tokio::test]
     async fn many_dust_deposits_produce_zero_sweep_ops() {
         const ATTACKER_ACCOUNTS: u8 = 50;
@@ -15973,18 +14869,11 @@ mod tests {
                 module.cfg.consensus.simple_account_impl,
                 &claim_pk,
             );
-            let obs = DepositObservation {
-                account,
-                balance: UsdtAmount(1),
-                block: 10,
-                block_hash: [0u8; 32],
-                claim_pk,
-            };
+            insert_deposit_record(db, account, claim_pk, UsdtAmount(1)).await;
             let mut dbtx = db.begin_transaction().await;
             module
-                .credit_deposit(&mut dbtx.to_ref_nc(), &obs)
-                .await
-                .expect("crediting dust must not itself error");
+                .maybe_trigger_sweep(&mut dbtx.to_ref_nc(), account)
+                .await;
             dbtx.commit_tx().await;
         }
 
@@ -17940,13 +16829,14 @@ mod tests {
     }
 
     /// **Task 8 (solvency invariant).** Drives a single `module`/`db`
-    /// through a realistic mixed sequence -- a deposit's fee accrual +
-    /// `DeployAndSweep` confirm, a successful user withdrawal's fee
-    /// accrual, then a partial `WithdrawFees` payout -- reusing the exact
-    /// setups from `process_input_accrues_deposit_fee_onto_record`,
+    /// through a realistic mixed sequence -- a fee-paying deposit proof's
+    /// fee accrual + its `DeployAndSweep` confirm, a successful user
+    /// withdrawal's fee accrual, then a partial `WithdrawFees` payout --
+    /// reusing the setups from
+    /// `deposit_proof_input_credits_delta_and_sets_high_water`,
     /// `deploy_and_sweep_confirm_credits_accrued_deposit_fee_into_pool`,
     /// `successful_withdrawal_confirm_accrues_max_fee`, and
-    /// `withdraw_fees_confirm_debits_and_gcs_votes` (grepped verbatim, only
+    /// `withdraw_fees_confirm_debits_and_gcs_votes` (only
     /// the fixture byte constants/`out_point`/`op_hash` values are changed
     /// so the three stages don't collide in the shared `db`). After EVERY
     /// stage this asserts the core solvency invariant: the federation must
@@ -17974,45 +16864,35 @@ mod tests {
         seed_fee_votes(db, 4, sample_fee_vote()).await;
         let quote = deposit_fee_quote(&sample_fee_vote()).expect("realistic vote must quote");
 
-        // --- Stage A: deposit fee accrual (`process_input`) then its
-        // `DeployAndSweep` confirm -- accrued_fees rises together with
-        // balance. Setup verbatim from
-        // `process_input_accrues_deposit_fee_onto_record` /
+        // --- Stage A: a fee-paying deposit proof's fee accrual
+        // (`process_input`) then its `DeployAndSweep` confirm --
+        // accrued_fees rises together with balance. Setup mirrors
+        // `deposit_proof_input_credits_delta_and_sets_high_water` /
         // `deploy_and_sweep_confirm_credits_accrued_deposit_fee_into_pool`.
-        let account = EvmAddress([0xd1; 20]);
         let claim_pk = test_pubkey(0xd2);
+        let account = derived_account(&module, &claim_pk);
         let claimed_amount = UsdtAmount(200_000_000);
+        let (proof, proof_hash) = synthetic_deposit_proof(
+            module.cfg.consensus.usdt_contract,
+            account,
+            claimed_amount.0,
+            100,
+        );
         {
             let mut dbtx = db.begin_transaction().await;
-            dbtx.insert_new_entry(
-                &DepositRecordKey(account),
-                &DepositRecord {
-                    claim_pk,
-                    credited: UsdtAmount(500_000_000),
-                    claimed: UsdtAmount(0),
-                    last_observed_block: 0,
-                    swept: UsdtAmount(0),
-                    nonce: 0,
-                    fees_accrued: UsdtAmount(0),
-                },
-            )
-            .await;
-            dbtx.commit_tx().await;
-        }
-        {
-            let mut dbtx = db.begin_transaction().await;
+            write_block_hash_ring(&mut dbtx.to_ref_nc(), 100, proof_hash).await;
             module
                 .process_input(
                     &mut dbtx.to_ref_nc(),
-                    &UsdtInput::V0(UsdtInputV0 {
-                        account,
-                        amount: claimed_amount,
+                    &UsdtInput::DepositProofV0 {
+                        claim_pk,
+                        proof,
                         fee: quote,
-                    }),
+                    },
                     test_in_point(),
                 )
                 .await
-                .expect("valid claim");
+                .expect("valid fee-paying deposit proof");
             dbtx.commit_tx().await;
         }
         let sweep_op_hash = [0xd3; 32];
@@ -19404,17 +18284,6 @@ mod tests {
         )
         .await;
         dbtx.insert_new_entry(
-            &DepositObservationVoteKey(account, PeerId::from(0)),
-            &DepositObservation {
-                account,
-                balance: UsdtAmount(1_000_000),
-                block: 1,
-                block_hash: [0u8; 32],
-                claim_pk,
-            },
-        )
-        .await;
-        dbtx.insert_new_entry(
             &SigningSessionKey(session_id),
             &SigningSession {
                 purpose: SigningPurpose::UserOp(op_hash),
@@ -19544,7 +18413,6 @@ mod tests {
             "Block Count Votes",
             "Fee Votes",
             "Deposit Records",
-            "Deposit Observation Votes",
             "Signing Sessions",
             "MPC Round Chunks",
             "Pending UserOps",
@@ -20768,156 +19636,6 @@ mod tests {
                 .iter()
                 .all(|p: &UserOpConfirmedProposal| p.op_hash != mismatch_hash),
             "an op whose EntryPoint log is absent must not be confirmed on the bundler's word"
-        );
-    }
-
-    /// **Security finding 12 (Task 5.1).** A sub-threshold set of deposit
-    /// observation votes that ages out of the freshness window can no longer
-    /// be completed to a threshold credit by a late (Byzantine or delayed)
-    /// duplicate -- the deep-reorg stale-vote scenario.
-    #[tokio::test]
-    async fn stale_deposit_vote_past_max_age_cannot_complete() {
-        let module = test_module_with_block_count(4, 0).await; // threshold = 3
-        let db = module.db_for_test();
-        let depth = module.cfg.consensus.confirmation_depth;
-        let claim_pk = test_pubkey(0x88);
-        let account = derive_deposit_account(
-            &module.cfg.consensus.group_public_key,
-            module.cfg.consensus.account_factory,
-            module.cfg.consensus.simple_account_impl,
-            &claim_pk,
-        );
-        let obs = DepositObservation {
-            account,
-            balance: UsdtAmount(2_000_000),
-            block: 50,
-            block_hash: [0x9A; 32],
-            claim_pk,
-        };
-
-        // In-window: two honest votes stored, below the 3-of-4 threshold.
-        seed_block_count_votes(db, 4, 50 + depth).await;
-        let mut dbtx = db.begin_transaction().await;
-        for p in [0u16, 1] {
-            module
-                .process_consensus_item(
-                    &mut dbtx.to_ref_nc(),
-                    UsdtConsensusItem::Deposit(obs.clone()),
-                    PeerId::from(p),
-                )
-                .await
-                .unwrap();
-        }
-        dbtx.commit_tx().await;
-        assert!(
-            db.begin_transaction_nc()
-                .await
-                .get_value(&DepositRecordKey(account))
-                .await
-                .is_none(),
-            "two of three votes must not credit"
-        );
-
-        // A deep reorg's worth of blocks pass: advance consensus far past the
-        // freshness window (age = depth + 200 > depth + DEPOSIT_VOTE_MAX_AGE_BLOCKS).
-        seed_block_count_votes(db, 4, 50 + depth + DEPOSIT_VOTE_MAX_AGE_BLOCKS + 100).await;
-
-        // The late (would-be threshold-completing) third vote must be rejected
-        // as too old and credit nothing.
-        let mut dbtx = db.begin_transaction().await;
-        let err = module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(obs.clone()),
-                PeerId::from(2),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("too old"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            dbtx.to_ref_nc()
-                .get_value(&DepositRecordKey(account))
-                .await
-                .is_none(),
-            "a vote aged out of the freshness window must never complete a threshold credit"
-        );
-    }
-
-    /// **Security finding 12 (Task 5.1).** Deposit observations that agree on
-    /// account/balance/height but carry different `block_hash`es (two forks)
-    /// must not aggregate; only a matching-hash quorum credits.
-    #[tokio::test]
-    async fn deposit_observation_carries_and_requires_block_hash() {
-        let module = test_module_with_block_count(4, 0).await; // threshold = 3
-        let db = module.db_for_test();
-        let depth = module.cfg.consensus.confirmation_depth;
-        let claim_pk = test_pubkey(0x99);
-        let account = derive_deposit_account(
-            &module.cfg.consensus.group_public_key,
-            module.cfg.consensus.account_factory,
-            module.cfg.consensus.simple_account_impl,
-            &claim_pk,
-        );
-        seed_block_count_votes(db, 4, 50 + depth).await;
-
-        let obs = |block_hash: [u8; 32]| DepositObservation {
-            account,
-            balance: UsdtAmount(2_000_000),
-            block: 50,
-            block_hash,
-            claim_pk,
-        };
-        let fork_a = [0xAAu8; 32];
-        let fork_b = [0xBBu8; 32];
-
-        let mut dbtx = db.begin_transaction().await;
-        // 2 votes on fork A + 1 on fork B at the same height: no full-field
-        // quorum, so no credit.
-        for p in [0u16, 1] {
-            module
-                .process_consensus_item(
-                    &mut dbtx.to_ref_nc(),
-                    UsdtConsensusItem::Deposit(obs(fork_a)),
-                    PeerId::from(p),
-                )
-                .await
-                .unwrap();
-        }
-        module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(obs(fork_b)),
-                PeerId::from(2),
-            )
-            .await
-            .unwrap();
-        assert!(
-            dbtx.to_ref_nc()
-                .get_value(&DepositRecordKey(account))
-                .await
-                .is_none(),
-            "different-fork observations must not aggregate to a credit"
-        );
-
-        // Peer 2 switches to fork A: three matching-hash votes -> credited.
-        module
-            .process_consensus_item(
-                &mut dbtx.to_ref_nc(),
-                UsdtConsensusItem::Deposit(obs(fork_a)),
-                PeerId::from(2),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            dbtx.to_ref_nc()
-                .get_value(&DepositRecordKey(account))
-                .await
-                .expect("matching-hash quorum credits")
-                .credited,
-            UsdtAmount(2_000_000)
         );
     }
 

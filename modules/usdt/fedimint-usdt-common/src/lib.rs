@@ -47,7 +47,8 @@ pub const KIND: ModuleKind = ModuleKind::from_static_str("usdt");
 /// freshness stamp), a consensus-DB record shape change handled by
 /// `migrate_db_v0`.
 ///
-/// Bumped to `0.5` (sec-04/12/15 hardening): [`DepositObservation`],
+/// Bumped to `0.5` (sec-04/12/15 hardening): the (since-removed)
+/// `DepositObservation`,
 /// [`UserOpReceipt`](user_op::UserOpReceipt), the server's
 /// `UserOpConfirmedObservation`, and the [`UsdtConsensusItem::UserOpConfirmed`]
 /// consensus item all gained a `block_hash` field binding an observation to a
@@ -961,45 +962,10 @@ impl DepositProof {
     }
 }
 
-/// Payload of a `UsdtConsensusItem::Deposit` observation.
-///
-/// # Legacy (proof-driven crediting superseded this)
-///
-/// This was the payload of the guardian-polling deposit-observation quorum.
-/// That whole path -- the deposit-check endpoint, the guardian-local
-/// poll/GC tasks, and the scanner that produced these observations -- was
-/// removed when deposit crediting became proof-driven
-/// (see [`UsdtInput::DepositProofV0`]). No honest guardian proposes a
-/// `UsdtConsensusItem::Deposit` any more. The variant and this type are kept
-/// (not deleted) purely for consensus wire-format stability: the derived enum
-/// tag of `UsdtConsensusItem` is positional, so removing the `Deposit` variant
-/// would shift every later variant's tag and corrupt decode of existing
-/// consensus history. `fedimint_usdt_server::Usdt::credit_deposit` still
-/// handles a replayed item deterministically (see its doc comment).
-///
-/// `claim_pk` is carried in the observation itself (rather than recovered from
-/// guardian-local state when the item is processed) so that crediting a
-/// deposit is a pure function of consensus data: `process_consensus_item` must
-/// be byte-identical across every honest guardian.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub struct DepositObservation {
-    pub account: EvmAddress,
-    pub balance: UsdtAmount,
-    pub block: u64,
-    /// The canonical hash of [`Self::block`] (security findings 04/12/15):
-    /// bound the observation to a specific fork so the vote tally counts only
-    /// FULLY-equal observations, so two guardians observing the same
-    /// account/balance/height on DIFFERENT forks produce non-equal votes that
-    /// never aggregate to a threshold credit -- closing the "stale pre-reorg
-    /// vote completes a threshold on a non-canonical fork" gap.
-    pub block_hash: [u8; 32],
-    pub claim_pk: secp256k1::PublicKey,
-}
-
 /// Payload of a [`UsdtConsensusItem::BlockHash`] (deposit-by-proof anchor):
 /// one guardian's observation of the canonical hash of a confirmation-depth
 /// EVM block `height`, read via `IServerEvmRpc::get_block_hash`. Mirrors
-/// [`DepositObservation`]'s `(block, block_hash)` binding, reduced to just the
+/// the removed `DepositObservation`'s `(block, block_hash)` binding, reduced to just the
 /// height+hash: `fedimint_usdt_server`'s block-hash observer proposes it and
 /// `process_consensus_item` tallies FULLY-equal observations, writing the
 /// agreed `(height, block_hash)` into the block-hash ring only once at least a
@@ -1028,7 +994,7 @@ pub struct BlockHashObservation {
 /// counted independently and threshold-aggregated by
 /// `fedimint_usdt_server::Usdt::bootstrap_state` -- no single guardian's
 /// observation gates the federation's readiness (see that method's
-/// determinism argument). Mirrors [`DepositObservation`]'s role in the
+/// determinism argument). Mirrors the removed `DepositObservation`'s role in the
 /// deposit-observation quorum: carried whole in the vote so the readiness
 /// tally is a pure function of consensus data.
 // Five independent on-chain readiness conditions, each counted separately by
@@ -1360,12 +1326,6 @@ pub struct UsdtGenParams {
     /// The deployed `SimpleAccount` implementation contract address (Phase
     /// 7). Placeholder; real deployments/tests must override.
     pub simple_account_impl: EvmAddress,
-    /// DEAD-BUT-FROZEN: NO logic reads this. It configured the removed
-    /// guardian-poll deposit path's claim TTL and is only threaded through
-    /// DKG into `UsdtConfigConsensus::check_ttl_blocks` (see that field's
-    /// doc comment), where it is retained purely for config-encoding
-    /// stability on deployed federations. Do not wire new logic to it.
-    pub check_ttl_blocks: u64,
     /// The minimum ETH balance (in wei) a guardian's broadcaster EOA must
     /// hold to count as "funded" for the Part C readiness state machine (see
     /// `BootstrapObservation::broadcaster_funded`). Genuinely per-chain (gas
@@ -1405,7 +1365,6 @@ impl Default for UsdtGenParams {
             entry_point: EvmAddress([0u8; 20]),
             account_factory: EvmAddress([0u8; 20]),
             simple_account_impl: EvmAddress([0u8; 20]),
-            check_ttl_blocks: 10_000,
             // 0.05 ETH: enough to front many UserOps' L1 gas on a typical
             // chain, negligible to top up on a devnet.
             broadcaster_min_balance_wei: 50_000_000_000_000_000,
@@ -1559,14 +1518,6 @@ pub struct WithdrawFeesRequest {
 pub enum UsdtConsensusItem {
     /// Guardian's view of the EVM chain head (median-voted, wallet-style).
     BlockCount(u64),
-    /// LEGACY (deposit crediting is now proof-driven; see
-    /// [`UsdtInput::DepositProofV0`]). Formerly a guardian's observation of a
-    /// pending deposit account's confirmed balance, produced by the
-    /// now-removed guardian-poll deposit path. No honest
-    /// guardian proposes this any more; it is retained ONLY so the positional
-    /// wire tags of the later variants do not shift (removing it would corrupt
-    /// decode of existing consensus history). See [`DepositObservation`].
-    Deposit(DepositObservation),
     /// One guardian's message for a single round of a signing session's
     /// cggmp21 state machine (Phase 6a).
     MpcRound(MpcRoundItem),
@@ -1599,9 +1550,9 @@ pub enum UsdtConsensusItem {
     RotateSigning { session_id: SigningSessionId },
     /// One guardian's threshold-voted observation that `op_hash`'s
     /// `UserOp` has landed on-chain (Phase 7, Task 5) -- mirrors
-    /// [`Self::Deposit`]'s observation-quorum shape exactly (dual-prefix
-    /// per-peer vote, full-field `PartialEq` tally, unbounded-history
-    /// `Err`-on-redundant). `success`/`block` come from the guardian-local
+    /// the observation-quorum shape the removed legacy `Deposit` arm
+    /// established (dual-prefix per-peer vote, full-field `PartialEq` tally,
+    /// unbounded-history `Err`-on-redundant). `success`/`block` come from the guardian-local
     /// deposit-checker-style background task's read of
     /// `IServerEvmRpc::get_user_op_receipt` (a guardian-local RPC result,
     /// never itself a consensus write); `swept` is the amount actually
@@ -1655,7 +1606,7 @@ pub enum UsdtConsensusItem {
     FeeVote(FeeVote),
     /// One guardian's periodic observation of whether the module's on-chain
     /// infrastructure is ready to honor the full deposit->claim->sweep->
-    /// withdraw lifecycle (Part C), mirroring [`Self::Deposit`]'s per-peer
+    /// withdraw lifecycle (Part C), following the standard per-peer
     /// observation-vote shape: `process_consensus_item` stores this peer's
     /// vote under `BootstrapVoteKey(ordered-item's peer)` (with a redundancy
     /// guard) and then deterministically latches "has ever been ready" the
@@ -1685,7 +1636,7 @@ pub enum UsdtConsensusItem {
     /// safety point). Byte-identical on every guardian, signer or not.
     ReplaceUserOp { op_hash: [u8; 32] },
     /// One guardian's observation of the canonical hash of a confirmation-depth
-    /// EVM block (deposit-by-proof anchor), mirroring [`Self::Deposit`]'s
+    /// EVM block (deposit-by-proof anchor), following the standard
     /// per-peer observation-vote shape. Proposed by `fedimint_usdt_server`'s
     /// guardian-local, READ-ONLY block-hash observer task (it only reads the
     /// hash via `IServerEvmRpc::get_block_hash` and queues it -- never itself a
@@ -1701,7 +1652,7 @@ pub enum UsdtConsensusItem {
     BlockHash(BlockHashObservation),
     /// One guardian's threshold-voted observation of a fully-swept, single-use
     /// deposit account's stranded on-chain `EntryPoint` gas deposit (finding
-    /// A), mirroring [`Self::Deposit`]'s per-peer observation-vote shape.
+    /// A), following the standard per-peer observation-vote shape.
     /// Proposed by `fedimint_usdt_server`'s guardian-local, READ-ONLY residual-
     /// recovery observer task (it only reads the account's `EntryPoint` balance
     /// via `IServerEvmRpc::get_entrypoint_deposit` and queues it -- never
@@ -1740,10 +1691,6 @@ pub enum UsdtConsensusItem {
 /// Input for a fedimint transaction
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
 pub enum UsdtInput {
-    /// Claim credited deposit funds. Core verifies the fedimint transaction is
-    /// signed by `InputMeta.pub_key` = the deposit's claim key; there is no
-    /// extra signature inside the input.
-    V0(UsdtInputV0),
     /// Claim the reissued e-cash of a terminally-failed withdrawal (security
     /// finding 09), identified by the `OutPoint` of the `UsdtOutput::V0` that
     /// originally enqueued it. The server's `process_input` looks up the
@@ -1764,8 +1711,7 @@ pub enum UsdtInput {
     /// `claim_pk` plus a [`DepositProof`] of the account's balance at a
     /// canonical block.
     ///
-    /// The server derives `account = derive_deposit_account(claim_pk)` (the
-    /// SAME binding [`DepositObservation`]-driven crediting enforces) and
+    /// The server derives `account = derive_deposit_account(claim_pk)` and
     /// verifies `proof` proves THAT account's balance against the federation's
     /// consensus block-hash ring anchor for `proof.block_number`. Because the
     /// account is derived from `claim_pk`, a proof of some unrelated on-chain
@@ -1776,7 +1722,8 @@ pub enum UsdtInput {
     /// the fedimint transaction is signed by `InputMeta.pub_key` = `claim_pk`,
     /// so only the depositor can spend it.
     ///
-    /// `fee` (in the same [`UsdtAmount`] unit, mirroring [`UsdtInputV0::fee`])
+    /// `fee` (in the same [`UsdtAmount`] unit, mirroring
+    /// [`UsdtOutputV0::max_fee`] on the withdrawal side)
     /// compensates the federation for the on-chain gas it spends deploying and
     /// sweeping this deposit account ([`SWEEP_GAS_UNITS`]). The client fetches
     /// the current quote and supplies it here; the server rejects the input
@@ -1798,24 +1745,6 @@ pub enum UsdtInput {
     },
     #[encodable_default]
     Default { variant: u64, bytes: Vec<u8> },
-}
-
-/// Data for a `UsdtInput::V0`: claim `amount` of credited deposit from
-/// `account`, offering `fee` (in the same [`UsdtAmount`] unit, mirroring
-/// [`UsdtOutputV0::max_fee`]) to cover the federation's on-chain gas cost of
-/// deploying and sweeping the deposit account. The server's `process_input`
-/// rejects the input (`UsdtInputError::DepositFeeInsufficient`) if `fee` is
-/// below the federation's current fee-vote-median-derived quote (see
-/// [`deposit_fee_quote`]), and rejects it
-/// (`UsdtInputError::FeeExceedsAmount`) if `fee >= amount`; the e-cash
-/// actually issued to the claimant is `amount - fee`, while `fee`'s USDT
-/// stays credited-but-unissued backing that the sweep still pulls into the
-/// pool.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub struct UsdtInputV0 {
-    pub account: EvmAddress,
-    pub amount: UsdtAmount,
-    pub fee: UsdtAmount,
 }
 
 /// Output for a fedimint transaction (Phase 8, Task 1): a user burning USDT
@@ -1878,13 +1807,8 @@ pub struct UsdtOutputOutcome;
 /// Errors that might be returned by the server
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
 pub enum UsdtInputError {
-    #[error("No credited deposit record exists for this account")]
-    UnknownDepositAccount,
-    #[error("Claim of {requested} exceeds the {available} still claimable for this account")]
-    InsufficientCredit {
-        available: UsdtAmount,
-        requested: UsdtAmount,
-    },
+    #[error("This module does not support this input variant")]
+    UnsupportedInputVariant,
     #[error("This input's fee {offered} is below the federation's deposit fee quote {quote}")]
     DepositFeeInsufficient {
         quote: UsdtAmount,
@@ -2249,26 +2173,6 @@ mod tests {
     }
 
     #[test]
-    fn test_usdt_consensus_item_deposit_round_trips_through_consensus_encoding() {
-        let claim_pk = secp256k1::SecretKey::from_slice(&[5u8; 32])
-            .unwrap()
-            .public_key(secp256k1::SECP256K1);
-        let item = UsdtConsensusItem::Deposit(DepositObservation {
-            account: EvmAddress([9; 20]),
-            balance: UsdtAmount(1_000_000),
-            block: 42,
-            block_hash: [0xAB; 32],
-            claim_pk,
-        });
-        let bytes = item.consensus_encode_to_vec();
-        let decoded =
-            UsdtConsensusItem::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
-                .expect("UsdtConsensusItem::Deposit should decode what it just encoded");
-
-        assert_eq!(item, decoded);
-    }
-
-    #[test]
     fn test_usdt_consensus_item_block_hash_round_trips_through_consensus_encoding() {
         let item = UsdtConsensusItem::BlockHash(BlockHashObservation {
             height: 123,
@@ -2417,20 +2321,6 @@ mod tests {
             signing_session_id(&digest, 0),
             signing_session_id(&digest, 1)
         );
-    }
-
-    #[test]
-    fn test_usdt_input_v0_round_trips_through_consensus_encoding() {
-        let input = UsdtInput::V0(UsdtInputV0 {
-            account: EvmAddress([9; 20]),
-            amount: UsdtAmount(1_000_000),
-            fee: UsdtAmount(1_000),
-        });
-        let bytes = input.consensus_encode_to_vec();
-        let decoded = UsdtInput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
-            .expect("UsdtInput::V0 should decode what it just encoded");
-
-        assert_eq!(input, decoded);
     }
 
     #[test]
@@ -2902,7 +2792,6 @@ mod tests {
             entry_point: EvmAddress([0xcd; 20]),
             account_factory: EvmAddress([0xce; 20]),
             simple_account_impl: EvmAddress([0xcf; 20]),
-            check_ttl_blocks: 10_000,
             broadcaster_min_balance_wei: 50_000_000_000_000_000,
             eth_usd_price_feed: EvmAddress([0xd0; 20]),
             price_feed_max_staleness_secs: 14_400,
@@ -3054,7 +2943,6 @@ mod tests {
             "entry_point": "0x0000000071727de22e5e9d8baf0edac6f37da032",
             "account_factory": "0x1111111111111111111111111111111111111111",
             "simple_account_impl": "0x2222222222222222222222222222222222222222",
-            "check_ttl_blocks": 200,
             "broadcaster_min_balance_wei": 10_000_000_000_000_000_u64,
             "eth_usd_price_feed": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
             "price_feed_max_staleness_secs": 14400,

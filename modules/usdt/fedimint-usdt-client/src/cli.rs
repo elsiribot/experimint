@@ -12,7 +12,7 @@ use crate::{UsdtClientModule, check_fee_cap};
 enum Opts {
     /// Allocate a fresh claim key, persist it, and print the deposit address
     /// derived from it (`account`) together with the claim public key
-    /// (`claim_pk`) needed by `deposit-status`/`claim`.
+    /// (`claim_pk`) needed by `deposit-status`.
     DepositAddress,
     /// Report the credited/claimed/claimable state of `claim_pk`'s deposit
     /// account.
@@ -54,35 +54,13 @@ enum Opts {
         #[arg(long)]
         url: Option<String>,
     },
-    /// Submit a claim transaction for `claim_pk`'s currently claimable
-    /// balance (requires a nonzero `claimable` from `deposit-status`, and
-    /// that `claim_pk` was previously produced by `deposit-address` on this
-    /// client).
-    ///
-    /// By default, refuses to submit if the federation's deposit fee quote
-    /// is more than 25% of the claimable amount (security finding 07) --
-    /// pass `--accept-high-fee` to proceed anyway, or `--max-deposit-fee` to
-    /// set an explicit hard cap instead of the default sanity guard.
-    Claim {
-        claim_pk: secp256k1::PublicKey,
-        /// Refuse to submit if the federation's deposit fee quote exceeds
-        /// this many smallest-on-chain-USDT-units. A hard ceiling: unlike
-        /// the default sanity guard, `--accept-high-fee` cannot override it.
-        #[arg(long)]
-        max_deposit_fee: Option<u64>,
-        /// Bypass the default 25%-of-amount sanity guard when no
-        /// `--max-deposit-fee` is given. Has no effect if `--max-deposit-fee`
-        /// is set.
-        #[arg(long)]
-        accept_high_fee: bool,
-    },
     /// Report the federation's current withdrawal fee quote for `amount`
     /// (the smallest on-chain USDT unit, 1e-6 USDT) -- the minimum `max_fee`
     /// a `withdraw` of `amount` must offer right now.
     FeeQuote { amount: u64 },
     /// Report the federation's current deposit fee quote -- the minimum
-    /// `fee` a `claim` must offer right now to cover the federation's
-    /// deploy+sweep gas cost of a credited deposit.
+    /// `fee` a `submit-deposit-proof` must offer right now to cover the
+    /// federation's deploy+sweep gas cost of the deposit.
     DepositFeeQuote,
     /// Fetch the current withdrawal fee quote, submit a withdrawal of
     /// `amount` (the smallest on-chain USDT unit) to `recipient` (a
@@ -125,8 +103,9 @@ enum Opts {
     /// `deposit-address` is refused unless this reports `Ready`.
     Status,
     /// Rescan the federation from the seed alone to rediscover deposits whose
-    /// client-DB state was lost, re-storing each rediscovered claim key (so
-    /// `claim` can then be run per account) and printing a summary. Scans
+    /// client-DB state was lost, re-storing each rediscovered claim key (so a
+    /// `submit-deposit-proof` for its index can then credit + mint against
+    /// it) and printing a summary. Scans
     /// seed-derivation indices from 0, stopping after `gap_limit` consecutive
     /// unused indices.
     ///
@@ -145,8 +124,8 @@ enum Opts {
     /// Derive `claim_pk`/`account` for seed-derivation `index` WITHOUT
     /// persisting anything or advancing the next-deposit-index counter
     /// (security finding 08). Lets a seed-only user (after client-DB loss)
-    /// recompute the `claim_pk` needed for a manual
-    /// `deposit-status`/`claim`, e.g. for an index a `recover` scan reported
+    /// recompute the `claim_pk` needed for a manual `deposit-status` or a
+    /// `submit-deposit-proof`, e.g. for an index a `recover` scan reported
     /// under `checked`.
     DeriveDeposit {
         #[arg(long)]
@@ -254,25 +233,6 @@ pub(crate) async fn handle_cli_command(
         Opts::SetEvmRpcUrl { url } => {
             usdt.set_evm_rpc_url(url.clone()).await;
             json(serde_json::json!({ "evm_rpc_url": url }))
-        }
-        Opts::Claim {
-            claim_pk,
-            max_deposit_fee,
-            accept_high_fee,
-        } => {
-            // The security finding 07 fee-cap guard runs inside
-            // `usdt.claim` (via `submit_claim`), BEFORE any e-cash is
-            // minted -- it needs the freshly fetched deposit-fee quote,
-            // which is only available once `claim` fetches it internally.
-            let result = usdt
-                .claim(claim_pk, max_deposit_fee.map(UsdtAmount), accept_high_fee)
-                .await?;
-            let net = UsdtAmount(result.claimed.0.saturating_sub(result.fee.0));
-            json(serde_json::json!({
-                "claimed": result.claimed.0,
-                "fee": result.fee.0,
-                "net": net.0,
-            }))
         }
         Opts::FeeQuote { amount } => json(usdt.withdraw_fee_quote(UsdtAmount(amount)).await?),
         Opts::DepositFeeQuote => json(usdt.deposit_fee_quote().await?),
@@ -436,47 +396,6 @@ mod tests {
             ])
             .expect("parses"),
             Opts::SetEvmRpcUrl { url: Some(_) }
-        ));
-    }
-
-    #[test]
-    fn parses_claim() {
-        // Bare `claim` (no fee-cap flags) must still parse, defaulting the
-        // security finding 07 cap flags to "no explicit cap, sanity guard
-        // not bypassed" -- `claim`'s default sanity guard applies.
-        assert!(matches!(
-            Opts::try_parse_from(["usdt", "claim", TEST_PUBKEY]).expect("parses"),
-            Opts::Claim {
-                max_deposit_fee: None,
-                accept_high_fee: false,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn parses_claim_with_max_deposit_fee() {
-        assert!(matches!(
-            Opts::try_parse_from(["usdt", "claim", TEST_PUBKEY, "--max-deposit-fee", "1000"])
-                .expect("parses"),
-            Opts::Claim {
-                max_deposit_fee: Some(1000),
-                accept_high_fee: false,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn parses_claim_with_accept_high_fee() {
-        assert!(matches!(
-            Opts::try_parse_from(["usdt", "claim", TEST_PUBKEY, "--accept-high-fee"])
-                .expect("parses"),
-            Opts::Claim {
-                max_deposit_fee: None,
-                accept_high_fee: true,
-                ..
-            }
         ));
     }
 

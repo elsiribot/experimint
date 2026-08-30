@@ -189,7 +189,6 @@ async fn deposit_account_is_deployed_and_swept_via_nonstandard_usdt() -> anyhow:
         entry_point: stack.entry_point,
         account_factory,
         simple_account_impl,
-        check_ttl_blocks: 10_000,
         // Must be > 0 (sec-17 config validation); the broadcaster is the
         // anvil-funded account, so any low value is trivially satisfied.
         broadcaster_min_balance_wei: 1,
@@ -420,7 +419,6 @@ async fn withdrawal_is_batched_deployed_and_paid_via_nonstandard_usdt() -> anyho
         entry_point: stack.entry_point,
         account_factory,
         simple_account_impl,
-        check_ttl_blocks: 10_000,
         // Must be > 0 (sec-17 config validation); the broadcaster is the
         // anvil-funded account, so any low value is trivially satisfied.
         broadcaster_min_balance_wei: 1,

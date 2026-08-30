@@ -3,8 +3,7 @@ use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::{OutPoint, PeerId, impl_db_lookup, impl_db_record};
 use fedimint_usdt_common::user_op::{SignedUserOp, UnsignedUserOp};
 use fedimint_usdt_common::{
-    BlockHashObservation, BootstrapObservation, DepositObservation, EvmAddress, FeeVote,
-    SigningSessionId, UsdtAmount,
+    BlockHashObservation, BootstrapObservation, EvmAddress, FeeVote, SigningSessionId, UsdtAmount,
 };
 use serde::Serialize;
 use strum_macros::EnumIter;
@@ -26,9 +25,13 @@ pub enum DbKeyPrefix {
     FeeVote = 0x02,
     /// Consensus-agreed state for a tracked deposit account.
     DepositRecord = 0x03,
-    /// Per-peer votes on the observed balance of a deposit account at a
-    /// given block.
-    DepositObservationVote = 0x04,
+    // `0x04` (`DepositObservationVote`) and `0x05` (`PendingCheck`) are
+    // permanent GAPS: both belonged to the removed guardian-poll deposit
+    // path (deposit crediting is proof-driven via
+    // `UsdtInput::DepositProofV0`). See
+    // `fedimint_usdt_server::REMOVED_DEPOSIT_OBSERVATION_VOTE_PREFIX` /
+    // `REMOVED_PENDING_CHECK_PREFIX`, which the migration chain still
+    // sweeps.
     /// Consensus-agreed state of a threshold-ECDSA signing session (Phase
     /// 6a).
     SigningSession = 0x06,
@@ -50,8 +53,8 @@ pub enum DbKeyPrefix {
     /// singleton record (see [`PoolStateKey`]).
     PoolState = 0x0A,
     /// Per-peer votes on the observed on-chain outcome of a submitted
-    /// `UserOp` (Phase 7, Task 5), mirroring [`DepositObservationVoteKey`]'s
-    /// dual-prefix quorum shape.
+    /// `UserOp` (Phase 7, Task 5), a dual-prefix per-`(op, peer)` quorum
+    /// shape.
     UserOpConfirmedVote = 0x0B,
     /// A withdrawal output that has been accepted (its `max_fee` cleared
     /// the fee-vote-median quote) and is queued for the next withdrawal
@@ -113,7 +116,7 @@ pub enum DbKeyPrefix {
     BlockHashVote = 0x14,
     /// Per-peer, per-account votes on a fully-swept, single-use deposit
     /// account's observed on-chain `EntryPoint` gas deposit (finding A),
-    /// mirroring [`Self::DepositObservationVote`]'s dual-prefix,
+    /// a dual-prefix,
     /// per-`(account, peer)` shape. Once at least a threshold of peers have
     /// voted for one account, `Usdt::process_consensus_item`'s
     /// `RecoverResidual` arm takes the threshold-MEDIAN `deposit_wei` and
@@ -234,35 +237,10 @@ impl_db_record!(
 );
 impl_db_lookup!(key = DepositRecordKey, query_prefix = DepositRecordPrefix);
 
-/// A single peer's vote on the observed balance of a deposit account. The
-/// `EvmAddress` field is ordered first so that
-/// [`DepositObservationVoteAccountPrefix`] can look up every peer's vote for
-/// one account.
-#[derive(Debug, Clone, Encodable, Decodable, Eq, PartialEq, Hash)]
-pub struct DepositObservationVoteKey(pub EvmAddress, pub PeerId);
-
-#[derive(Debug, Clone, Encodable, Decodable)]
-pub struct DepositObservationVotePrefix;
-
-#[derive(Debug, Clone, Encodable, Decodable)]
-pub struct DepositObservationVoteAccountPrefix(pub EvmAddress);
-
-impl_db_record!(
-    key = DepositObservationVoteKey,
-    value = DepositObservation,
-    db_prefix = DbKeyPrefix::DepositObservationVote,
-);
-impl_db_lookup!(
-    key = DepositObservationVoteKey,
-    query_prefix = DepositObservationVotePrefix,
-    query_prefix = DepositObservationVoteAccountPrefix,
-);
-
 /// A single peer's vote on a fully-swept deposit account's observed on-chain
 /// `EntryPoint` gas deposit, in wei (finding A residual recovery). The
 /// `EvmAddress` is ordered first so [`RecoverResidualVoteAccountPrefix`] can
-/// look up every peer's vote for one account, mirroring
-/// [`DepositObservationVoteKey`]'s dual-prefix shape. The stored `u64` is the
+/// look up every peer's vote for one account. The stored `u64` is the
 /// observed `deposit_wei` (the codebase's wire representation for wei; a
 /// single-op gas deposit is far below `u64::MAX` wei).
 #[derive(Debug, Clone, Encodable, Decodable, Eq, PartialEq, Hash)]
@@ -392,7 +370,7 @@ pub struct MpcRoundChunk {
 /// [`MpcRoundChunkPrefix`], [`MpcRoundChunkSessionPrefix`],
 /// [`MpcRoundChunkSessionRoundPrefix`], and
 /// [`MpcRoundChunkSessionRoundPeerPrefix`] valid byte-prefixes (mirroring
-/// [`DepositObservationVoteKey`]'s dual-prefix pattern, extended to a
+/// the dual-prefix pattern, extended to a
 /// four-level prefix hierarchy).
 #[derive(Debug, Clone, Encodable, Decodable, Eq, PartialEq, Hash)]
 pub struct MpcRoundChunkKey(pub SigningSessionId, pub u16, pub PeerId, pub u16);
@@ -603,8 +581,7 @@ impl_db_record!(
 impl_db_lookup!(key = PoolStateKey, query_prefix = PoolStatePrefix);
 
 /// One peer's vote on the observed on-chain outcome of a submitted `UserOp`
-/// (Phase 7, Task 5). Mirrors [`DepositObservation`]'s role in
-/// [`DepositObservationVoteKey`] exactly: `success`/`block`/`swept` are all
+/// (Phase 7, Task 5): `success`/`block`/`swept` are all
 /// carried in the vote itself (not re-derived from any guardian-local
 /// state), and this type's full-field `#[derive(PartialEq)]` is what lets
 /// `Usdt::process_consensus_item`'s `UserOpConfirmed` arm tally only
@@ -635,7 +612,7 @@ pub struct UserOpConfirmedObservation {
 /// A single peer's vote on `UserOp` `[u8; 32]`'s (its `op_hash`) on-chain
 /// outcome. The `[u8; 32]` field is ordered first so that
 /// [`UserOpConfirmedVoteOpPrefix`] can look up every peer's vote for one
-/// `op_hash`, mirroring [`DepositObservationVoteKey`]'s dual-prefix shape.
+/// `op_hash`, a dual-prefix shape.
 #[derive(Debug, Clone, Encodable, Decodable, Eq, PartialEq, Hash)]
 pub struct UserOpConfirmedVoteKey(pub [u8; 32], pub PeerId);
 
@@ -932,7 +909,7 @@ mod tests {
     use fedimint_core::db::mem_impl::MemDatabase;
     use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
     use fedimint_core::module::registry::ModuleDecoderRegistry;
-    use fedimint_usdt_common::{DepositObservation, EvmAddress, UsdtAmount, signing_session_id};
+    use fedimint_usdt_common::{EvmAddress, UsdtAmount, signing_session_id};
     use futures::StreamExt;
     use secp256k1::Secp256k1;
 
@@ -967,54 +944,6 @@ mod tests {
         let mut dbtx = db.begin_transaction_nc().await;
         let fetched = dbtx.get_value(&DepositRecordKey(account)).await;
         assert_eq!(fetched, Some(record));
-    }
-
-    #[tokio::test]
-    async fn deposit_observation_vote_round_trips_and_filters_by_account_prefix() {
-        let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
-        let account_a = EvmAddress([0xaa; 20]);
-        let account_b = EvmAddress([0xbb; 20]);
-
-        let claim_pk = test_pubkey();
-        let vote = |account: EvmAddress, block: u64| DepositObservation {
-            account,
-            balance: UsdtAmount(2_000_000),
-            block,
-            block_hash: [0u8; 32],
-            claim_pk,
-        };
-
-        let mut dbtx = db.begin_transaction().await;
-        dbtx.insert_new_entry(
-            &DepositObservationVoteKey(account_a, PeerId::from(0)),
-            &vote(account_a, 10),
-        )
-        .await;
-        dbtx.insert_new_entry(
-            &DepositObservationVoteKey(account_a, PeerId::from(1)),
-            &vote(account_a, 10),
-        )
-        .await;
-        dbtx.insert_new_entry(
-            &DepositObservationVoteKey(account_b, PeerId::from(0)),
-            &vote(account_b, 11),
-        )
-        .await;
-        dbtx.commit_tx().await;
-
-        let mut dbtx = db.begin_transaction_nc().await;
-        let fetched = dbtx
-            .get_value(&DepositObservationVoteKey(account_a, PeerId::from(0)))
-            .await;
-        assert_eq!(fetched, Some(vote(account_a, 10)));
-
-        let account_a_votes: Vec<_> = dbtx
-            .find_by_prefix(&DepositObservationVoteAccountPrefix(account_a))
-            .await
-            .collect()
-            .await;
-        assert_eq!(account_a_votes.len(), 2);
-        assert!(account_a_votes.iter().all(|(key, _)| key.0 == account_a));
     }
 
     #[tokio::test]

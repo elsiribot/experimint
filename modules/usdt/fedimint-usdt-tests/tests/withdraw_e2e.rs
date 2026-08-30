@@ -183,7 +183,6 @@ async fn withdrawal_is_batched_deployed_and_paid_via_real_mpc_and_real_entrypoin
         entry_point: stack.entry_point,
         account_factory,
         simple_account_impl,
-        check_ttl_blocks: 10_000,
         // Must be > 0 (sec-17 config validation); the broadcaster is the
         // anvil-funded account, so any low value is trivially satisfied.
         broadcaster_min_balance_wei: 1,

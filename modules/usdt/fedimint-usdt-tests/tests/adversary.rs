@@ -374,36 +374,6 @@ async fn attack_06_replay_rejected() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// #7 OVER-MINT: after a legit deposit-by-proof credit (which advances both
-/// `credited` and `claimed`), a legacy `V0` claim tries to re-mint the value.
-/// `available == 0` -> `InsufficientCredit`.
-#[tokio::test(flavor = "multi_thread")]
-async fn attack_07_over_mint_via_v0_rejected() -> anyhow::Result<()> {
-    let (fed, client, mock) = boot_ready().await?;
-    let usdt = client.get_first_module::<UsdtClientModule>()?;
-
-    let (claim_keypair, account) = usdt.allocate_deposit().await?;
-    common::credit_deposit_via_proof(
-        &usdt,
-        &mock,
-        USDT_CONTRACT,
-        &claim_keypair,
-        account,
-        deposit_amount(),
-        Duration::from_secs(120),
-    )
-    .await?;
-
-    // Try to re-claim the already-minted delta via the legacy V0 path. The V0
-    // input's pub_key is the account's stored claim_pk, so it must be signed by
-    // the same claim keypair.
-    let attack = attacks::attack_over_mint_v0(account, deposit_amount());
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair], attack).await?;
-
-    drop(fed);
-    Ok(())
-}
-
 /// #8 OVERSIZE: a proof exceeding `MAX_DEPOSIT_PROOF_BYTES` -> rejected by the
 /// size cap before verification (`DepositProofInvalid`, "oversized").
 #[tokio::test(flavor = "multi_thread")]

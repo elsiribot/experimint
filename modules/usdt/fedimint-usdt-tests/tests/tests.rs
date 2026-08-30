@@ -1816,14 +1816,13 @@ mod fedimint_migration_tests {
     use fedimint_testing::db::{snapshot_db_migrations, validate_migrations_server};
     use fedimint_usdt_common::user_op::{SignedUserOp, UnsignedUserOp};
     use fedimint_usdt_common::{
-        BootstrapObservation, DepositObservation, EvmAddress, FeeVote, UsdtAmount, UsdtCommonInit,
-        signing_session_id,
+        BootstrapObservation, EvmAddress, FeeVote, UsdtAmount, UsdtCommonInit, signing_session_id,
     };
     use fedimint_usdt_server::db::{
-        BlockCountVoteKey, BootstrapVoteKey, DbKeyPrefix, DepositObservationVoteKey, DepositRecord,
-        DepositRecordKey, FeeVoteKey, FeeVotePrefix, HasEverBeenReadyKey, MpcRoundChunk,
-        MpcRoundChunkKey, PendingUserOp, PendingUserOpKey, PoolState, PoolStateKey, SessionState,
-        SigningPurpose, SigningSession, SigningSessionKey, StoredFeeVote, SubmittedUserOpKey,
+        BlockCountVoteKey, BootstrapVoteKey, DbKeyPrefix, DepositRecord, DepositRecordKey,
+        FeeVoteKey, FeeVotePrefix, HasEverBeenReadyKey, MpcRoundChunk, MpcRoundChunkKey,
+        PendingUserOp, PendingUserOpKey, PoolState, PoolStateKey, SessionState, SigningPurpose,
+        SigningSession, SigningSessionKey, StoredFeeVote, SubmittedUserOpKey,
         UserOpConfirmedObservation, UserOpConfirmedVoteKey, UserOpPurpose, WithdrawalState,
         WithdrawalStateKey,
     };
@@ -1914,17 +1913,21 @@ mod fedimint_migration_tests {
             },
         )
         .await;
-        // The pre-`migrate_db_v1` `DepositObservationVoteKey -> DepositObservation`
-        // shape (findings 04/12/15), written at the raw byte level because the
-        // current `DepositObservation` type now carries a `block_hash` the old
-        // on-disk rows did not (mirrors the raw `FeeVote` write above). A
-        // derived struct encodes as the concatenation of its fields in order,
-        // so this is exactly the old four-field layout `migrate_db_v1` must
-        // drop.
-        let mut old_deposit_vote_key_bytes = vec![DbKeyPrefix::DepositObservationVote as u8];
-        old_deposit_vote_key_bytes.extend_from_slice(
-            &DepositObservationVoteKey(account, PeerId::from(0)).consensus_encode_to_vec(),
-        );
+        // The pre-`migrate_db_v1` `DepositObservationVote` row shape
+        // (findings 04/12/15), written ENTIRELY at the raw byte level: the
+        // whole table (prefix `0x04`,
+        // `fedimint_usdt_server::REMOVED_DEPOSIT_OBSERVATION_VOTE_PREFIX`)
+        // was later removed along with the legacy guardian-poll deposit
+        // path, so neither the key nor the value type exists any more. The
+        // key was `(EvmAddress, PeerId)` and the old value the four-field
+        // pre-`block_hash` observation; a derived struct/tuple encodes as
+        // the concatenation of its fields in order, so these raw bytes are
+        // exactly what the deleted code wrote and what `migrate_db_v1` must
+        // drop -- byte-identical to what this writer produced before the
+        // removal, keeping the frozen snapshot stable.
+        let mut old_deposit_vote_key_bytes = vec![0x04u8];
+        old_deposit_vote_key_bytes.extend_from_slice(&account.consensus_encode_to_vec());
+        old_deposit_vote_key_bytes.extend_from_slice(&PeerId::from(0).consensus_encode_to_vec());
         let mut old_deposit_vote_value_bytes = Vec::new();
         old_deposit_vote_value_bytes.extend_from_slice(&account.consensus_encode_to_vec());
         old_deposit_vote_value_bytes
@@ -2187,6 +2190,29 @@ mod fedimint_migration_tests {
         validate_migrations_server(module, "usdt-server", |db| async move {
             let mut dbtx = db.begin_transaction_nc().await;
 
+            // The retired prefixes -- `0x04` (`DepositObservationVote`,
+            // dropped by `migrate_db_v1`; the snapshot carries a raw
+            // old-shape row) and `0x05` (`PendingCheck`, dropped by
+            // `migrate_db_v4`) -- are permanent gaps in `DbKeyPrefix`, so
+            // the exhaustive per-variant loop below can no longer visit
+            // them; assert their raw keyspaces read back EMPTY here instead,
+            // preserving what the deleted `DepositObservationVote` arm used
+            // to check.
+            for removed_prefix in [0x04u8, 0x05u8] {
+                let residual: Vec<_> = dbtx
+                    .raw_find_by_prefix(&[removed_prefix])
+                    .await
+                    .expect("DB error")
+                    .collect()
+                    .await;
+                ensure!(
+                    residual.is_empty(),
+                    "the migration chain must drop every row under retired prefix \
+                     {removed_prefix:#04x}"
+                );
+                info!("Validated retired prefix {removed_prefix:#04x} (empty)");
+            }
+
             for prefix in DbKeyPrefix::iter() {
                 match prefix {
                     DbKeyPrefix::BlockCountVote => {
@@ -2225,24 +2251,6 @@ mod fedimint_migration_tests {
                             .await;
                         ensure!(!records.is_empty(), "no DepositRecords read back");
                         info!("Validated DepositRecord");
-                    }
-                    DbKeyPrefix::DepositObservationVote => {
-                        // Findings 04/12/15: `migrate_db_v1` DROPS pre-migration
-                        // `DepositObservationVote` rows (they carry no
-                        // `block_hash` and are re-proposed every scan tick --
-                        // see that function's doc comment), so the table must
-                        // read back cleanly in the NEW shape as EMPTY.
-                        let votes = dbtx
-                            .find_by_prefix(&fedimint_usdt_server::db::DepositObservationVotePrefix)
-                            .await
-                            .collect::<Vec<(DepositObservationVoteKey, DepositObservation)>>()
-                            .await;
-                        ensure!(
-                            votes.is_empty(),
-                            "pre-migration DepositObservationVote rows must be dropped by \
-                             migrate_db_v1, not rewritten"
-                        );
-                        info!("Validated DepositObservationVote (dropped, not rewritten)");
                     }
                     DbKeyPrefix::SigningSession => {
                         let sessions = dbtx
