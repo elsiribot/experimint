@@ -53,8 +53,12 @@ fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = 
 fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-lnv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-lnv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-logging = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-meta-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-meta-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
@@ -66,6 +70,8 @@ fedimint-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011
 fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-walletv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-walletv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimintd = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 
