@@ -1921,6 +1921,23 @@ impl ServerModule for Usdt {
                 continue;
             }
 
+            // ORPHANED-SESSION GATE (proposal side ONLY -- see the block
+            // comment on `propose_timed_out_rotations` for the full
+            // consensus-freeze rationale): never pump a session that is no
+            // longer `InProgress`. A `Failed` (rotated-away) attempt whose
+            // local state machine is still alive would otherwise keep having
+            // its chunks proposed forever; `process_mpc_round` has NO
+            // `SessionState` check (frozen consensus behavior at consensus
+            // version 0.12), so those chunks would keep being accepted, the
+            // dead attempt could still complete, consume the live
+            // `PendingUserOp`, and strand the newer attempt -- which then
+            // times out, rotates, and repeats: a permanent rotation loop,
+            // each cycle a full cggmp21 run plus ~100-200KB of ordered
+            // consensus items.
+            if !matches!(session.state, SessionState::InProgress) {
+                continue;
+            }
+
             // Only READ the current round's pending payload — never remove or
             // pump the slot here. Fedimint runs `consensus_proposal` in a
             // separate task (`submit_module_ci_proposals`, a ~100ms timer)
@@ -1979,9 +1996,17 @@ impl ServerModule for Usdt {
 
         // Drain signatures this guardian's off-thread signers have
         // assembled (see `advance_local_signer`), proposing an
-        // `MpcSignature` for each whose session is not already `Completed`
-        // in this dbtx snapshot -- a cheap dedup; `process_consensus_item`'s
-        // redundancy guard is what actually enforces exactly-once agreement.
+        // `MpcSignature` only for a session still `InProgress` in this dbtx
+        // snapshot. Requiring `InProgress` (not merely "not `Completed`") is
+        // the signature-side half of the orphaned-session gate above:
+        // `process_mpc_signature` gates only on `!Completed` (frozen
+        // consensus behavior -- see `propose_timed_out_rotations`' block
+        // comment), so a late signature for a `Failed` (rotated-away)
+        // attempt would still be accepted, complete the dead attempt, and
+        // consume the live `PendingUserOp` out from under the newer attempt.
+        // Dropping it here is a cheap guardian-local dedup;
+        // `process_consensus_item`'s redundancy guard is what actually
+        // enforces exactly-once agreement.
         let pending_signatures = std::mem::take(
             &mut *self
                 .pending_signature_proposals
@@ -1989,14 +2014,14 @@ impl ServerModule for Usdt {
                 .expect("not poisoned"),
         );
         for (session_id, signature) in pending_signatures {
-            let already_completed = matches!(
+            let in_progress = matches!(
                 dbtx.get_value(&SigningSessionKey(session_id)).await,
                 Some(SigningSession {
-                    state: SessionState::Completed(_),
+                    state: SessionState::InProgress,
                     ..
                 })
             );
-            if !already_completed {
+            if in_progress {
                 items.push(UsdtConsensusItem::MpcSignature {
                     session_id,
                     signature,
@@ -6822,6 +6847,32 @@ impl Usdt {
     /// what actually enforce exactly-once rotation. Proposed by every guardian,
     /// signer or not, so rotation does not depend on the previous subset
     /// staying live. Read-only: makes no consensus-DB write.
+    ///
+    /// # Orphaned-session gates live on the PROPOSAL side only
+    ///
+    /// A session whose `op_hash` no longer has a live `PendingUserOp` (a
+    /// racing earlier attempt already completed and consumed it, so the op is
+    /// already submitted/confirmed) is skipped here: rotating it would start
+    /// yet another attempt that can never finalize (`process_mpc_signature`
+    /// refuses to complete a session with no backing `PendingUserOp`), which
+    /// then times out and rotates again -- a permanent loop of full cggmp21
+    /// runs and ~100-200KB-per-cycle ordered `MpcRound` traffic. The same
+    /// reasoning gates the `MpcRound`-chunk and `MpcSignature` drains in
+    /// `consensus_proposal` on `SessionState::InProgress`.
+    ///
+    /// All three gates are deliberately placed in proposal code and MUST NOT
+    /// be mirrored inside `process_mpc_round` / `process_mpc_signature` /
+    /// `process_rotate_signing`: those arms run in the ordered consensus path
+    /// and their accept/reject behavior is FROZEN at the deployed
+    /// `MODULE_CONSENSUS_VERSION` (0.12) -- adding a new `SessionState` or
+    /// `PendingUserOp` rejection there would change which items return
+    /// `Ok`/`Err`, diverging upgraded guardians from un-upgraded ones and
+    /// from historical replay. Proposal code, by contrast, only decides what
+    /// THIS guardian offers to consensus; every item that does get ordered
+    /// (including one from a not-yet-upgraded or Byzantine peer) is still
+    /// processed under the unchanged rules on every guardian identically, so
+    /// these gates cannot fork consensus -- they only stop honest guardians
+    /// from feeding the loop.
     async fn propose_timed_out_rotations(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
@@ -6830,6 +6881,13 @@ impl Usdt {
         let mut items = Vec::new();
         for (session_id, session) in sessions {
             if matches!(session.state, SessionState::Failed) {
+                continue;
+            }
+            // Orphaned-session gate (see the doc comment): no live
+            // `PendingUserOp` means the op is already submitted/confirmed and
+            // no retry attempt could ever finalize -- do not rotate.
+            let SigningPurpose::UserOp(op_hash) = &session.purpose;
+            if dbtx.get_value(&PendingUserOpKey(*op_hash)).await.is_none() {
                 continue;
             }
             if self.timed_out(dbtx, session).await {
@@ -9642,9 +9700,24 @@ mod tests {
 
         // Attempt 0: every guardian starts the identical session over the
         // digest-seeded subset. `consensus_block_count` is 0 here (no votes
-        // yet), so each session's `last_progress_block` is 0.
+        // yet), so each session's `last_progress_block` is 0. A live
+        // `PendingUserOp` backs the session on every guardian, exactly as in
+        // production (a session only ever exists for an enqueued op):
+        // `propose_timed_out_rotations`' orphaned-session gate refuses to
+        // rotate a session with no live `PendingUserOp`.
         for module in modules.values() {
             let mut dbtx = module.db_for_test().begin_transaction().await;
+            dbtx.insert_new_entry(
+                &PendingUserOpKey(digest),
+                &PendingUserOp {
+                    op: sample_unsigned_user_op_for_test(),
+                    purpose: UserOpPurpose::DeployAndSweep {
+                        source: EvmAddress([0x71; 20]),
+                    },
+                    created_block: 0,
+                },
+            )
+            .await;
             module
                 .start_session(&mut dbtx.to_ref_nc(), purpose.clone(), digest, 0)
                 .await;
@@ -9826,9 +9899,23 @@ mod tests {
         let byzantine_peer = subset0[2];
 
         // Attempt 0: every guardian starts the identical session over the
-        // digest-seeded subset.
+        // digest-seeded subset. As in
+        // `rotate_signing_fails_timed_out_attempt_and_retries_rotated_subset`,
+        // a live `PendingUserOp` backs the session (production invariant;
+        // required by `propose_timed_out_rotations`' orphaned-session gate).
         for module in modules.values() {
             let mut dbtx = module.db_for_test().begin_transaction().await;
+            dbtx.insert_new_entry(
+                &PendingUserOpKey(digest),
+                &PendingUserOp {
+                    op: sample_unsigned_user_op_for_test(),
+                    purpose: UserOpPurpose::DeployAndSweep {
+                        source: EvmAddress([0x71; 20]),
+                    },
+                    created_block: 0,
+                },
+            )
+            .await;
             module
                 .start_session(&mut dbtx.to_ref_nc(), purpose.clone(), digest, 0)
                 .await;
@@ -9999,6 +10086,236 @@ mod tests {
                 "the retry must run under the rotated (offset-1) signer subset"
             );
         }
+    }
+
+    /// Orphaned-session gate, chunk + signature halves (proposal-side fix for
+    /// the permanent rotation loop): once a session is marked `Failed` (e.g.
+    /// by `RotateSigning`), this guardian must stop proposing `MpcRound`
+    /// chunks for it (even though its local state machine still holds a
+    /// pumped `pending_outgoing` payload) and must drop -- not propose -- a
+    /// late locally-assembled `MpcSignature` for it. Without these gates the
+    /// dead attempt keeps being pumped through `process_mpc_round` (which has
+    /// no `SessionState` check -- frozen consensus behavior) and can still
+    /// complete via `process_mpc_signature` (which gates only on
+    /// `!Completed`), consuming the live `PendingUserOp` out from under the
+    /// newer attempt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_session_chunks_and_signatures_are_not_proposed() {
+        use sha2::{Digest as _, Sha256};
+
+        const N: u16 = 4;
+        let peers: Vec<PeerId> = (0..N).map(PeerId::from).collect();
+        let num_peers = peers.to_num_peers();
+        let args = ConfigGenModuleArgs {
+            network: Network::Regtest,
+            disable_base_fees: false,
+        };
+        let server_cfgs = UsdtInit::default().trusted_dealer_gen(
+            &peers,
+            &args,
+            &fedimint_usdt_common::UsdtGenParams::default(),
+        );
+
+        let mut modules: BTreeMap<PeerId, Usdt> = BTreeMap::new();
+        for &peer in &peers {
+            let cfg = server_cfgs[&peer]
+                .clone()
+                .to_typed::<UsdtConfig>()
+                .expect("config was just generated by the same configgen");
+            let db = fedimint_core::db::Database::new(
+                fedimint_core::db::mem_impl::MemDatabase::new(),
+                fedimint_core::module::registry::ModuleDecoderRegistry::default(),
+            );
+            modules.insert(
+                peer,
+                Usdt::new_for_test(cfg, MockEvmRpc::default().into_dyn(), db, peer, num_peers),
+            );
+        }
+
+        let digest: [u8; 32] = Sha256::digest(b"usdt failed-session proposal gate test").into();
+        let session_id = fedimint_usdt_common::signing_session_id(&digest, 0);
+        let purpose = SigningPurpose::UserOp(digest);
+
+        // Drive the module of a peer that IS in attempt 0's signer subset, so
+        // `start_session` spawns its real off-thread signer and pre-pumps
+        // round 0's `pending_outgoing` payload.
+        let signer_peer = modules[&PeerId::from(0)].signer_subset(&digest, 0)[0];
+        let module = &modules[&signer_peer];
+
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        dbtx.insert_new_entry(
+            &PendingUserOpKey(digest),
+            &PendingUserOp {
+                op: sample_unsigned_user_op_for_test(),
+                purpose: UserOpPurpose::DeployAndSweep {
+                    source: EvmAddress([0x71; 20]),
+                },
+                created_block: 0,
+            },
+        )
+        .await;
+        module
+            .start_session(&mut dbtx.to_ref_nc(), purpose, digest, 0)
+            .await;
+        dbtx.commit_tx().await;
+
+        // Positive control: while the session is `InProgress`, its round-0
+        // chunks ARE proposed.
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        let items = module.consensus_proposal(&mut dbtx.to_ref_nc()).await;
+        dbtx.commit_tx().await;
+        assert!(
+            items.iter().any(|item| matches!(
+                item,
+                UsdtConsensusItem::MpcRound(mpc) if mpc.session_id == session_id
+            )),
+            "an InProgress session's round-0 chunks must be proposed: {items:?}"
+        );
+
+        // Mark the session `Failed` (what `process_rotate_signing` does),
+        // WITHOUT touching the local signing-session slot -- exactly the
+        // orphaned-state the rotation loop was built from: the slot still
+        // holds its pumped `pending_outgoing` payload.
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        let mut failed = dbtx
+            .get_value(&SigningSessionKey(session_id))
+            .await
+            .expect("session present");
+        failed.state = SessionState::Failed;
+        dbtx.insert_entry(&SigningSessionKey(session_id), &failed)
+            .await;
+        dbtx.commit_tx().await;
+
+        // A late, locally-assembled signature for the now-Failed attempt
+        // (models a signer whose state machine finished just as the rotation
+        // landed).
+        module
+            .pending_signature_proposals
+            .lock()
+            .expect("not poisoned")
+            .push((session_id, vec![0u8; 64]));
+
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        let items = module.consensus_proposal(&mut dbtx.to_ref_nc()).await;
+        dbtx.commit_tx().await;
+        assert!(
+            !items.iter().any(|item| matches!(
+                item,
+                UsdtConsensusItem::MpcRound(mpc) if mpc.session_id == session_id
+            )),
+            "a Failed session's chunks must no longer be proposed: {items:?}"
+        );
+        assert!(
+            !items.iter().any(|item| matches!(
+                item,
+                UsdtConsensusItem::MpcSignature { session_id: sid, .. } if *sid == session_id
+            )),
+            "a Failed session's late signature must be dropped, not proposed: {items:?}"
+        );
+    }
+
+    /// Orphaned-session gate, rotation half: a stalled (`InProgress`,
+    /// timed-out) session whose op has NO live `PendingUserOp` backing it (a
+    /// racing earlier attempt already completed and consumed it -- the op is
+    /// submitted/confirmed) must NOT be proposed for `RotateSigning`:
+    /// rotating it would start an attempt that can never finalize
+    /// (`process_mpc_signature` refuses without a `PendingUserOp`), which
+    /// times out and rotates again forever. With the `PendingUserOp`
+    /// restored, the rotation IS proposed (the normal stalled-session path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rotate_signing_not_proposed_without_live_pending_user_op() {
+        use sha2::{Digest as _, Sha256};
+
+        const N: u16 = 4;
+        let peers: Vec<PeerId> = (0..N).map(PeerId::from).collect();
+        let num_peers = peers.to_num_peers();
+        let args = ConfigGenModuleArgs {
+            network: Network::Regtest,
+            disable_base_fees: false,
+        };
+        let server_cfgs = UsdtInit::default().trusted_dealer_gen(
+            &peers,
+            &args,
+            &fedimint_usdt_common::UsdtGenParams::default(),
+        );
+        let cfg = server_cfgs[&PeerId::from(0)]
+            .clone()
+            .to_typed::<UsdtConfig>()
+            .expect("config was just generated by the same configgen");
+        let db = fedimint_core::db::Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            fedimint_core::module::registry::ModuleDecoderRegistry::default(),
+        );
+        let module = Usdt::new_for_test(
+            cfg,
+            MockEvmRpc::default().into_dyn(),
+            db,
+            PeerId::from(0),
+            num_peers,
+        );
+
+        let digest: [u8; 32] = Sha256::digest(b"usdt orphaned rotation gate test").into();
+        let op_hash: [u8; 32] = Sha256::digest(b"usdt orphaned rotation gate op_hash").into();
+        let session_id = fedimint_usdt_common::signing_session_id(&digest, 0);
+
+        // A stranded `InProgress` session written directly (its
+        // `PendingUserOp` was consumed by a racing completed attempt).
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        dbtx.insert_new_entry(
+            &SigningSessionKey(session_id),
+            &SigningSession {
+                purpose: SigningPurpose::UserOp(op_hash),
+                digest,
+                signers: module.signer_subset(&digest, 0),
+                round: 0,
+                state: SessionState::InProgress,
+                attempt: 0,
+                last_progress_block: 0,
+            },
+        )
+        .await;
+        dbtx.commit_tx().await;
+
+        // Advance consensus block count strictly past the timeout: the
+        // session IS timed out, but must still not rotate while orphaned.
+        seed_block_count_votes(module.db_for_test(), N, timeout_blocks() + 1).await;
+
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        let items = module.consensus_proposal(&mut dbtx.to_ref_nc()).await;
+        dbtx.commit_tx().await;
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, UsdtConsensusItem::RotateSigning { session_id: sid } if *sid == session_id)),
+            "a timed-out session with no live PendingUserOp must not be proposed for rotation: \
+             {items:?}"
+        );
+
+        // Restore the live `PendingUserOp`: the same timed-out session now
+        // rotates normally.
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        dbtx.insert_new_entry(
+            &PendingUserOpKey(op_hash),
+            &PendingUserOp {
+                op: sample_unsigned_user_op_for_test(),
+                purpose: UserOpPurpose::DeployAndSweep {
+                    source: EvmAddress([0x71; 20]),
+                },
+                created_block: 0,
+            },
+        )
+        .await;
+        dbtx.commit_tx().await;
+
+        let mut dbtx = module.db_for_test().begin_transaction().await;
+        let items = module.consensus_proposal(&mut dbtx.to_ref_nc()).await;
+        dbtx.commit_tx().await;
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, UsdtConsensusItem::RotateSigning { session_id: sid } if *sid == session_id)),
+            "with a live PendingUserOp the timed-out session must rotate: {items:?}"
+        );
     }
 
     #[tokio::test]
