@@ -308,13 +308,17 @@ fn withdraw_guards(preview: math::BurnOutcome) -> (Amount, Amount, Amount, Amoun
 /// tag) AND, only for the tweaks that pass, whether deriving `child` from it
 /// actually reproduces `pubkey`.
 ///
-/// The second check is what makes this safe against the "recovery-tweak
-/// overwrite" threat (spec §13): an attacker can attach an arbitrary `tweak`
-/// to a victim's real `pubkey` on a `Balance`/`LpPosition` record they credit
-/// (the server cannot verify a pubkey was derived from a tweak, spec §7's
-/// `DepositV0`/`SwapV0` comments), so a garbage tweak passing the filter by
-/// chance must NOT be treated as a match — only a tweak that actually
-/// re-derives the claimed pubkey may be.
+/// The second check is not redundant. `check_tweak` is a 2-byte filter, so
+/// roughly 1 in 65536 unrelated tweaks passes it by chance; only re-deriving
+/// the key proves the record is ours.
+///
+/// It is no longer load-bearing against an *attacker*, though it reads that
+/// way in older commentary. Writing a garbage tweak onto someone else's
+/// record used to be possible, because an output's destination key was
+/// unauthenticated; outputs now carry a proof of possession
+/// (`fedimint-amm-common::pop`), so only the key's owner can write there at
+/// all. What remains is the honest case above: chance filter collisions, and
+/// an owner's own mistake.
 pub fn matches_own_key(
     root: &DerivableSecret,
     filter: [u8; 32],

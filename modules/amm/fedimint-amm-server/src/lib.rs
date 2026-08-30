@@ -851,20 +851,18 @@ impl ServerModule for Amm {
                 // (spec §9.2), so a saturating clamp would not avoid the
                 // panic, only relocate it into the sum.
                 //
-                // `recipient_pk` and `tweak` are both unverified wire
-                // fields — the server has no way to check that a pubkey was
-                // actually derived from a tweak (that needs the client's
-                // root secret). If the incoming `tweak` were written back
-                // unconditionally, an attacker could credit a victim's
-                // `recipient_pk` with a garbage `tweak` for the cost of one
-                // `min_swap_in`, silently breaking the victim's seed-only
-                // recovery (spec §8.2, §13) even though their funds remain
-                // safe and spendable. So: preserve the EXISTING record's
-                // tweak whenever one exists, and only take the incoming
-                // tweak when creating a new record. An honest client
-                // crediting the same pubkey twice necessarily supplies the
-                // same tweak (the pubkey is derived from it), so this is a
-                // no-op for honest use.
+                // `recipient_pk` names who may spend this balance, and the
+                // proof of possession verified at the top of
+                // `process_output` is what makes it trustworthy: only the
+                // holder of that key can create or credit a record here. The
+                // server still cannot check that the pubkey was derived from
+                // the `tweak` — that needs the client's root secret — but it
+                // no longer has to, because the only party who can write a
+                // tweak at this key is the party the tweak belongs to.
+                //
+                // An honest client crediting the same pubkey twice
+                // necessarily supplies the same tweak anyway, since the
+                // pubkey is derived from it.
                 //
                 // This is computed BEFORE any write below: both the
                 // `checked_add` and the `MAX_RESERVE` check can still fail,
@@ -966,20 +964,18 @@ impl ServerModule for Amm {
                 }
 
                 // An `owner_pk` is expected to be freshly ground per deposit
-                // (spec §8.3), so this should never collide — but `owner_pk`
-                // is an attacker-controlled wire value with no freshness
-                // enforced here. Accumulating shares (rather than
-                // `insert_new_entry`, which would panic on a collision, or
-                // overwriting, which would erase an existing depositor's
-                // claim) keeps this path panic-free and loses no one's
-                // funds regardless of input.
+                // (spec §8.3), so this should never collide. It still might:
+                // the same owner may legitimately deposit twice at one key.
+                // Accumulating shares (rather than `insert_new_entry`, which
+                // would panic on a collision, or overwriting, which would
+                // erase the earlier deposit) keeps this path panic-free and
+                // loses no one's funds.
                 //
-                // As with the `BalanceEntry` above, `owner_pk` and `tweak`
-                // are both unverified wire fields, so the incoming `tweak`
-                // must NOT overwrite an existing record's tweak — only a
-                // freshly-created record takes the incoming value. Otherwise
-                // an attacker could grief a victim's LP position's
-                // seed-only recovery the same way (spec §8.2, §13).
+                // A collision can only ever be the owner's own second
+                // deposit: the proof of possession verified at the top of
+                // `process_output` means nobody else can write here. That is
+                // also why the incoming `tweak` is taken rather than the
+                // stored one — see the note in the `SwapV0` arm.
                 //
                 // This is computed BEFORE any write below: `checked_add` here
                 // can still fail, and nothing may hit the database until
