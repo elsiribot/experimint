@@ -38,10 +38,41 @@ Conflict surface between the forks is near-zero: Fedi never touches `fedimint-co
 `fedimint-derive`, or `fedimint-api-client`, which is exactly where experimint's
 config-gen work lives. `fedimint-derive` is byte-identical across the two.
 
-**Caveat.** The conclusion above came from symbol-level analysis, not compilation.
-It is being verified by an actual build on `es/fedi9-compat`. A trait-bound or
-inference break invisible to grep is the residual risk, higher for `amm` (never ported)
-than `usdt` (already shipped in Fedi).
+**Confirmed by compilation, not just analysis.** `es/fedi9-compat` builds. The decisive
+test was a throwaway consumer crate outside the workspace that registers both modules
+against fedi9's own `fedimint-client`:
+
+```rust
+builder.with_module(fedimint_amm_client::AmmClientInit);
+builder.with_module(fedimint_usdt_client::UsdtClientInit);
+```
+
+Clean on native *and* on `wasm32-unknown-unknown`. That is precisely where the feared
+seventh blocker (a trait bound or `async_trait` mismatch invisible to grep) would have
+appeared, since none of the module crates depends on `fedimint-client` itself. It did
+not appear. Workspace check, clippy `-D warnings`, fmt and 198 tests are all green.
+
+The two AMM-only items were fixed module-side with plain `spawn_cancellable`, as
+intended — no platform patch.
+
+**Two corrections to the earlier analysis:**
+- `fedimint-threshold-ecdsa` *does* exist on the fedi9 line at `crypto/threshold-ecdsa`.
+  It is not why the usdt server is excluded. The server is excluded because
+  `fedimint_core::module::Asset`, `fedimint_server_core::EnvVarDoc`, and the
+  `provided_assets` / `get_documented_env_vars` hooks genuinely do not exist there.
+- An undiscovered blocker surfaced and was resolved: the graph would not resolve until
+  `[patch.crates-io]` for `iroh`/`iroh-base`/`iroh-relay` was restated, because
+  `fedimint-connectors` on fedi9 needs iroh's `no_holepunch` feature and **`[patch]` is
+  not inherited across a git-dependency boundary.**
+
+**Deliberately not merged to master.** That branch narrows the workspace members to the
+four client/common crates; merging would break the server line. Two branches is the
+design, not an oversight.
+
+**Residual risk:** the AMM has never been exercised at runtime against fedi9 — it
+compiles and its unit tests pass, but no integration suite runs on that branch. The
+usdt side has shipped in Fedi already; the amm side has only ever run against
+experimint's own line.
 
 **Corrected along the way.** experimint's root `Cargo.toml` states the divergence point
 is `be854220f`. That is wrong — `be854220f` is the merge-base with upstream *master*,
@@ -186,10 +217,48 @@ against the wrong EntryPoint.
 `confirmation_depth` must be ≥ 6 on a non-dev chain (`MIN_PROD_CONFIRMATION_DEPTH`);
 set to 12.
 
-**Being independently verified:** that the module's own CREATE2 derivation reproduces
-this factory's `getAddress(owner, salt)` byte-for-byte. If it does not, deposits would
-go to addresses the federation cannot sweep. Treat the table above as provisional until
-that check reports.
+**Verified.** The module's CREATE2 derivation reproduces the deployed factory's
+`getAddress(owner, salt)` byte-for-byte — four owner/salt pairs for
+`derive_deposit_account` plus two for `derive_pool_account`, all exact, against live
+mainnet. The live `eth_getProof` path was checked too: a real holder's balance proven
+from the trie (`17000000000000198`) equals `balanceOf()` at the same block, confirming
+the ERC-20 balances mapping is at storage slot 2 as the module assumes.
+
+The check is not vacuous: as a negative control, the same derivation against the **v0.6**
+factory `0x9406Cc…6454` produces `0x5241cE8e…bD24` where the chain says
+`0x03a74d80…6A92`. They differ, as they must — different embedded `ERC1967Proxy`. So a
+v0.6 misconfiguration would make *every* deposit address wrong, silently.
+
+Reproduce with `cargo run -p fedimint-usdt-tests --bin verify-mainnet-config`.
+
+### D8a — Which `SimpleAccountFactory`: use the module's own default
+
+Verification turned up a fork I had not seen. With only `FM_USDT_ENTRY_POINT` set,
+`usdt_gen_params_from_env` derives the module's **own** Arachnid-CREATE2 factory
+`0xd095bB8b86Afe336ea11D7382269e1C39037c8fb` (impl `0x25510b5911085689e0758109855ad14f14b8aF8b`)
+— not the canonical eth-infinitism `0x91E6…8985`. Both are deployed on mainnet, both
+have the right `entryPoint()`, and the module's derivation matches **both**. They are
+equally safe but yield **different deposit accounts**, so the choice must be deliberate.
+
+**Decided: take the module's default — leave `FM_USDT_ACCOUNT_FACTORY` and
+`FM_USDT_SIMPLE_ACCOUNT_IMPL` unset.**
+
+Reasoning: the module *derives* this address by design, so it is the path config-gen
+was built and tested around. Every override has to be byte-identical across all seven
+guardians or config-gen diverges, and on hosts with intermittent SSH the cheapest way
+to avoid a misconfigured guardian is to have fewer values to get wrong. The address is
+also deterministic across chains, so the config survives a chain change.
+
+Overriding to the canonical factory is a supported alternative — the values are in the
+handover — but it buys nothing here and costs two more things that must match exactly.
+
+### Correction to a value I supplied
+
+I told the verifying agent the `getAddress(address,uint256)` selector was `0x5fbfb9cf`.
+That is wrong — `0x5fbfb9cf` is `createAccount(address,uint256)`; `getAddress` is
+**`0x8cb84e18`**. The agent recomputed it from keccak rather than trusting me, so the
+verification used the correct selector. Flagged because the same mistake in a config
+would have been silent.
 
 ## D6 — Sandbox required an override for host access
 
