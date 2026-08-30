@@ -3,6 +3,12 @@
 Fedimint module experiments, developed outside the Fedimint tree and built
 against a pinned platform branch.
 
+> **You are on `es/fedi9-compat`.** This branch builds only the four
+> client/common crates, against *Fedi's* fedimint line, so the Fedi app can
+> consume them. The server crates, `bin/fedimintd-experimint` and the
+> integration suites described below are not members of this workspace — check
+> out `master` for those. See [`docs/fedi9-compat.md`](docs/fedi9-compat.md).
+
 Two module families live here:
 
 | Family | Crates | What it is |

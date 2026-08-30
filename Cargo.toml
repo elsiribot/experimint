@@ -1,12 +1,23 @@
+# `es/fedi9-compat`: the CLIENT-ONLY workspace. See `docs/fedi9-compat.md`.
+#
+# This branch exists so the Fedi app can depend on experimint's `usdt` and `amm`
+# client crates without migrating its own tree to a different fedimint API
+# generation. It therefore pins fedimint to Fedi's line, on which the
+# server-side platform surface experimint's guardians need does not exist.
+# The server, bin and integration-test crates are consequently NOT members here
+# — they are built from `master`, which is and stays the deployment line.
 [workspace]
 members = [
-    "bin/fedimintd-experimint",
     "modules/amm/fedimint-amm-client",
     "modules/amm/fedimint-amm-common",
-    "modules/amm/fedimint-amm-server",
-    "modules/amm/fedimint-amm-tests",
     "modules/usdt/fedimint-usdt-client",
     "modules/usdt/fedimint-usdt-common",
+]
+# Present on disk, owned by `master`, deliberately out of this workspace.
+exclude = [
+    "bin/fedimintd-experimint",
+    "modules/amm/fedimint-amm-server",
+    "modules/amm/fedimint-amm-tests",
     "modules/usdt/fedimint-usdt-server",
     "modules/usdt/fedimint-usdt-tests",
 ]
@@ -21,53 +32,60 @@ repository = "https://github.com/elsirion/experimint"
 version = "0.1.0"
 
 [workspace.dependencies]
-# --- fedimint (pinned to the experimint platform branch) ---------------------
+# --- fedimint (pinned to Fedi's line, NOT the experimint platform branch) ----
 #
-# All fedimint crates MUST share the exact same `rev`, otherwise cargo resolves
-# them as distinct source packages and the trait impls stop lining up. That
-# applies across module families too: `amm` and `usdt` must see one and the
+# All fedimint crates MUST share the exact same source pin, otherwise cargo
+# resolves them as distinct source packages and the trait impls stop lining up.
+# That applies across module families too: `amm` and `usdt` must see one and the
 # same `fedimint-core`, or they can never be registered into one federation.
 #
-# rev 51d011a47769c91aabe2ed6f1f62e91e53c50283 == elsiribot/fedimint
-# `experimint-v0.11` ("feat(setup): let the UI build a module instance list,
-# with asset-aware mints"), workspace version 0.12.0-alpha.
+# tag v0.11.0-fedi9-usdt.1 == elsiribot/fedimint commit 32aa628c102: exactly
+# fedibtc/fedimint `v0.11.0-fedi9` plus the usdt module and the four platform
+# items the clients here need (`await_primary_module_outputs_for_unit`, a
+# `const fn AmountUnit::new_custom`, the `FM_USDT_*` env consts and
+# `LOG_CLIENT_MODULE_USDT`). Fedi's own `es/usdt-tidy` `[patch]`es its whole
+# fedimint tree onto this same tag, which is what makes it the meeting point:
+# a Fedi app consuming these crates resolves one `fedimint-core`, not two.
 #
-# Why the fork and not upstream master: the usdt server depends on
-# `fedimint-threshold-ecdsa` (`crypto/threshold-ecdsa`), which exists only on
-# this branch. The branch also carries the `--module` config-gen CLI and the
-# typed per-module `ServerModuleInit::Params` hook. It is NOT a descendant of
-# upstream master — the two diverged from `be854220f`, so this is a different
-# API generation (0.12.0-alpha), not a newer one.
+# The two lines are SIBLINGS, not one ahead of the other. They diverged at
+# upstream 14f6399cde4 (2026-03-31); `master`'s `experimint-v0.11` pin carries
+# ~4 months of upstream commits this tag does not have, and this tag carries
+# Fedi's own. (`be854220f`, named here previously, is the merge-base with
+# upstream master and is NOT contained in fedi9 — the old comment was wrong.)
 #
-# To bump: move this rev, then re-run `cargo check --workspace --all-targets`.
-# `branch = "experimint-v0.11"` would also resolve but is not reproducible.
-devimint = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-build = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-core = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-logging = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimintd = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+# A tag, not a `rev`, because the pin's whole purpose is to name the same
+# immutable object Fedi names. Tags in git dependencies are resolved to a
+# commit in `Cargo.lock`, so this stays reproducible.
+#
+# To bump: move this tag in lockstep with Fedi's `[patch]`, then re-run the
+# wasm gate in `docs/fedi9-compat.md`.
+devimint = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-build = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-core = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-logging = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-testing = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+fedimintd = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
 
 # NOTE: fedimint's own `Cargo.lock` is NOT inherited when you depend on it as a
 # git dependency — cargo re-resolves the whole tree from scratch. That can land
@@ -81,10 +99,15 @@ fedimintd = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769
 #
 #     cargo update -p bdk_electrum --precise 0.23.0
 #
-# This only affects `fedimint-amm-tests` (the only crate pulling
-# `fedimint-testing` -> gateway -> ldk-node). Keep `Cargo.lock` committed.
+# This only affected `fedimint-amm-tests` (the only crate pulling
+# `fedimint-testing` -> gateway -> ldk-node), which is not a member of this
+# branch's workspace. Keep `Cargo.lock` committed regardless.
 
-# --- in-workspace ------------------------------------------------------------
+# --- in-repo -----------------------------------------------------------------
+# The `*-server` rows name packages this branch excludes from the workspace.
+# They are kept so the table stays identical to `master`'s and this branch keeps
+# rebasing cleanly; cargo never resolves a `[workspace.dependencies]` entry that
+# no member actually depends on.
 fedimint-amm-client = { path = "modules/amm/fedimint-amm-client", version = "0.1.0" }
 fedimint-amm-common = { path = "modules/amm/fedimint-amm-common", version = "0.1.0" }
 fedimint-amm-server = { path = "modules/amm/fedimint-amm-server", version = "0.1.0" }
@@ -160,33 +183,42 @@ debug = "line-tables-only"
 
 # Mirrors fedimint: crypto/serialization crates are unusably slow in a debug
 # build otherwise.
+#
+# Shorter than `master`'s list on purpose: cargo warns ("profile package spec
+# ... did not match any packages") for every entry absent from the graph, and
+# the whole cggmp21 threshold-ECDSA ecosystem plus `librocksdb-sys` reach the
+# graph only through `fedimint-usdt-server`, which is not a member here. Those
+# entries live on `master` with the crate that needs them.
 [profile.dev.package]
 bitcoin_hashes = { opt-level = 3 }
 bls12_381 = { opt-level = 3 }
-# cggmp21 threshold-ECDSA ecosystem, copied from the platform branch: the
-# Paillier/bignum/curve math is extremely heavy at opt-level 1, which makes the
-# usdt module's runtime MPC signing tests take many minutes in dev.
-cggmp21 = { opt-level = 3 }
-cggmp21-keygen = { opt-level = 3 }
 fedimint-threshold-crypto = { opt-level = 3 }
 ff = { opt-level = 3 }
-generic-ec = { opt-level = 3 }
-generic-ec-core = { opt-level = 3 }
-generic-ec-curves = { opt-level = 3 }
-generic-ec-zkp = { opt-level = 3 }
-gmp-mpfr-sys = { opt-level = 3 }
 group = { opt-level = 3 }
-hd-wallet = { opt-level = 3 }
-librocksdb-sys = { opt-level = 3 }
-paillier-zk = { opt-level = 3 }
 pairing = { opt-level = 3 }
 rand = { opt-level = 3 }
 rand_chacha = { opt-level = 3 }
 rand_core = { opt-level = 3 }
 ring = { opt-level = 3 }
-rug = { opt-level = 3 }
 secp256k1 = { opt-level = 3 }
 secp256k1-sys = { opt-level = 3 }
 subtle = { opt-level = 3 }
 zeroize = { opt-level = 3 }
 
+# `[patch]` is NOT inherited from a git dependency, so the pinned fedimint
+# tree's own patch table has to be restated here verbatim. `fedimint-connectors`
+# on Fedi's line requires `iroh`'s `no_holepunch` feature, which exists only on
+# this fork; without the patch the graph fails to resolve at all
+# ("`iroh` does not have that feature"). The rev is the commit
+# `v0.35.0-no-holepunch` resolved to in the pinned tree's own `Cargo.lock`.
+#
+# `[patch]` applies only from the top-level manifest, so this table does nothing
+# for anyone depending on these crates: it exists purely so experimint builds
+# standalone. A downstream consumer needs its own equivalent — the Fedi app
+# already has one, pointing at `fedibtc/iroh` `z/wasm-drop-reqwest-stream`
+# rather than this fork, and that one wins there. Only the `no_holepunch`
+# feature has to be present; the branch does not have to match.
+[patch.crates-io]
+iroh = { git = "https://github.com/elsirion/iroh", rev = "0674d2ca472f9c5fbef507ea119cb4d2dd126ae2" }
+iroh-base = { git = "https://github.com/elsirion/iroh", rev = "0674d2ca472f9c5fbef507ea119cb4d2dd126ae2" }
+iroh-relay = { git = "https://github.com/elsirion/iroh", rev = "0674d2ca472f9c5fbef507ea119cb4d2dd126ae2" }

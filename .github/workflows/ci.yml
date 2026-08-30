@@ -10,10 +10,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# `es/fedi9-compat` runs a reduced lane set: the workspace here is the four
+# client/common crates only (see `docs/fedi9-compat.md`), so there is no
+# `fedimintd-experimint` to link and no integration-test crate to drive. The
+# `wasm` lane is the one that matters on this branch — it is the gate the Fedi
+# app's mobile build has to pass.
 env:
-  # Both module families build C from source (secp256k1-sys, gmp-mpfr-sys via
-  # rug <- cggmp21, ring, aws-lc-sys). A cold build is long; without a cache
-  # every job pays it again.
+  # Both module families build C from source (secp256k1-sys, ring, aws-lc-sys).
+  # A cold build is long; without a cache every job pays it again.
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -27,10 +31,6 @@ jobs:
         include:
           - name: build
             cmd: cargo check --workspace --all-targets --locked
-          - name: bin
-            # The daemon is the only thing that proves the module set actually
-            # links; a lib-only check would not catch a missing module dep.
-            cmd: cargo build --locked -p fedimintd-experimint
           - name: clippy
             cmd: cargo clippy --workspace --all-targets --locked -- -D warnings
           - name: fmt
@@ -58,9 +58,7 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    # The usdt module's threshold-ECDSA tests run real MPC signing rounds and
-    # are slow by construction, even with the cggmp21 opt-level=3 overrides.
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -71,11 +69,8 @@ jobs:
         with:
           key: test
 
-      # `anvil` comes from the dev shell (Foundry), so the usdt EVM e2e suites
-      # actually run here. They skip silently when the binary is absent --
-      # `spawn_anvil` returns `Ok(None)` on `NotFound` -- which makes a missing
-      # Foundry indistinguishable from a pass. That is why it is a dev-shell
-      # dependency rather than a step here: the shell is the thing both CI and
-      # a developer share, so neither can quietly lose the coverage.
+      # Unit tests only: the EVM e2e and federation integration suites live in
+      # `fedimint-{usdt,amm}-tests`, which are not members of this workspace.
+      # `master` is where those run.
       - name: cargo test
         run: nix develop --accept-flake-config --command bash -c 'cargo test --workspace --locked'

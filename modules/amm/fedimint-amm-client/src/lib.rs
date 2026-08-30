@@ -363,7 +363,6 @@ pub struct AmmClientModule {
     /// spawned the same way, from `start`, for the same reason: `init` runs
     /// too early for `ClientContext` to be usable).
     task_group: TaskGroup,
-    client_span: tracing::Span,
 }
 
 impl std::fmt::Debug for AmmClientModule {
@@ -470,10 +469,14 @@ impl ClientModule for AmmClientModule {
         let module_api = self.module_api.clone();
         let root_secret = self.root_secret.clone();
         let client_ctx = self.client_ctx.clone();
-        self.task_group.spawn_cancellable_with_span(
-            self.client_span.clone(),
-            "amm recovered-balance claim sweep",
-            async move {
+        // Plain `spawn_cancellable`, not the span-carrying variant: the latter
+        // exists only on the experimint platform branch, and this crate must
+        // also compile against Fedi's fedimint line (see
+        // `docs/fedi9-compat.md`). The task therefore roots its own tracing
+        // tree rather than inheriting the client's span; every event it emits
+        // still carries the task name.
+        self.task_group
+            .spawn_cancellable("amm recovered-balance claim sweep", async move {
                 let mut backoff = background_backoff();
                 loop {
                     let (claimed, errors) =
@@ -488,8 +491,7 @@ impl ClientModule for AmmClientModule {
                     let delay = backoff.next().unwrap_or(std::time::Duration::from_secs(60));
                     fedimint_core::runtime::sleep(delay).await;
                 }
-            },
-        );
+            });
     }
 }
 
@@ -1293,7 +1295,6 @@ impl ClientModuleInit for AmmClientInit {
             module_api: args.module_api().clone(),
             root_secret: args.module_root_secret().clone(),
             task_group: args.task_group().clone(),
-            client_span: args.client_span().clone(),
         })
     }
 
