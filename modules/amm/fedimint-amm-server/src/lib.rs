@@ -460,6 +460,130 @@ fn recovery_range(db_prefix: u8, cursor: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
     (start, prefix_end)
 }
 
+/// One page of a recovery keyset scan, as returned by [`recovery_page`]: the
+/// decoded `(key, value)` rows plus the opaque cursor for the next page
+/// (`None` when this page exhausts the table).
+struct RecoveryPage<K, V> {
+    rows: Vec<(K, V)>,
+    next_cursor: Option<Vec<u8>>,
+}
+
+/// Serves one page of a recovery endpoint's keyset-cursor scan over the
+/// single-table `db_prefix`, generic over the table's key/value types — the
+/// ONE implementation shared by `BALANCE_RECOVERY_ENDPOINT` and
+/// `LP_RECOVERY_ENDPOINT`, so the security-sensitive pagination logic below
+/// (a cursor-validation fix already landed here once) cannot drift between
+/// the two copies. Each endpoint is a thin call plus its own row-mapping.
+/// `table` names the table in server-error messages only.
+///
+/// Fix pass 2, Important 2: a keyset cursor, not a row offset — resumes from
+/// the last KEY returned rather than a row count, so it stays correct under
+/// concurrent deletion. `Balance` rows are deleted routinely (every
+/// `ClaimBalanceV0`), and the previous `.skip(cursor)` counted positions: a
+/// deletion below the cursor shifted every later row left by one, so the
+/// next page silently dropped whatever row landed on the boundary.
+/// `balance_recovery_keyset_cursor_survives_deletion_below_cursor`
+/// (tests/endpoints.rs) reproduces this against the prior offset
+/// implementation and fails there; it passes here.
+///
+/// Also genuinely bounds the scan (Important 3: the old comment here claimed
+/// this without it being true — `find_by_prefix().skip(n)` still polls and
+/// decodes, including a full secp256k1 `PublicKey` parse, every row up to
+/// the cursor on every call, so an unauthenticated caller replaying a cursor
+/// pinned at table size paid O(table size) per request; only allocation and
+/// response size were actually bounded). `raw_find_by_range` seeks directly
+/// to `start` in every store this module runs against — confirmed by reading
+/// `MemDatabase::raw_find_by_range` (`BTreeMap::range`,
+/// `fedimint-core/src/db/mem_impl.rs`) and RocksDB's (`IteratorMode::From`
+/// plus `set_iterate_range`, `fedimint-rocksdb/src/lib.rs`) at the pinned
+/// rev — neither iterates from the start of the table, so per-request work
+/// is O(limit), not O(cursor).
+///
+/// BLOCKING SECURITY FIX: `cursor` is unauthenticated input and is validated
+/// BEFORE it is ever used as a scan boundary — a cursor that does not decode
+/// as this table's own key type `K` (garbage, an empty cursor, or one
+/// recycled from the other recovery endpoint) is rejected outright, rather
+/// than trusted to already lie inside this table's byte range.
+/// [`recovery_range`] also clamps the range server-side as defense in depth
+/// (see its doc comment), but this check is what turns a bad cursor into a
+/// clean 400 instead of a scan that could otherwise return a wrong (if not
+/// out-of-range) page.
+///
+/// Every row scanned came from a range clamped to `db_prefix` regardless of
+/// what `cursor` was, so in the absence of a server bug every row really was
+/// written by this module as a `K -> V` pair. A decode failure is therefore
+/// a server-side invariant violation, not something a client can trigger —
+/// but per this module's hard rule against panicking on anything reachable
+/// from a request, it still surfaces as a clean API error rather than an
+/// `.expect()` panic (a remote, unauthenticated caller reaching exactly this
+/// panic was the blocking bug this code replaces).
+///
+/// `next_cursor` is the raw `key_bytes` of the last returned row, kept
+/// alongside the decoded value rather than re-encoding the key: `key_bytes`
+/// already *is* what `to_bytes()` would produce, since it came straight off
+/// the wire from `raw_find_by_range`.
+async fn recovery_page<K, V>(
+    db: &fedimint_core::db::Database,
+    db_prefix: u8,
+    table: &'static str,
+    request: &RecoveryPageRequest,
+) -> Result<RecoveryPage<K, V>, ApiError>
+where
+    K: fedimint_core::db::DatabaseKey,
+    V: fedimint_core::db::DatabaseValue,
+{
+    if request
+        .cursor
+        .as_ref()
+        .is_some_and(|c| c.len() > MAX_RECOVERY_CURSOR_LEN)
+    {
+        return Err(ApiError::bad_request("cursor too large".to_string()));
+    }
+
+    let mut dbtx = db.begin_transaction_nc().await;
+    let limit = recovery_page_limit(request.limit);
+
+    let decoders = dbtx.decoders().clone();
+    if let Some(cursor) = request.cursor.as_deref() {
+        K::from_bytes(cursor, &decoders)
+            .map_err(|e| ApiError::bad_request(format!("malformed recovery cursor: {e}")))?;
+    }
+    let (start, end) = recovery_range(db_prefix, request.cursor.as_deref());
+    let raw_rows: Vec<(Vec<u8>, Vec<u8>)> = dbtx
+        .raw_find_by_range(start.as_slice()..end.as_slice())
+        .await?
+        .take(limit + 1)
+        .collect()
+        .await;
+
+    let mut rows: Vec<(Vec<u8>, K, V)> = Vec::with_capacity(raw_rows.len());
+    for (key_bytes, value_bytes) in raw_rows {
+        let key = K::from_bytes(&key_bytes, &decoders)
+            .map_err(|e| ApiError::server_error(format!("corrupt {table} key in database: {e}")))?;
+        let value = V::from_bytes(&value_bytes, &decoders).map_err(|e| {
+            ApiError::server_error(format!("corrupt {table} value in database: {e}"))
+        })?;
+        rows.push((key_bytes, key, value));
+    }
+
+    let has_more = rows.len() > limit;
+    if has_more {
+        rows.truncate(limit);
+    }
+    let next_cursor = has_more
+        .then(|| rows.last())
+        .flatten()
+        .map(|(key_bytes, _, _)| key_bytes.clone());
+
+    Ok(RecoveryPage {
+        rows: rows
+            .into_iter()
+            .map(|(_, key, value)| (key, value))
+            .collect(),
+        next_cursor,
+    })
+}
+
 /// AMM module.
 #[derive(Debug)]
 pub struct Amm {
@@ -1029,134 +1153,30 @@ impl ServerModule for Amm {
                 BALANCE_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Amm, context, request: RecoveryPageRequest| -> BalanceRecoveryResponse {
-                    if request.cursor.as_ref().is_some_and(|c| c.len() > MAX_RECOVERY_CURSOR_LEN) {
-                        return Err(ApiError::bad_request("cursor too large".to_string()));
-                    }
-
-                    let db = context.db();
-                    let mut dbtx = db.begin_transaction_nc().await;
-                    let limit = recovery_page_limit(request.limit);
-
-                    // Fix pass 2, Important 2: a keyset cursor, not a row
-                    // offset — resumes from the last KEY returned rather
-                    // than a row count, so it stays correct under concurrent
-                    // deletion. `Balance` rows are deleted routinely (every
-                    // `ClaimBalanceV0`), and the previous `.skip(cursor)`
-                    // counted positions: a deletion below the cursor shifted
-                    // every later row left by one, so the next page silently
-                    // dropped whatever row landed on the boundary.
-                    // `balance_recovery_keyset_cursor_survives_deletion_below_cursor`
-                    // (tests/endpoints.rs) reproduces this against the prior
-                    // offset implementation and fails there; it passes here.
-                    //
-                    // Also genuinely bounds the scan (Important 3: the old
-                    // comment here claimed this without it being true —
-                    // `find_by_prefix().skip(n)` still polls and decodes,
-                    // including a full secp256k1 `PublicKey` parse, every
-                    // row up to the cursor on every call, so an
-                    // unauthenticated caller replaying a cursor pinned at
-                    // table size paid O(table size) per request; only
-                    // allocation and response size were actually bounded).
-                    // `raw_find_by_range` seeks directly to `start` in every
-                    // store this module runs against — confirmed by reading
-                    // `MemDatabase::raw_find_by_range` (`BTreeMap::range`,
-                    // `fedimint-core/src/db/mem_impl.rs`) and RocksDB's
-                    // (`IteratorMode::From` plus `set_iterate_range`,
-                    // `fedimint-rocksdb/src/lib.rs`) at the pinned rev —
-                    // neither iterates from the start of the table, so
-                    // per-request work is O(limit), not O(cursor).
-                    //
-                    // BLOCKING SECURITY FIX: `cursor` is unauthenticated
-                    // input and is validated BEFORE it is ever used as a
-                    // scan boundary — a cursor that does not decode as a
-                    // `BalanceKey` (garbage, an empty cursor, or one
-                    // recycled from `LP_RECOVERY_ENDPOINT`) is rejected
-                    // outright, rather than trusted to already lie inside
-                    // this table's byte range. `recovery_range` also
-                    // clamps the range server-side as defense in depth (see
-                    // its doc comment), but this check is what turns a bad
-                    // cursor into a clean 400 instead of a scan that could
-                    // otherwise return a wrong (if not out-of-range) page.
-                    let decoders = dbtx.decoders().clone();
-                    if let Some(cursor) = request.cursor.as_deref() {
-                        <BalanceKey as fedimint_core::db::DatabaseKey>::from_bytes(
-                            cursor, &decoders,
-                        )
-                        .map_err(|e| {
-                            ApiError::bad_request(format!("malformed recovery cursor: {e}"))
-                        })?;
-                    }
-                    let (start, end) =
-                        recovery_range(DbKeyPrefix::Balance as u8, request.cursor.as_deref());
-                    // Keeps the raw `key_bytes` alongside the decoded value,
-                    // rather than decoding and later re-encoding a
-                    // `BalanceKey` for `next_cursor`: `key_bytes` already
-                    // *is* what `to_bytes()` would produce, since it came
-                    // straight off the wire from `raw_find_by_range`.
-                    let raw_rows: Vec<(Vec<u8>, Vec<u8>)> = dbtx
-                        .raw_find_by_range(start.as_slice()..end.as_slice())
-                        .await?
-                        .take(limit + 1)
-                        .collect()
-                        .await;
-
-                    // Every row here came from the range above, which is
-                    // now clamped to the `Balance` prefix regardless of
-                    // what `cursor` was, so in the absence of a server bug
-                    // every row really was written by this module as a
-                    // `BalanceKey` -> `BalanceEntry` pair. A decode failure
-                    // is therefore a server-side invariant violation, not
-                    // something a client can trigger — but per this
-                    // module's hard rule against panicking on anything
-                    // reachable from a request, it still surfaces as a
-                    // clean API error rather than an `.expect()` panic (a
-                    // remote, unauthenticated caller reaching exactly this
-                    // panic was the blocking bug this code replaces).
-                    let mut rows: Vec<(Vec<u8>, BalanceKey, BalanceEntry)> =
-                        Vec::with_capacity(raw_rows.len());
-                    for (key_bytes, value_bytes) in raw_rows {
-                        let key =
-                            <BalanceKey as fedimint_core::db::DatabaseKey>::from_bytes(
-                                &key_bytes, &decoders,
-                            )
-                            .map_err(|e| {
-                                ApiError::server_error(format!(
-                                    "corrupt Balance key in database: {e}"
-                                ))
-                            })?;
-                        let value =
-                            <BalanceEntry as fedimint_core::db::DatabaseValue>::from_bytes(
-                                &value_bytes,
-                                &decoders,
-                            )
-                            .map_err(|e| {
-                                ApiError::server_error(format!(
-                                    "corrupt Balance value in database: {e}"
-                                ))
-                            })?;
-                        rows.push((key_bytes, key, value));
-                    }
-
-                    let has_more = rows.len() > limit;
-                    if has_more {
-                        rows.truncate(limit);
-                    }
-                    let next_cursor = has_more
-                        .then(|| rows.last())
-                        .flatten()
-                        .map(|(key_bytes, _, _)| key_bytes.clone());
+                    // All pagination/cursor handling lives in the shared
+                    // `recovery_page` helper (see its doc comment for the
+                    // keyset-cursor and cursor-validation security notes);
+                    // this endpoint only maps rows to its wire type.
+                    let page = recovery_page::<BalanceKey, BalanceEntry>(
+                        &context.db(),
+                        DbKeyPrefix::Balance as u8,
+                        "Balance",
+                        &request,
+                    )
+                    .await?;
 
                     Ok(BalanceRecoveryResponse {
-                        entries: rows
+                        entries: page
+                            .rows
                             .into_iter()
-                            .map(|(_, key, entry)| BalanceRecoveryEntry {
+                            .map(|(key, entry)| BalanceRecoveryEntry {
                                 tweak: entry.tweak,
                                 pubkey: key.owner,
                                 unit: key.unit,
                                 amount: entry.amount,
                             })
                             .collect(),
-                        next_cursor,
+                        next_cursor: page.next_cursor,
                     })
                 }
             },
@@ -1164,83 +1184,29 @@ impl ServerModule for Amm {
                 LP_RECOVERY_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Amm, context, request: RecoveryPageRequest| -> LpRecoveryResponse {
-                    if request.cursor.as_ref().is_some_and(|c| c.len() > MAX_RECOVERY_CURSOR_LEN) {
-                        return Err(ApiError::bad_request("cursor too large".to_string()));
-                    }
-
-                    let db = context.db();
-                    let mut dbtx = db.begin_transaction_nc().await;
-                    let limit = recovery_page_limit(request.limit);
-
-                    // See `BALANCE_RECOVERY_ENDPOINT` above — same keyset
-                    // cursor, mirrored for `LpPosition` (fix pass 2,
-                    // Important 2 and Important 3; blocking security fix:
-                    // the cursor is validated before use and every `.expect`
-                    // below is a clean API error instead, for the exact
-                    // same reasons as `BALANCE_RECOVERY_ENDPOINT`).
-                    let decoders = dbtx.decoders().clone();
-                    if let Some(cursor) = request.cursor.as_deref() {
-                        <LpPositionKey as fedimint_core::db::DatabaseKey>::from_bytes(
-                            cursor, &decoders,
-                        )
-                        .map_err(|e| {
-                            ApiError::bad_request(format!("malformed recovery cursor: {e}"))
-                        })?;
-                    }
-                    let (start, end) =
-                        recovery_range(DbKeyPrefix::LpPosition as u8, request.cursor.as_deref());
-                    let raw_rows: Vec<(Vec<u8>, Vec<u8>)> = dbtx
-                        .raw_find_by_range(start.as_slice()..end.as_slice())
-                        .await?
-                        .take(limit + 1)
-                        .collect()
-                        .await;
-
-                    let mut rows: Vec<(Vec<u8>, LpPositionKey, LpPosition)> =
-                        Vec::with_capacity(raw_rows.len());
-                    for (key_bytes, value_bytes) in raw_rows {
-                        let key =
-                            <LpPositionKey as fedimint_core::db::DatabaseKey>::from_bytes(
-                                &key_bytes, &decoders,
-                            )
-                            .map_err(|e| {
-                                ApiError::server_error(format!(
-                                    "corrupt LpPosition key in database: {e}"
-                                ))
-                            })?;
-                        let value =
-                            <LpPosition as fedimint_core::db::DatabaseValue>::from_bytes(
-                                &value_bytes,
-                                &decoders,
-                            )
-                            .map_err(|e| {
-                                ApiError::server_error(format!(
-                                    "corrupt LpPosition value in database: {e}"
-                                ))
-                            })?;
-                        rows.push((key_bytes, key, value));
-                    }
-
-                    let has_more = rows.len() > limit;
-                    if has_more {
-                        rows.truncate(limit);
-                    }
-                    let next_cursor = has_more
-                        .then(|| rows.last())
-                        .flatten()
-                        .map(|(key_bytes, _, _)| key_bytes.clone());
+                    // Same shared `recovery_page` helper as
+                    // `BALANCE_RECOVERY_ENDPOINT`, instantiated for the
+                    // `LpPosition` table; only the row mapping differs.
+                    let page = recovery_page::<LpPositionKey, LpPosition>(
+                        &context.db(),
+                        DbKeyPrefix::LpPosition as u8,
+                        "LpPosition",
+                        &request,
+                    )
+                    .await?;
 
                     Ok(LpRecoveryResponse {
-                        entries: rows
+                        entries: page
+                            .rows
                             .into_iter()
-                            .map(|(_, key, position)| LpRecoveryEntry {
+                            .map(|(key, position)| LpRecoveryEntry {
                                 tweak: position.tweak,
                                 pool: key.pool,
                                 pubkey: key.owner,
                                 shares: position.shares,
                             })
                             .collect(),
-                        next_cursor,
+                        next_cursor: page.next_cursor,
                     })
                 }
             },
