@@ -17,7 +17,7 @@
 
 use anyhow::ensure;
 use fedimint_amm_client::api::AmmFederationApi;
-use fedimint_amm_client::db::{LpPositionKey, LpPositionRecord};
+use fedimint_amm_client::db::{LpPositionKey, LpPositionRecord, SwapOutcome};
 use fedimint_amm_client::{AmmClientModule, AmmRecoverySummary};
 use fedimint_amm_common::endpoints::BalanceRequest;
 use fedimint_amm_common::pool_id::PoolId;
@@ -387,6 +387,17 @@ async fn swap_round_trip_settles_and_matches_the_prior_quote() -> anyhow::Result
     // settled `dy`. Test 3: that settled `dy` is exactly the pre-Tx1 quote.
     assert_eq!(balance_after - balance_before, quote.amount_out);
 
+    // The settled amount also survives the state machine it was observed in,
+    // which is the only way a caller rendering history can ever report what
+    // this swap paid out.
+    assert_eq!(
+        amm.swap_outcome(operation_id).await,
+        Some(SwapOutcome::Settled {
+            amount_out: quote.amount_out
+        }),
+        "a completed swap must record what it settled at"
+    );
+
     Ok(())
 }
 
@@ -442,6 +453,17 @@ async fn swap_into_bitcoin_settles_real_mintv2_notes() -> anyhow::Result<()> {
         balance_after - balance_before,
         mintv2_representable_floor(quote.amount_out),
         "the wallet must gain exactly the mintv2-representable portion of the settled dy"
+    );
+
+    // The recorded outcome is the amount the federation settled at, before
+    // mintv2's denomination floor takes its cut on reissue — the two differ
+    // here, and this is the swap that proves which one gets recorded.
+    assert_eq!(
+        amm.swap_outcome(operation_id).await,
+        Some(SwapOutcome::Settled {
+            amount_out: quote.amount_out
+        }),
+        "the outcome records the settled dy, not the reissued remainder"
     );
 
     Ok(())
