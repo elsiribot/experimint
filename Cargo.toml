@@ -121,19 +121,41 @@ fedimint-usdt-server = { path = "modules/usdt/fedimint-usdt-server", version = "
 # pulling in a second copy. Do not "upgrade" one of these in isolation — an
 # exact match is what keeps `alloy*`/`secp256k1`/`bls12_381`/`cggmp21` from
 # unifying into two semver-incompatible copies across the git boundary.
-alloy = { version = "2.1", default-features = false, features = [
+#
+# On this branch the platform is `v0.11.0-fedi9-usdt.1`, which pins the `alloy`
+# family EXACTLY (`=2.0.4` / `=1.5.7` / `=0.9.5`), so these must match to the
+# patch. Carrying master's looser `2.1`/`1.6` here makes the graph unsolvable
+# the moment anything on the fedi side also pulls alloy — the fork's
+# `fedimint-cli` does, via its own vendored usdt client — because no version
+# satisfies both `^1.6` and `=1.5.7`.
+#
+# Pinning `alloy-sol-types` is NOT sufficient on its own, and the failure is
+# confusing: the `sol!` macro comes from `alloy-sol-macro`, which is a
+# transitive dep resolved by ordinary semver, so cargo happily pairs a 1.7.x
+# macro with 1.5.7 types. The macro then generates calls to ABI methods
+# (`abi_decode_returns_with_config` and friends) that do not exist in 1.5.7, and
+# the errors point at the `sol!` invocation rather than at the version skew.
+# `Cargo.lock` therefore pins all five in lockstep — `alloy-sol-macro`,
+# `-macro-expander`, `-macro-input`, `-type-parser` and `-types` at 1.5.7. A
+# plain `cargo update` will undo that. To restore:
+#
+#     for c in alloy-sol-macro alloy-sol-macro-expander alloy-sol-macro-input \
+#              alloy-sol-type-parser; do
+#         cargo update -p $c --precise 1.5.7
+#     done
+alloy = { version = "=2.0.4", default-features = false, features = [
     "essentials",
     "reqwest-rustls-tls",
 ] }
-alloy-consensus = "2.1"
-alloy-primitives = { version = "1.6", default-features = false, features = [
+alloy-consensus = "=2.0.4"
+alloy-primitives = { version = "=1.5.7", default-features = false, features = [
     "std",
 ] }
 alloy-rlp = "0.3"
-alloy-sol-types = { version = "1.6", default-features = false, features = [
+alloy-sol-types = { version = "=1.5.7", default-features = false, features = [
     "std",
 ] }
-alloy-trie = "0.9"
+alloy-trie = "=0.9.5"
 anyhow = "1.0.98"
 async-stream = "0.3.6"
 async-trait = "0.1.88"
