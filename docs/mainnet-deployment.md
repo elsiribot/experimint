@@ -135,16 +135,16 @@ table is here so the deployed unit can be checked against something.
 
 | variable | value | note |
 | --- | --- | --- |
-| `FM_DATA_DIR` | `/var/lib/fedimintd-usdt/` | distinct from the btcpp instance's |
-| `FM_BIND_P2P` | `0.0.0.0:8183` | |
-| `FM_BIND_UI` | `127.0.0.1:8185` | |
-| `FM_P2P_URL` | `fedimint://<fqdn>:8183` | |
-| `FM_API_URL` | `wss://<fqdn>/usdt/ws/` | goes into the invite code |
+| `FM_DATA_DIR` | `/var/lib/fedimintd-usdt/` or `-usdt2/` | the old btcpp instance is gone; never point either at its leftover dir |
+| `FM_BIND_P2P` | `0.0.0.0:8173` / `0.0.0.0:8183` | `usdt` / `usdt2` |
+| `FM_BIND_UI` | `127.0.0.1:8175` / `127.0.0.1:8185` | loopback only |
+| `FM_P2P_URL` | `fedimint://<fqdn>:8173` / `:8183` | what other guardians dial |
+| `FM_API_URL` | `wss://<fqdn>/ws/` or `/ws2/` | goes into the invite code |
 | `FM_BITCOIN_NETWORK` | `bitcoin` | |
 | `FM_BITCOIND_URL` | `http://127.0.0.1:8332` | btcpp hosts only |
-| `FM_BITCOIND_USERNAME` | `bitcoin` | btcpp hosts only |
-| `FM_BITCOIND_URL_PASSWORD_FILE` | `/run/agenix/bitcoind-rpc-password` | btcpp hosts only |
-| `FM_ESPLORA_URL` | `https://mempool.space/api` | `fedimint-testing` only |
+| `FM_BITCOIND_USERNAME` | `bitcoin` / `privileged` | btcpp hosts / btc-2 |
+| `FM_BITCOIND_URL_PASSWORD_FILE` | `/run/agenix/bitcoind-rpc-password` | btcpp hosts. btc-2 runs **nix-bitcoin**, which has no `bitcoin` RPC user and generates its own passwords on-host, so it reads `/etc/nix-bitcoin-secrets/bitcoin-rpcpassword-privileged` via group `bitcoin`. Its `public` user is not usable — its rpcwhitelist lacks the watch-only wallet calls, which fails at runtime rather than at eval |
+| `FM_ESPLORA_URL` | — | unused: every guardian has a local node |
 | `FM_BIND_API_WS`, `FM_BIND_API_IROH` | | **ignored by this binary** — see below |
 
 The NixOS module comes from the upstream `fedimint` flake input, which is a
@@ -254,10 +254,13 @@ just apply fedimint-btcpp-01 root@btcpp-01.cypheru.net
 just apply fedimint-btcpp-03 root@btcpp-03.cypheru.net
 just apply fedimint-btcpp-05 root@btcpp-05.cypheru.net
 just apply fedimint-btcpp-06 root@btcpp-06.cypheru.net
-just apply fedimint-btcpp-08 root@btcpp-08.cypheru.net
 just apply fedimint-btcpp-10 root@btcpp-10.cypheru.net
-just apply fedimint-testing  root@testing.sirion.io
+just apply btc-2             root@btc-2.sirion.io
 ```
+
+btcpp-01 carries both guardians, so deploying it once brings up `fedimintd-usdt`
+and `fedimintd-usdt2` together. btcpp-08 is not in this list — see the topology
+section.
 
 `just apply-fedimint` is the wrong recipe here — it is stale and it touches
 hosts that are not guardians of this federation.
