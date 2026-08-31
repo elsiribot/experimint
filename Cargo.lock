@@ -2440,7 +2440,7 @@ dependencies = [
 [[package]]
 name = "fedimint-api-client"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2466,7 +2466,7 @@ dependencies = [
 [[package]]
 name = "fedimint-bitcoind"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2481,7 +2481,7 @@ dependencies = [
 [[package]]
 name = "fedimint-build"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "serde_json",
 ]
@@ -2489,7 +2489,7 @@ dependencies = [
 [[package]]
 name = "fedimint-client-module"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -2521,7 +2521,7 @@ dependencies = [
 [[package]]
 name = "fedimint-connectors"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2554,7 +2554,7 @@ dependencies = [
 [[package]]
 name = "fedimint-core"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2618,7 +2618,7 @@ dependencies = [
 [[package]]
 name = "fedimint-derive"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "itertools 0.14.0",
  "proc-macro2",
@@ -2629,7 +2629,7 @@ dependencies = [
 [[package]]
 name = "fedimint-derive-secret"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "bitcoin_hashes",
@@ -2642,7 +2642,7 @@ dependencies = [
 [[package]]
 name = "fedimint-eventlog"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2660,7 +2660,7 @@ dependencies = [
 [[package]]
 name = "fedimint-hkdf"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "bitcoin_hashes",
 ]
@@ -2668,7 +2668,7 @@ dependencies = [
 [[package]]
 name = "fedimint-logging"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "tracing-subscriber",
@@ -2677,7 +2677,7 @@ dependencies = [
 [[package]]
 name = "fedimint-metrics"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
  "axum",
@@ -2757,7 +2757,7 @@ dependencies = [
 [[package]]
 name = "fedimint-util-error"
 version = "0.11.0-rc.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.1#32aa628c1029b09dd3fce672120c8008094cee7d"
+source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.0-fedi9-usdt.2#99b19ba54290fea148afd632f29b4fd05ab01e3d"
 dependencies = [
  "anyhow",
 ]

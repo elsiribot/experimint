@@ -39,13 +39,25 @@ version = "0.1.0"
 # That applies across module families too: `amm` and `usdt` must see one and the
 # same `fedimint-core`, or they can never be registered into one federation.
 #
-# tag v0.11.0-fedi9-usdt.1 == elsiribot/fedimint commit 32aa628c102: exactly
+# tag v0.11.0-fedi9-usdt.2 == elsiribot/fedimint commit 99b19ba5429: exactly
 # fedibtc/fedimint `v0.11.0-fedi9` plus the usdt module and the four platform
 # items the clients here need (`await_primary_module_outputs_for_unit`, a
 # `const fn AmountUnit::new_custom`, the `FM_USDT_*` env consts and
-# `LOG_CLIENT_MODULE_USDT`). Fedi's own `es/usdt-tidy` `[patch]`es its whole
-# fedimint tree onto this same tag, which is what makes it the meeting point:
-# a Fedi app consuming these crates resolves one `fedimint-core`, not two.
+# `LOG_CLIENT_MODULE_USDT`). It supersedes `.1` (`32aa628c102`), whose vendored
+# usdt server was a stale snapshot: experimint had since deleted
+# `UsdtInput::V0`, and because `fedimint-derive` encodes enum variants by
+# POSITIONAL INDEX that moved `DepositProofV0` from 2 to 1, which a `.1` server
+# decodes as `RefundV0`. `.2` re-snapshots the module and advertises
+# `MODULE_CONSENSUS_VERSION` 0.13, so the stale pairing is rejected at the
+# handshake instead of hanging on the first deposit.
+#
+# Fedi's own `es/usdt-tidy` `[patch]`es its whole fedimint tree onto this same
+# tag, which is what makes it the meeting point: a Fedi app consuming these
+# crates resolves one `fedimint-core`, not two. That is also why this pin must
+# move in lockstep — Fedi's `[patch]` targets `fedibtc/fedimint` and cannot
+# reach this table, which depends on `elsiribot/fedimint` directly, so a
+# mismatch here duplicates the entire fedimint core stack rather than erroring
+# cleanly.
 #
 # The two lines are SIBLINGS, not one ahead of the other. They diverged at
 # upstream 14f6399cde4 (2026-03-31); `master`'s `experimint-v0.11` pin carries
@@ -59,33 +71,33 @@ version = "0.1.0"
 #
 # To bump: move this tag in lockstep with Fedi's `[patch]`, then re-run the
 # wasm gate in `docs/fedi9-compat.md`.
-devimint = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-build = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-core = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-logging = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-testing = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
-fedimintd = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.1" }
+devimint = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-build = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-core = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-logging = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-testing = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
+fedimintd = { git = "https://github.com/elsiribot/fedimint", tag = "v0.11.0-fedi9-usdt.2" }
 
 # NOTE: fedimint's own `Cargo.lock` is NOT inherited when you depend on it as a
 # git dependency — cargo re-resolves the whole tree from scratch. That can land
@@ -122,7 +134,7 @@ fedimint-usdt-server = { path = "modules/usdt/fedimint-usdt-server", version = "
 # exact match is what keeps `alloy*`/`secp256k1`/`bls12_381`/`cggmp21` from
 # unifying into two semver-incompatible copies across the git boundary.
 #
-# On this branch the platform is `v0.11.0-fedi9-usdt.1`, which pins the `alloy`
+# On this branch the platform is `v0.11.0-fedi9-usdt.2`, which pins the `alloy`
 # family EXACTLY (`=2.0.4` / `=1.5.7` / `=0.9.5`), so these must match to the
 # patch. Carrying master's looser `2.1`/`1.6` here makes the graph unsolvable
 # the moment anything on the fedi side also pulls alloy — the fork's
