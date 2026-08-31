@@ -72,7 +72,7 @@
           #
           # Every `fedimint-*` crate is a git dependency on one revision of
           # elsiribot/fedimint, so this hash also pins that checkout.
-          cargoHash = "sha256-6OXZddi8MscoPlSCEaFEZhM2GK+O3j8cMiQ9v/pc5kw=";
+          cargoHash = "sha256-OgbMK8Uc2lNy1PURclNvm1QGSe8jOxdHQgSE/a9sXfc=";
 
           # The workspace also contains the `*-tests` crates, which drag in
           # `fedimint-testing` -> the gateway -> `fedimint-ldk-node`. None of
