@@ -3,11 +3,16 @@
 //! The client-side counterpart of `fedimintd-experimint`, and a thin wrapper in
 //! the same sense: it supplies the client module inits for the kinds that
 //! binary's federations run, and otherwise inherits every flag, subcommand and
-//! output format from the platform branch's [`FedimintCli`].
+//! output format from the platform branch's [`FedimintCli`]. The one verb it
+//! serves itself is [`info`]; see that module for why it is intercepted from
+//! argv rather than registered.
 //!
 //! Without it there is no way to drive `amm` or `usdt` from a command line at
 //! all — a stock `fedimint-cli` links neither module, so `fedimint-cli module
 //! amm ...` resolves to a module the client cannot instantiate.
+//!
+//! `README.md` next to this file is the operator-facing version of what
+//! follows: same topology, with the invocations spelled out.
 //!
 //! # The intended federation topology
 //!
@@ -25,10 +30,16 @@
 //! upstream's `FedimintCli::with_default_modules` also attaches, for the same
 //! reason `fedimintd-experimint` omits their server halves: a multi-unit
 //! federation is a v2-only story, and the v1 modules predate `AmountUnit`.
-//! `fedimint-cli`'s own v1-specific top-level subcommands (`info`, `spend`,
-//! `reissue`, ...) resolve their module by kind and so report "No modules found
-//! of kind mint" here — they would fail identically against such a federation
-//! even if their inits were attached, since it runs no v1 instances.
+//! `fedimint-cli`'s own v1-era top-level subcommands resolve their module by
+//! kind, which against this topology fails in two different ways. `spend`,
+//! `reissue` and friends ask for kind `mint` and report "No modules found of
+//! kind mint"; they would fail identically even if their inits were attached,
+//! since the federation runs no v1 instances, so the message is expected rather
+//! than a symptom. `info` is the one that does *not* fail: on the pinned rev it
+//! falls back from `mint`/`wallet` to `mintv2`/`walletv2` and prints a plausible
+//! answer, having resolved the mint to the lowest-id `mintv2` instance — the
+//! bitcoin one. Being wrong quietly is worse than failing loudly, which is why
+//! [`info`] replaces it.
 //!
 //! # Two `mintv2` instances
 //!
@@ -58,9 +69,12 @@
 //! `Client::get_module_client_dyn(instance_id)`, which is exactly what
 //! `ClientCmd::Module` dispatches through, and a `ModuleSelector` that parses
 //! an all-digits argument as an instance id. So the USDT mint is reachable as
-//! `fedimint-cli-experimint module <id>` with the id `module` (no argument)
-//! lists — under the topology above, `2`. The kind form is a convenience that
-//! is only unambiguous for the kinds this federation runs once.
+//! `fedimint-cli-experimint module <id>` with the id `module` (no argument) or
+//! [`info`] lists — under the topology above, `2`. The kind form is a
+//! convenience that is only unambiguous for the kinds this federation runs
+//! once.
+
+pub mod info;
 
 use fedimint_cli::FedimintCli;
 use fedimint_client::module_init::ClientModuleInitRegistry;

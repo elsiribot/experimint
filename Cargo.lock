@@ -4317,18 +4317,27 @@ name = "fedimint-cli-experimint"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "fedimint-amm-client",
+ "fedimint-amm-common",
+ "fedimint-bip39",
  "fedimint-build",
  "fedimint-cli",
  "fedimint-client",
  "fedimint-client-module",
+ "fedimint-connectors",
  "fedimint-core",
  "fedimint-lnv2-client",
+ "fedimint-logging",
  "fedimint-meta-client",
  "fedimint-mintv2-client",
+ "fedimint-rocksdb",
  "fedimint-usdt-client",
+ "fedimint-usdt-common",
  "fedimint-walletv2-client",
  "fedimintd-experimint",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

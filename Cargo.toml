@@ -73,7 +73,8 @@ fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", rev = "5
 fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-rocksdb = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-server ={ git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
 fedimint-threshold-ecdsa = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }

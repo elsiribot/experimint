@@ -19,7 +19,12 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+clap = { workspace = true }
 fedimint-amm-client = { workspace = true, features = ["cli"] }
+# `info` reads the `amm` unit allowlist out of its own client config rather than
+# keeping a kind -> unit table; the `-common` crate is where that type lives.
+fedimint-amm-common = { workspace = true }
+fedimint-bip39 = { workspace = true }
 # Defaults are off at the workspace level (see the root manifest). `tor` is
 # re-enabled here: it is what lets an invite code name an onion API endpoint.
 # `jemalloc` is deliberately not: that feature only pulls `tikv-jemallocator`
@@ -30,12 +35,25 @@ fedimint-amm-client = { workspace = true, features = ["cli"] }
 fedimint-cli = { workspace = true, features = ["tor"] }
 fedimint-client = { workspace = true }
 fedimint-client-module = { workspace = true }
+fedimint-connectors = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-lnv2-client = { workspace = true, features = ["cli"] }
+# `info` initializes tracing itself on the path where it never reaches
+# `FedimintCli::new`, which is what otherwise does it.
+fedimint-logging = { workspace = true }
 fedimint-meta-client = { workspace = true, features = ["cli"] }
 fedimint-mintv2-client = { workspace = true, features = ["cli"] }
+# The client database backend upstream defaults to. `info` opens the same
+# `<data-dir>/client.db` upstream's own subcommands do, since a data dir has to
+# stay usable by both halves of this binary.
+fedimint-rocksdb = { workspace = true }
 fedimint-usdt-client = { workspace = true, features = ["cli"] }
+# `USDT_UNIT`: the unit the usdt module's own consensus logic credits, and the
+# only place that association is published.
+fedimint-usdt-common = { workspace = true }
 fedimint-walletv2-client = { workspace = true, features = ["cli"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
