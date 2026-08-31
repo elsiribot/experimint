@@ -25,70 +25,96 @@ Seven guardians: fedimint's threshold for `n = 7` is exactly 5, so "5-of-7"
 needs no configuration. Two guardians may be offline without stopping
 consensus; three may not.
 
-Hosts (from `elsirion-infa`, branch `es/usdt-amm-federation`):
+Hosts (from `elsirion-infa`, branch `es/usdt-amm-federation`). **Seven guardians
+on six hosts** — btcpp-01 carries two instances:
 
-| guardian | host | chain backend |
-| --- | --- | --- |
-| btcpp-01, -03, -05, -06, -08, -10 | `btcpp-NN.cypheru.net` | local pruned `bitcoind` |
-| the seventh | `testing.sirion.io` | esplora (`mempool.space`) |
+| guardian | host | instance | API | chain backend |
+| --- | --- | --- | --- | --- |
+| 1 | `btcpp-01.cypheru.net` | `usdt` | `/ws/` | local pruned `bitcoind` |
+| 2 | `btcpp-01.cypheru.net` | `usdt2` | `/ws2/` | same `bitcoind` |
+| 3 | `btcpp-03.cypheru.net` | `usdt` | `/ws/` | local pruned `bitcoind` |
+| 4 | `btcpp-05.cypheru.net` | `usdt` | `/ws/` | local pruned `bitcoind` |
+| 5 | `btcpp-06.cypheru.net` | `usdt` | `/ws/` | local pruned `bitcoind` |
+| 6 | `btcpp-10.cypheru.net` | `usdt` | `/ws/` | local pruned `bitcoind` |
+| 7 | `btc-2.sirion.io` | `usdt` | `/ws/` | nix-bitcoin full node |
 
-`btcpp-11` is deliberately *not* a guardian: 1 core and 1 GB of RAM, already
-running `bitcoind` next to a live guardian, and cggmp21 threshold-ECDSA DKG is
-CPU- and memory-heavy.
+`btcpp-08` was a guardian and is not any more: it is wedged — answers ICMP and
+completes a TCP handshake on 22 and 443, but sshd never sends a banner and nginx
+never replies. Alive at the kernel, userspace hung, almost certainly out of
+memory. There is no power-cycle path (the mynymbox panel is billing-only). DKG
+fixes membership at ceremony time, so a host that *might* come back is no use.
 
-## Before you start: four things that are not filled in
+Doubling btcpp-01 makes it a correlated failure for two of seven. Threshold is
+5, so losing that host alone leaves exactly 5 — consensus survives with zero
+margin, and any second failure halts it. See the trade-off block in
+`usdt-federation-params.nix`.
 
-The deployment cannot complete until all four are resolved. Three are values
-somebody has to choose; one is an infrastructure gap.
+`btcpp-11` and the iroh hosts are deliberately *not* guardians: 1 core and 1 GB
+of RAM each, and cggmp21 threshold-ECDSA DKG is CPU- and memory-heavy.
 
-1. **`FM_USDT_BROADCASTER_PRIVATE_KEY_FILE` — a funded Ethereum EOA.**
-   `secrets/usdt-broadcaster-key.age` currently holds the literal string
-   `PLACEHOLDER-NOT-A-KEY-...`. Guardians front ERC-4337 UserOp gas from this
-   account. One key shared across all seven is acceptable — the EntryPoint
-   dedups by `(sender, nonce)`, so it does not matter which guardian submits.
+Measured on btcpp-01 after deploy, both instances idle pre-DKG: **65 MB and
+59 MB** peak. The 3.3 GB figure quoted earlier came from the *old* daemon
+crash-looping against a 572 MB database, and does not describe a fresh guardian.
+A 4 GiB swapfile is configured on btcpp-01 as a cushion for the DKG spike.
 
-   **This is the hard blocker.** The module's readiness state machine stays at
-   `BootstrapState::AwaitingInfra` — deposit-address handout blocked — until at
-   least `threshold` (5) guardians report a broadcaster holding
-   `broadcaster_min_balance_wei`, which defaults to 0.05 ETH.
+## Prerequisites — all resolved as of 2026-08-31
 
-2. **`FM_USDT_RESIDUAL_RECOVERY_RECIPIENT` — a treasury EVM address.** In
-   `secrets/usdt-config-gen-env.age`, currently the zero address. This is
-   consensus-agreed: every guardian builds the byte-identical
-   `EntryPoint.withdrawTo(recipient, amount)` recovery call, so all seven must
-   carry the same value. The module rejects the zero address on any non-dev
-   chain, so config generation stops rather than burning recovered gas
-   deposits.
+Kept as a checklist because each one fails in a different and non-obvious way if
+it regresses.
 
-3. **`FM_PASSWORD_API` — the guardian API password.** Also in
-   `secrets/usdt-config-gen-env.age`, currently commented out. It gates every
-   admin RPC, *including the whole setup ceremony below*, and unlike the UI
-   password it never falls back to a file on disk: while it is unset, admin
-   RPCs return 401 unconditionally. The built-in UI on `127.0.0.1:8185` is a
-   separate plane and stays reachable without it.
+1. **`FM_USDT_BROADCASTER_PRIVATE_KEY_FILE` — a funded Ethereum EOA.** Done.
+   `secrets/usdt-broadcaster-key.age` holds a real key whose address is
+   **`0x7e91F93F1Bfc42EfF669BFCdDe5aC4013255c9C7`**, verified by re-deriving the
+   address from the stored key before it was funded. One key is shared across
+   all seven — the EntryPoint dedups by `(sender, nonce)`, so it does not matter
+   which guardian submits.
 
-4. **btcpp-05 and btcpp-08 are recipients of nothing.** Their SSH host keys
-   were never collected, so agenix cannot encrypt to them — not the secrets
-   above, and not `bitcoind-rpc-password.age` that the guardian they already
-   run depends on. Fix before deploying:
+   Balance at deployment: **0.050235 ETH**. At ~0.56 gwei that is roughly 220
+   deploy-and-sweep operations. `broadcaster_min_balance_wei` was lowered from
+   the module's 0.05 ETH default to **0.01 ETH**, because 0.050235 is only
+   0.000235 above the default — the first `handleOps` would have dropped below
+   it and flagged the module `Degraded` with ~220 operations of gas still in
+   hand. The gate sets where "funded" begins; it does not affect gas cost.
+
+2. **`FM_USDT_RESIDUAL_RECOVERY_RECIPIENT` — a treasury EVM address.** Done, set
+   to the broadcaster address above, so recovered EntryPoint gas returns to the
+   wallet that fronts gas. Consensus-agreed: every guardian builds the
+   byte-identical `EntryPoint.withdrawTo(recipient, amount)`, so all seven must
+   carry the same value. The module rejects the zero address on a non-dev chain,
+   so config generation stops rather than burning recovered deposits.
+
+3. **`FM_PASSWORD_API` — the guardian API password.** Done, a random 32-char
+   value in `secrets/usdt-config-gen-env.age`. It gates every admin RPC
+   *including the whole setup ceremony below*, and unlike the UI password it
+   never falls back to a file on disk: while unset, admin RPCs return 401
+   unconditionally. The built-in UI on `127.0.0.1:8185` is a separate plane.
+
+4. **Secret recipients.** Done. btcpp-05 and btcpp-08 had no host key in
+   `secrets.nix` and were recipients of nothing. Both are recorded now and every
+   secret has been rekeyed, so `bitcoind-rpc-password.age` reaches them too.
+
+   btcpp-08's key could not be obtained with `ssh-keyscan -t ed25519` — its sshd
+   truncates a keyscan handshake and returns only its RSA key, which is why it
+   was previously recorded as uncollectable. It was read from the host's own
+   `/etc/ssh/ssh_host_ed25519_key.pub` instead.
+
+5. **A bundler-capable EVM RPC.** Done — Infura, with the key appended as the
+   final path segment via `FM_USDT_EVM_RPC_API_KEY`, never in the URL.
+
+   This one is easy to get wrong and fails late. The module reads UserOp
+   receipts with `eth_getUserOperationReceipt`, an ERC-4337 *bundler* method. A
+   plain archive node (the previous default, `ethereum-rpc.publicnode.com`)
+   answers `-32601 Method not found`, so `handleOps` lands but the receipt
+   lookup never resolves and **withdrawals never confirm** — the submitter
+   RBF-reprices forever while the pool balance stays 0. Deposits are unaffected,
+   which is what makes it easy to miss. Verify a candidate endpoint with:
 
    ```bash
-   ssh-keyscan -t ed25519 btcpp-05.cypheru.net btcpp-08.cypheru.net
+   curl -s -X POST "$RPC" -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"eth_getUserOperationReceipt","params":["0x00…01"]}'
    ```
-
-   Add the two keys to `secrets.nix` next to the others, add them to both
-   `fedimint-btcpps` and `usdt-federation-guardians`, then `just agenix-rekey`.
-   Two of seven unable to decrypt their broadcaster key leaves five guardians —
-   exactly the threshold, with no margin.
-
-One more thing that is configured but wants attention: the default EVM RPC
-endpoint is `https://ethereum-rpc.publicnode.com`, a plain archive node. The
-module reads UserOp receipts with `eth_getUserOperationReceipt`, a *bundler*
-method publicnode does not serve, so **withdrawals will not confirm** until
-each guardian points at a bundler-capable provider (Alchemy, Infura,
-QuickNode). Set `services.usdtFederation.evmRpcUrl` per host, and pass the
-provider key through `FM_USDT_EVM_RPC_API_KEY_FILE` rather than putting it in
-the URL.
+   A bundler-capable provider returns `"result": null` for an unknown hash. A
+   plain node returns an error object.
 
 ## 1. Build the daemon
 
@@ -259,19 +285,26 @@ the new one. `/var/lib/fedimintd-btcpp` must be untouched;
 
 ## 5. The DKG ceremony
 
-Each guardian's setup API is at `wss://<fqdn>/usdt/ws/`. Export the password
-once:
+Each guardian's setup API is at `wss://<fqdn><apiPath>`. Six hosts, seven
+endpoints — btcpp-01 answers on both `/ws/` and `/ws2/`, and those are two
+*different* guardians that must be treated as strangers throughout. Export the
+password once:
 
 ```bash
-export FM_PASSWORD_API='<the value you put in usdt-config-gen-env>'
-E01=wss://btcpp-01.cypheru.net/usdt/ws/
-E03=wss://btcpp-03.cypheru.net/usdt/ws/
-E05=wss://btcpp-05.cypheru.net/usdt/ws/
-E06=wss://btcpp-06.cypheru.net/usdt/ws/
-E08=wss://btcpp-08.cypheru.net/usdt/ws/
-E10=wss://btcpp-10.cypheru.net/usdt/ws/
-ETS=wss://testing.sirion.io/usdt/ws/
+export FM_PASSWORD_API='<the value in usdt-config-gen-env>'
+E01=wss://btcpp-01.cypheru.net/ws/
+E01B=wss://btcpp-01.cypheru.net/ws2/
+E03=wss://btcpp-03.cypheru.net/ws/
+E05=wss://btcpp-05.cypheru.net/ws/
+E06=wss://btcpp-06.cypheru.net/ws/
+E10=wss://btcpp-10.cypheru.net/ws/
+EB2=wss://btc-2.sirion.io/ws/
 ```
+
+The authoritative list is rendered onto every guardian at
+`/etc/fedimintd-usdt/peers.json` — read it rather than retyping, because the
+doubled host is exactly the entry that gets collapsed into one by hand and
+leaves the federation a peer short.
 
 `fedimint-cli` here is a stock one built from the same fork revision as the
 daemon (`51d011a47769c91aabe2ed6f1f62e91e53c50283`). It can drive setup and the
@@ -308,7 +341,7 @@ It should look like this:
   "entry_point": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
   "account_factory": "0x91E60e0613810449d098b0b5Ec8b51A0FE8c8985",
   "simple_account_impl": "0x68641de71cfea5a5d0d29712449ee254bb1400c2",
-  "broadcaster_min_balance_wei": 50000000000000000,
+  "broadcaster_min_balance_wei": 10000000000000000,
   "eth_usd_price_feed": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
   "price_feed_max_staleness_secs": 14400,
   "residual_recovery_recipient": "0x<treasury>"
@@ -331,8 +364,8 @@ The name is what shows up in the guardian roster, so give each one its host.
 
 ```bash
 declare -A GUARDIANS=(
-  [btcpp-01]="$E01" [btcpp-03]="$E03" [btcpp-05]="$E05" [btcpp-06]="$E06"
-  [btcpp-08]="$E08" [btcpp-10]="$E10" [testing]="$ETS"
+  [btcpp-01]="$E01" [btcpp-01b]="$E01B" [btcpp-03]="$E03" [btcpp-05]="$E05"
+  [btcpp-06]="$E06" [btcpp-10]="$E10" [btc-2]="$EB2"
 )
 declare -A CODES
 
@@ -348,14 +381,20 @@ CODES[btcpp-01]="$(fedimint-cli admin setup "$E01" set-local-params btcpp-01 \
     --module amm \
     --module meta | jq -r .)"
 
-# The six followers: a name and nothing else.
-for name in btcpp-03 btcpp-05 btcpp-06 btcpp-08 btcpp-10 testing; do
+# The six followers: a name and nothing else. `btcpp-01b` is the second
+# instance on the leader's own host and is a full peer like any other.
+for name in btcpp-01b btcpp-03 btcpp-05 btcpp-06 btcpp-10 btc-2; do
   CODES[$name]="$(fedimint-cli admin setup "${GUARDIANS[$name]}" \
       set-local-params "$name" | jq -r .)"
 done
 
-printf '%s\n' "${CODES[@]}" | wc -l    # must be 7
+[ "${#CODES[@]}" -eq 7 ] || { echo "expected 7 setup codes, got ${#CODES[@]}"; exit 1; }
 ```
+
+Give the two btcpp-01 guardians distinct names. They appear side by side in
+every roster, and `btcpp-01` / `btcpp-01b` is the difference between a legible
+federation and one where nobody can tell which of two identical rows just
+stopped voting.
 
 `set-local-params` called a second time with *identical* arguments returns the
 same setup code rather than erroring, so re-running a command verbatim is a safe
@@ -391,7 +430,7 @@ handed its config-gen params to the daemon — it does not wait for DKG — so a
 serial loop is fine:
 
 ```bash
-for e in "$E01" "$E03" "$E05" "$E06" "$E08" "$E10" "$ETS"; do
+for e in "$E01" "$E01B" "$E03" "$E05" "$E06" "$E10" "$EB2"; do
   fedimint-cli admin setup "$e" start-dkg
 done
 ```
