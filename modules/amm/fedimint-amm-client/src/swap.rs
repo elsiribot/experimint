@@ -52,6 +52,7 @@ use fedimint_client_module::DynGlobalClientContext;
 use fedimint_client_module::sm::{ClientSMDatabaseTransaction, State, StateTransition};
 use fedimint_client_module::transaction::{ClientInput, ClientInputBundle};
 use fedimint_core::core::OperationId;
+use fedimint_core::db::IDatabaseTransactionOpsCoreTyped as _;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{AmountUnit, Amounts};
 use fedimint_core::secp256k1::{Keypair, PublicKey};
@@ -61,6 +62,7 @@ use tracing::warn;
 
 use crate::AmmClientContext;
 use crate::api::AmmFederationApi;
+use crate::db::{SwapOutcome, SwapOutcomeKey};
 
 /// The backoff delay for the `attempt`-th retry (1-indexed: `attempt == 1` is
 /// the first retry, taken after the first failure). Built fresh each call —
@@ -167,11 +169,19 @@ impl State for SwapStateMachine {
                 let global = global_context.clone();
                 vec![StateTransition::new(
                     async move { global.await_tx_accepted(txid).await },
-                    |_dbtx, result: Result<(), String>, old_state: Self| {
+                    |dbtx, result: Result<(), String>, old_state: Self| {
                         Box::pin(async move {
                             match result {
                                 Ok(()) => old_state.update(SwapState::Tx1Accepted { attempts: 0 }),
-                                Err(error) => old_state.update(SwapState::Tx1Rejected(error)),
+                                Err(error) => {
+                                    record_outcome(
+                                        dbtx,
+                                        old_state.common.operation_id,
+                                        SwapOutcome::Tx1Rejected(error.clone()),
+                                    )
+                                    .await;
+                                    old_state.update(SwapState::Tx1Rejected(error))
+                                }
                             }
                         })
                     },
@@ -323,6 +333,25 @@ async fn await_own_balance(
     }
 }
 
+/// Writes `outcome` for `operation_id`, in the same database transaction as
+/// the state change that established it.
+///
+/// Overwrites rather than insisting on a first write: [`SwapState::Tx1Accepted`]
+/// is re-entered on every Tx2 retry and re-reads the balance each time, which
+/// can legitimately have grown since the last attempt (see
+/// [`await_own_balance`] on gifts credited to the recipient key after Tx1
+/// landed). The freshest read is the one Tx2 actually claims, so it is the one
+/// worth keeping.
+async fn record_outcome(
+    dbtx: &mut ClientSMDatabaseTransaction<'_, '_>,
+    operation_id: OperationId,
+    outcome: SwapOutcome,
+) {
+    dbtx.module_tx()
+        .insert_entry(&SwapOutcomeKey(operation_id), &outcome)
+        .await;
+}
+
 /// Builds the `ClientInput` for Tx2's `ClaimBalanceV0`, given the balance
 /// [`await_own_balance`] just re-read. Pure and separated out from
 /// [`transition_tx1_accepted`] so the one property that matters here — the
@@ -409,10 +438,23 @@ async fn transition_tx1_accepted(
         .claim_inputs(dbtx, ClientInputBundle::new_no_sm(vec![client_input]))
         .await
     {
-        Ok(range) => old_state.update(SwapState::Tx2Submitted {
-            txid: range.txid(),
-            attempts,
-        }),
+        Ok(range) => {
+            // Same transaction as the state change that establishes it, so
+            // there is no window where Tx2 is on its way but the amount it
+            // claims went unrecorded.
+            record_outcome(
+                dbtx,
+                old_state.common.operation_id,
+                SwapOutcome::Settled {
+                    amount_out: balance,
+                },
+            )
+            .await;
+            old_state.update(SwapState::Tx2Submitted {
+                txid: range.txid(),
+                attempts,
+            })
+        }
         Err(error) => {
             let error = error.to_string();
             warn!(%error, attempts, "Failed to submit swap Tx2 (ClaimBalanceV0); will retry");
