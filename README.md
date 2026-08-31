@@ -126,18 +126,34 @@ The one thing to know before reading anything else: **`module <kind>` resolves
 to the lowest instance id of that kind**, so with two `mintv2` instances it
 always reaches the BTC mint. Address instances by id.
 
-## Nothing here is deployed
+## This is deployed now
 
-No federation runs these modules yet. That is load-bearing for how changes are
-made: consensus behaviour, wire encoding and DB layout can all still change
-freely, and dead consensus paths can be deleted rather than frozen for replay.
+**As of 2026-08-31 a seven-guardian federation runs these modules on Bitcoin
+mainnet and Ethereum mainnet, and it holds real funds.** `usdt` is at consensus
+version 0.13, `amm` at 0.0. See `docs/handover-2026-08-30.md` for the invite
+code, topology and operational notes.
 
-The extraction brief this repo started from assumed the opposite — that `usdt`
-had live federations at consensus version 0.12 — and several rounds of work
-were scoped around that constraint. Findings parked as "not actionable without
-a version bump" during those rounds are actionable now. If a deployment does
-happen, this section is the first thing that needs updating, because a good
-deal of judgement downstream keys off it.
+This section previously said the opposite, and said that if a deployment ever
+happened it would be the first thing needing an update — because a good deal of
+judgement downstream keys off it. So, explicitly:
+
+**What has changed.** Wire encoding, DB layout and consensus behaviour are no
+longer free to change. A breaking change now needs a `MODULE_CONSENSUS_VERSION`
+bump and, for stored records, a migration — not just an edit. The cost of
+getting that wrong is already demonstrated: `usdt` shipped two breaking wire
+changes under one version, and the mismatch surfaced as a deposit that hung
+forever rather than a clean rejection (see the `0.13` note in
+`fedimint-usdt-common`). `fedimint-derive` encodes enum variants by **positional
+index**, so deleting or reordering a variant is breaking even when nothing
+references it.
+
+**What has not been decided.** How much of the old freedom to give up is a
+judgement call, not a fact, and it is not made here. `amm` is still at `0.0` and
+its pool holds real liquidity; whether that warrants freezing its wire format or
+whether this deployment is disposable enough to keep breaking it is the
+maintainer's call. Findings previously parked as "not actionable without a
+version bump" are still actionable — a bump is now the price, rather than being
+free.
 
 ## The platform pin
 
