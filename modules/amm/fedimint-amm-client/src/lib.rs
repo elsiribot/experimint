@@ -85,7 +85,8 @@ use thiserror::Error;
 use crate::api::{AmmFederationApi, for_each_balance_recovery_entry, for_each_lp_recovery_entry};
 use crate::db::{
     DbKeyPrefix, LpPositionKey, LpPositionPrefixAll, LpPositionRecord, RecoveredBalanceKey,
-    RecoveredBalancePrefixAll, RecoveredBalanceRecord,
+    RecoveredBalancePrefixAll, RecoveredBalanceRecord, SwapOutcome, SwapOutcomeKey,
+    SwapOutcomePrefixAll,
 };
 use crate::derivation::{
     CHILD_LP, CHILD_SWAP, check_tweak, derive_keypair, grind_tweak, tweak_filter,
@@ -520,6 +521,21 @@ impl AmmClientModule {
                 amount_in,
             })
             .await?)
+    }
+
+    /// What the swap started by `operation_id` settled at, or `None` while it
+    /// is still in flight — and for any operation id that is not one of this
+    /// client's swaps.
+    ///
+    /// `None` is the answer for every swap between submitting Tx1 and
+    /// building Tx2; see [`SwapOutcome`] for why that gap exists and what the
+    /// two variants do and do not imply about the e-cash being spendable.
+    pub async fn swap_outcome(&self, operation_id: OperationId) -> Option<SwapOutcome> {
+        self.db
+            .begin_transaction_nc()
+            .await
+            .get_value(&SwapOutcomeKey(operation_id))
+            .await
     }
 
     /// Every LP position this client has created or recovered, from the
@@ -1255,6 +1271,16 @@ impl ModuleInit for AmmClientInit {
                         RecoveredBalanceRecord,
                         items,
                         "Amm Recovered Balance"
+                    );
+                }
+                DbKeyPrefix::SwapOutcome => {
+                    push_db_pair_items!(
+                        dbtx,
+                        SwapOutcomePrefixAll,
+                        SwapOutcomeKey,
+                        SwapOutcome,
+                        items,
+                        "Amm Swap Outcome"
                     );
                 }
                 DbKeyPrefix::ExternalReservedStart
