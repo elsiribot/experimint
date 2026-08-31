@@ -154,7 +154,25 @@ pub const KIND: ModuleKind = ModuleKind::from_static_str("usdt");
 /// `UsdtConsensusItem::WithdrawFeesVote` (both append-only wire variants), and
 /// adds the `WithdrawFeesVote` keyspace (`0x16`). Read-side:
 /// `PoolStateResponse` gains an `accrued_fees` field.
-pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 12);
+///
+/// Bumped to `0.13`: two BREAKING wire changes that landed under `0.12` and
+/// should not have. Deleting the legacy observation deposit path removed
+/// `UsdtInput::V0`, and charging the deposit fee added a field to
+/// `DepositProofV0`. `fedimint-derive` encodes enum variants by POSITIONAL
+/// INDEX (`derive_enum_variant_encode_block(variant_idx, ..)`), so removing a
+/// variant renumbers every variant after it: `DepositProofV0` moved from index
+/// 2 to index 1, which a `0.12` peer decodes as `RefundV0`.
+///
+/// Because both sides still advertised `0.12`, the version handshake accepted
+/// the pairing and the mismatch surfaced only as a deposit submission that
+/// hung forever. Bumping makes it a clean handshake rejection instead. This is
+/// the whole reason the version exists; the cost of getting it wrong is silent
+/// misinterpretation of value-bearing inputs.
+///
+/// When editing a wire enum, prefer appending a variant to reordering or
+/// deleting one — deletion is a breaking change even when nothing references
+/// the deleted variant.
+pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 13);
 
 /// The [`AmountUnit`] that USDT-denominated ecash is issued in.
 ///
