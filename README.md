@@ -10,6 +10,7 @@ Two module families live here:
 | `modules/amm` | `fedimint-amm-{common,server,client,tests}` | A constant-product AMM (Uniswap V2 as reference implementation) trading between the federation's `AmountUnit`s. See [`modules/amm/fedimint-amm-spec.md`](modules/amm/fedimint-amm-spec.md). |
 | `modules/usdt` | `fedimint-usdt-{common,server,client,tests}` | USDT-on-EVM peg-in/peg-out via threshold ECDSA and ERC-4337. Lifted from the fork at consensus version 0.12. |
 | `bin/fedimintd-experimint` | — | A `fedimintd` carrying the v2 core modules, `meta`, and both local modules. |
+| `bin/fedimint-cli-experimint` | — | The matching `fedimint-cli`, the only client that can drive `amm` and `usdt`. See [its README](bin/fedimint-cli-experimint/README.md). |
 
 ## Running a federation
 
@@ -103,6 +104,27 @@ here just `lnv2`, `meta` and `amm`. The three carrying the interesting topology
 are opt-in via `FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
 `FM_ENABLE_MODULE_USDT`. They are still *available* without those variables; the
 variables only decide what starts pre-selected.
+
+## Talking to a federation
+
+`bin/fedimint-cli-experimint` is the client counterpart: a `fedimint-cli` with
+this module set linked in, which is what makes `module amm` and `module usdt`
+resolve at all.
+
+```bash
+cargo run -p fedimint-cli-experimint -- --data-dir /path/to/wallet join fed11qgqp...
+cargo run -p fedimint-cli-experimint -- --data-dir /path/to/wallet info
+```
+
+[`bin/fedimint-cli-experimint/README.md`](bin/fedimint-cli-experimint/README.md)
+is the usage guide: joining, the instance-id table and why ids are not portable
+between federations, the AMM and USDt verbs with their real argument shapes,
+denominations per unit, and which upstream subcommands are expected to fail
+here.
+
+The one thing to know before reading anything else: **`module <kind>` resolves
+to the lowest instance id of that kind**, so with two `mintv2` instances it
+always reaches the BTC mint. Address instances by id.
 
 ## Nothing here is deployed
 
@@ -269,12 +291,12 @@ crates.
 
 ## Not here yet
 
-- **A matching client binary.** There is no `fedimint-cli-experimint`
-  registering the `amm` and `usdt` *client* modules, so a stock `fedimint-cli`
-  can drive setup and the generic admin API but cannot exercise those two
-  modules' client-side flows.
 - **The `swap` module**, the other custom module on the fork's
   `2026-07-usdt-wallet` branch.
+- **A non-CLI client.** `bin/fedimint-cli-experimint` is the only thing that
+  drives `amm` and `usdt` client-side; there is no library-shaped wallet SDK,
+  and the `*-client` crates are WASM-safe but nothing consumes them from a
+  browser or a mobile host.
 - **A deployment-shaped run of the full topology.** The topology itself is now
   covered: `fedimint-usdt-tests`' `tests/full_topology_e2e.rs` stands up one
   in-process federation with all seven instances (both `mintv2`s included),
