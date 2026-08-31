@@ -147,6 +147,7 @@ async fn mine_empty_blocks(anvil: &common::AnvilHandle, count: u32) -> anyhow::R
 /// pipeline handles real USDT's void return -- the sweep's
 /// `SimpleAccount.execute(transfer(pool, amount))` runs and moves real tokens
 /// despite the token pushing no return data.
+#[ignore = "needs an ERC-4337 bundler; anvil answers eth_getUserOperationReceipt with -32601. See deploy_and_sweep_e2e.rs for the shared analysis"]
 #[tokio::test(flavor = "multi_thread")]
 async fn deposit_account_is_deployed_and_swept_via_nonstandard_usdt() -> anyhow::Result<()> {
     let Some(anvil) = common::spawn_anvil().await? else {
@@ -378,6 +379,7 @@ async fn deposit_account_is_deployed_and_swept_via_nonstandard_usdt() -> anyhow:
 /// fixture. Passing proves the withdrawal `executeBatch` path handles real
 /// USDT's void return: the pool `SimpleAccount` is deployed by the batch's
 /// `initCode` and pays a fresh EOA in real (non-standard) tokens.
+#[ignore = "needs an ERC-4337 bundler; anvil answers eth_getUserOperationReceipt with -32601. See deploy_and_sweep_e2e.rs for the shared analysis"]
 #[tokio::test(flavor = "multi_thread")]
 async fn withdrawal_is_batched_deployed_and_paid_via_nonstandard_usdt() -> anyhow::Result<()> {
     let Some(anvil) = common::spawn_anvil().await? else {
