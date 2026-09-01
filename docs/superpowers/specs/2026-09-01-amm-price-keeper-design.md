@@ -1,10 +1,23 @@
 # `amm-price-keeper` — Design
 
 A bot that holds the `experimint` AMM's BTC/USDt pool near an external
-reference price. It is **not** an arbitrage bot: at roughly $700 of pool depth
-there is no profitable arbitrage to extract, so the bot's mandate is price
-accuracy and its expected P&L is negative. It pays the pool's fee, plus adverse
-selection, in exchange for quoting a sane price to real users.
+reference price. Its mandate is price accuracy, not profit: at roughly $700 of
+pool depth there is not enough to extract for arbitrage to be a business, and
+its expected P&L over time is negative.
+
+**Where the loss actually comes from — corrected 2026-09-01 against live
+behaviour.** An earlier draft of this section said the bot "pays the pool's fee
+in exchange for" price accuracy, implying each correction is itself lossy. That
+is wrong, and the first live correction disproved it: closing a 201 bps gap
+spent 3,171,840 micros and returned 4,122,112 msats, netting about **+$0.02**.
+Closing a gap wider than the fee is ordinary arbitrage and pays at the instant
+of the trade.
+
+The bleed is **adverse selection over time**. The bot is structurally the
+counterparty that buys whichever asset is falling and sells whichever is
+rising, so as the oracle moves it accumulates the losing side — §4.3's floors
+and the "expect to top it up" guidance exist for exactly that reason. Budget
+for the loss, but do not expect to see it in any individual correction.
 
 ## 1. Goal and non-goals
 

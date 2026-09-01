@@ -3,10 +3,17 @@
 A bot that holds this federation's AMM BTC/USDt pool near an external
 reference price.
 
-It is **not** an arbitrage bot. At roughly $700 of pool depth there is no
-profitable arbitrage to extract, so its mandate is price accuracy and **its
-expected P&L is negative**: it pays the pool's fee, plus adverse selection, in
-exchange for the pool quoting a sane price to real users. Budget for that.
+Its mandate is price accuracy, not profit. At roughly $700 of pool depth there
+is not enough to extract for arbitrage to be a business, and **its expected P&L
+over time is negative**. Budget for that.
+
+Be precise about *why*, though, because the obvious explanation is wrong. An
+individual correction is usually profitable: closing a gap wider than the pool's
+fee is ordinary arbitrage, and the first live correction netted about +$0.02
+closing a 201 bps gap. The loss comes from **adverse selection over time** — the
+bot is structurally the counterparty that buys the falling asset and sells the
+rising one, so it accumulates the losing side as the oracle moves. That is what
+eventually empties a side and needs a top-up.
 
 Every tick it reads the oracle, reads the pool, reads its own balances, and —
 if the pool's spot price is outside a configured band around the oracle —
