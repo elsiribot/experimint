@@ -53,93 +53,124 @@
         # `fedimintd` crate, and both come from this one variable, so it has to
         # be set for the whole build or not at all.
         codeVersion = self.rev or self.dirtyRev or "0000000000000000000000000000000000000000";
+
+        # The three binaries this repo publishes differ only in which package
+        # they build and what they call themselves. Everything else — the
+        # toolchain, the vendored lockfile, every native build input and every
+        # hardening workaround below — is a property of the *dependency tree*,
+        # which they share in full. Factoring it out is what stops the daemon
+        # from being built one way and the tools another.
+        mkExperimintPackage =
+          { pname, description }:
+          rustPlatform.buildRustPackage {
+            inherit pname;
+            version = "0.1.0";
+
+            src = ./.;
+
+            # `cargoHash` vendors from the *committed* `Cargo.lock` rather than
+            # re-resolving. That is load-bearing here, not just reproducibility
+            # hygiene: a fresh resolve picks `bdk_electrum 0.23.2`, whose
+            # `electrum-client 0.24.1` cannot unify with the `0.23.1` that
+            # `fedimint-ldk-node` depends on directly, and the tree stops
+            # compiling. See the note in `Cargo.toml`.
+            #
+            # Every `fedimint-*` crate is a git dependency on one revision of
+            # elsiribot/fedimint, so this hash also pins that checkout.
+            #
+            # It is shared across all three packages because it hashes the
+            # vendored *workspace* lockfile, not the selected package. Adding a
+            # workspace member changes it for every one of them at once.
+            cargoHash = "sha256-VjmcbTM7DqzK3rikgmqN4DTENQzZzCAw8aPXH4gt9Sg=";
+
+            # The workspace also contains the `*-tests` crates, which drag in
+            # `fedimint-testing` -> the gateway -> `fedimint-ldk-node`. None of
+            # that is needed to produce a binary.
+            cargoBuildFlags = [
+              "--package"
+              pname
+            ];
+
+            nativeBuildInputs = with pkgs; [
+              pkg-config
+              protobuf # fedimint-server build.rs (tonic)
+              cmake # aws-lc-sys
+              perl # openssl-sys / aws-lc-sys
+              git # fedimint-build's code-version probe, if ever unforced
+
+              # gmp-mpfr-sys (rug <- cggmp21 <- fedimint-usdt-server) builds GMP
+              # from source with GMP's own autoconf script, which shells out to
+              # both of these. Without them `configure` fails with "No usable m4
+              # in $PATH" and a missing /usr/bin/file.
+              m4
+              file
+            ];
+
+            buildInputs = with pkgs; [
+              openssl
+              sqlite
+            ];
+
+            # `cmake` is here for `aws-lc-sys`' own build script to call. The
+            # workspace root is a cargo project, not a CMake one, so the setup
+            # hook must not try to configure it.
+            dontUseCmakeConfigure = true;
+
+            # bindgen (librocksdb-sys, aws-lc-sys) needs to find libclang.
+            env = {
+              LIBCLANG_PATH = "${llvm.libclang.lib}/lib";
+              PROTOC = "${pkgs.protobuf}/bin/protoc";
+              PROTOC_INCLUDE = "${pkgs.protobuf}/include";
+              FEDIMINT_BUILD_FORCE_GIT_HASH = codeVersion;
+            };
+
+            # `tikv-jemalloc-sys` runs jemalloc 5.3's autoconf `configure`, whose
+            # strerror_r probes compile with `-Werror`. nixpkgs' default `fortify`
+            # hardening injects -D_FORTIFY_SOURCE, and cc-rs compiles build-script
+            # C at -O0, so glibc's features.h fires `#warning _FORTIFY_SOURCE
+            # requires compiling with optimization (-O)`; with -Werror that fails
+            # both probes and configure aborts with "cannot determine return type
+            # of strerror_r".
+            hardeningDisable = [
+              "fortify"
+              "fortify3"
+            ];
+
+            # The test lane is `cargo test --workspace` in the dev shell, which is
+            # where `anvil` and `bitcoind` live. Running it here would build the
+            # `*-tests` crates this package deliberately does not need, and the
+            # EVM suites would skip silently without Foundry anyway.
+            doCheck = false;
+
+            meta = {
+              inherit description;
+              homepage = "https://github.com/elsirion/experimint";
+              license = lib.licenses.mit;
+              mainProgram = pname;
+              platforms = lib.platforms.linux ++ lib.platforms.darwin;
+            };
+          };
       in
       {
         packages.default = self.packages.${system}.fedimintd-experimint;
 
-        packages.fedimintd-experimint = rustPlatform.buildRustPackage {
+        packages.fedimintd-experimint = mkExperimintPackage {
           pname = "fedimintd-experimint";
-          version = "0.1.0";
+          description = "fedimintd carrying the experimint module set (v2 core modules + meta + amm + usdt)";
+        };
 
-          src = ./.;
+        # The only client that can drive `amm` and `usdt`. Packaged so a host
+        # can join and fund a wallet without a copy of the repo and a rust
+        # toolchain on it — the price keeper below needs a data dir that is
+        # already joined, and nothing else can produce one.
+        packages.fedimint-cli-experimint = mkExperimintPackage {
+          pname = "fedimint-cli-experimint";
+          description = "fedimint-cli built with the experimint client module set";
+        };
 
-          # `cargoHash` vendors from the *committed* `Cargo.lock` rather than
-          # re-resolving. That is load-bearing here, not just reproducibility
-          # hygiene: a fresh resolve picks `bdk_electrum 0.23.2`, whose
-          # `electrum-client 0.24.1` cannot unify with the `0.23.1` that
-          # `fedimint-ldk-node` depends on directly, and the tree stops
-          # compiling. See the note in `Cargo.toml`.
-          #
-          # Every `fedimint-*` crate is a git dependency on one revision of
-          # elsiribot/fedimint, so this hash also pins that checkout.
-          cargoHash = "sha256-OgbMK8Uc2lNy1PURclNvm1QGSe8jOxdHQgSE/a9sXfc=";
-
-          # The workspace also contains the `*-tests` crates, which drag in
-          # `fedimint-testing` -> the gateway -> `fedimint-ldk-node`. None of
-          # that is needed to produce the daemon.
-          cargoBuildFlags = [
-            "--package"
-            "fedimintd-experimint"
-          ];
-
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            protobuf # fedimint-server build.rs (tonic)
-            cmake # aws-lc-sys
-            perl # openssl-sys / aws-lc-sys
-            git # fedimint-build's code-version probe, if ever unforced
-
-            # gmp-mpfr-sys (rug <- cggmp21 <- fedimint-usdt-server) builds GMP
-            # from source with GMP's own autoconf script, which shells out to
-            # both of these. Without them `configure` fails with "No usable m4
-            # in $PATH" and a missing /usr/bin/file.
-            m4
-            file
-          ];
-
-          buildInputs = with pkgs; [
-            openssl
-            sqlite
-          ];
-
-          # `cmake` is here for `aws-lc-sys`' own build script to call. The
-          # workspace root is a cargo project, not a CMake one, so the setup
-          # hook must not try to configure it.
-          dontUseCmakeConfigure = true;
-
-          # bindgen (librocksdb-sys, aws-lc-sys) needs to find libclang.
-          env = {
-            LIBCLANG_PATH = "${llvm.libclang.lib}/lib";
-            PROTOC = "${pkgs.protobuf}/bin/protoc";
-            PROTOC_INCLUDE = "${pkgs.protobuf}/include";
-            FEDIMINT_BUILD_FORCE_GIT_HASH = codeVersion;
-          };
-
-          # `tikv-jemalloc-sys` runs jemalloc 5.3's autoconf `configure`, whose
-          # strerror_r probes compile with `-Werror`. nixpkgs' default `fortify`
-          # hardening injects -D_FORTIFY_SOURCE, and cc-rs compiles build-script
-          # C at -O0, so glibc's features.h fires `#warning _FORTIFY_SOURCE
-          # requires compiling with optimization (-O)`; with -Werror that fails
-          # both probes and configure aborts with "cannot determine return type
-          # of strerror_r".
-          hardeningDisable = [
-            "fortify"
-            "fortify3"
-          ];
-
-          # The test lane is `cargo test --workspace` in the dev shell, which is
-          # where `anvil` and `bitcoind` live. Running it here would build the
-          # `*-tests` crates this package deliberately does not need, and the
-          # EVM suites would skip silently without Foundry anyway.
-          doCheck = false;
-
-          meta = {
-            description = "fedimintd carrying the experimint module set (v2 core modules + meta + amm + usdt)";
-            homepage = "https://github.com/elsirion/experimint";
-            license = lib.licenses.mit;
-            mainProgram = "fedimintd-experimint";
-            platforms = lib.platforms.linux ++ lib.platforms.darwin;
-          };
+        packages.amm-price-keeper = mkExperimintPackage {
+          pname = "amm-price-keeper";
+          description = "Holds the experimint AMM's BTC/USDt pool near an external reference price";
         };
 
         devShells.default = (pkgs.mkShell.override { stdenv = llvm.stdenv; }) {

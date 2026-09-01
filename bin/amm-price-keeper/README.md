@@ -22,8 +22,12 @@ this implements, including the reasoning this file only states.
 nix develop --accept-flake-config --command cargo build --release -p amm-price-keeper
 ```
 
-The binary lands at `target/release/amm-price-keeper`. It is not part of the
-`fedimintd-experimint` flake package, so `nix build` will not produce it.
+The binary lands at `target/release/amm-price-keeper`.
+
+`nix build .#amm-price-keeper` produces it too, which is what the NixOS unit in
+the infra repo (`hosts/modules/amm-price-keeper.nix`) consumes. That unit also
+installs `nix build .#fedimint-cli-experimint`, since joining and funding the
+wallet below needs a client on the host.
 
 ## Flags
 
