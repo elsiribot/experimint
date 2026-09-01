@@ -45,8 +45,12 @@ use tracing::{error, info, warn};
 use crate::oracle::DEFAULT_ORACLE_URL;
 use crate::policy::{Balances, Decision, KeeperConfig, MinSwapIn, PoolState};
 
-/// Every flag takes an environment variable, so the bot can be run from a
-/// systemd unit with nothing on the command line (design §8).
+/// Holds the AMM's BTC/USDt pool near an external reference price.
+///
+/// Not an arbitrage bot: its expected P&L is negative, and its mandate is
+/// price accuracy. Every flag also takes an environment variable, so it can
+/// run from a systemd unit with nothing on the command line (design §8).
+/// `README.md` is the operator guide.
 #[derive(Debug, Parser)]
 #[command(name = "amm-price-keeper", version)]
 struct Opts {
