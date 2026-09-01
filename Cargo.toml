@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "bin/amm-price-keeper",
     "bin/fedimint-cli-experimint",
     "bin/fedimintd-experimint",
     "modules/amm/fedimint-amm-client",
@@ -99,6 +100,11 @@ fedimintd = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769
 # `fedimint-testing` -> gateway -> ldk-node). Keep `Cargo.lock` committed.
 
 # --- in-workspace ------------------------------------------------------------
+# `bin/amm-price-keeper` builds its client from the same module registry the CLI
+# does (`experimint_modules`), so the two binaries can never disagree about
+# which kinds a data dir is readable with. That registry is the crate's only
+# export, and it is a `[lib]` for exactly this reason.
+fedimint-cli-experimint = { path = "bin/fedimint-cli-experimint", version = "0.1.0" }
 fedimint-amm-client = { path = "modules/amm/fedimint-amm-client", version = "0.1.0" }
 fedimint-amm-common = { path = "modules/amm/fedimint-amm-common", version = "0.1.0" }
 fedimint-amm-server = { path = "modules/amm/fedimint-amm-server", version = "0.1.0" }

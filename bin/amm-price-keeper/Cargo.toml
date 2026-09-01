@@ -1,0 +1,54 @@
+[package]
+authors = { workspace = true }
+description = "A bot that holds the experimint AMM's BTC/USDt pool near an external reference price"
+edition = { workspace = true }
+license = { workspace = true }
+name = "amm-price-keeper"
+publish = false
+readme = "README.md"
+repository = { workspace = true }
+version = { workspace = true }
+
+[[bin]]
+name = "amm-price-keeper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+fedimint-amm-client = { workspace = true }
+# `math::amount_out` — the exact function consensus settles with. `policy.rs`
+# sizes trades by binary search over it rather than over a second copy of the
+# curve (design §4.2).
+fedimint-amm-common = { workspace = true }
+fedimint-bip39 = { workspace = true }
+# `FM_CLIENT_DIR_ENV`, so `--data-dir` reads the same environment variable
+# `fedimint-cli-experimint` does and one data dir cannot be named two ways.
+fedimint-cli = { workspace = true }
+# `experimint_modules()`: the client module registry, shared with the CLI.
+fedimint-cli-experimint = { workspace = true }
+fedimint-client = { workspace = true }
+fedimint-client-module = { workspace = true }
+fedimint-connectors = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-logging = { workspace = true }
+fedimint-rocksdb = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "time",
+] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Same version `fedimint-amm-common` pins, so the two crates' property tests
+# share one resolved proptest.
+proptest = "1"
+
+[lints]
+workspace = true

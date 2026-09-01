@@ -768,6 +768,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "amm-price-keeper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fedimint-amm-client",
+ "fedimint-amm-common",
+ "fedimint-bip39",
+ "fedimint-cli",
+ "fedimint-cli-experimint",
+ "fedimint-client",
+ "fedimint-client-module",
+ "fedimint-connectors",
+ "fedimint-core",
+ "fedimint-logging",
+ "fedimint-rocksdb",
+ "proptest",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "amplify"
 version = "4.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
