@@ -92,7 +92,7 @@ Branched off current fedi master (`cb458841e`, spv2 as deployed today).
 7. Register `stability-pool-client` in `fedimint-cli-experimint` so the CLI
    can drive accounts, consistent with `amm`/`usdt`.
 8. Tests: module-set test expects seven kinds
-   (`amm, lnv2, meta, multi_sig_stability_pool, mintv2, usdt, walletv2` —
+   (`amm, lnv2, meta, mintv2, multi_sig_stability_pool, usdt, walletv2` —
    sorted); coexistence test covers the new kind.
 9. Docs: README module table + topology, mainnet runbook gains the new env
    vars and a note that `OracleConfig::Aggregate` makes every guardian poll
