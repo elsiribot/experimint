@@ -25,6 +25,7 @@
 //! | `amm` | constant-product market between units 0 and 1 |
 //! | `lnv2` | Lightning |
 //! | `meta` | guardian-published metadata |
+//! | `multi_sig_stability_pool` | Fedi's stability pool v2 (multispend) |
 //!
 //! Deliberately omits the v1 `mint`/`wallet`/`ln` client modules that
 //! upstream's `FedimintCli::with_default_modules` also attaches, for the same
@@ -115,8 +116,8 @@ impl ClientModuleSink for ClientModuleInitRegistry {
     }
 }
 
-/// Attaches the experimint client module set: the v2 core modules, `meta`, and
-/// this repo's `amm` and `usdt`.
+/// Attaches the experimint client module set: the v2 core modules, `meta`,
+/// Fedi's stability pool v2, and this repo's `amm` and `usdt`.
 ///
 /// One init per kind — see the module docs on why that is unrelated to how many
 /// *instances* of a kind the federation ends up running.
@@ -129,6 +130,10 @@ pub fn experimint_modules<S: ClientModuleSink>(sink: S) -> S {
         .attach_module(fedimint_lnv2_client::LightningClientInit::default())
         // Guardian-published metadata.
         .attach_module(fedimint_meta_client::MetaClientInit)
+        // Fedi's stability pool v2 client — the server side of multispend
+        // lives in fedimintd-experimint; this makes its accounts drivable
+        // from `module multi_sig_stability_pool`.
+        .attach_module(stability_pool_client::StabilityPoolClientInit::default())
         // Local modules. Both are built with their `cli` feature on, which is
         // what puts their verbs behind `module amm` / `module usdt`.
         .attach_module(fedimint_amm_client::AmmClientInit)
@@ -141,7 +146,7 @@ mod tests {
 
     use super::*;
 
-    /// The client must carry exactly the six kinds this binary promises.
+    /// The client must carry exactly the seven kinds this binary promises.
     ///
     /// Pins the set so that dropping a module (or silently gaining one) is a
     /// test failure rather than a CLI that reports "Module not found" against a
@@ -161,6 +166,7 @@ mod tests {
                 "lnv2".to_string(),
                 "meta".to_string(),
                 "mintv2".to_string(),
+                "multi_sig_stability_pool".to_string(),
                 "usdt".to_string(),
                 "walletv2".to_string(),
             ],
