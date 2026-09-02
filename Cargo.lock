@@ -6046,7 +6046,6 @@ dependencies = [
  "fedimint-walletv2-server",
  "fedimintd",
  "serde_json",
- "stability-pool-common",
  "stability-pool-server",
  "tokio",
 ]

@@ -91,8 +91,8 @@ use std::time::Duration;
 
 use fedimint_core::Amount;
 use fedimint_server_core::ServerModuleInitRegistry;
-use stability_pool_common::config::{CollateralRatio, OracleConfig};
 use stability_pool_server::StabilityPoolInit;
+use stability_pool_server::common::config::{CollateralRatio, OracleConfig};
 use stability_pool_server::envs::{FM_SPV2_CYCLE_DURATION_SECS_ENV, FM_SPV2_TEST_PARAMS_ENV};
 
 /// The stability pool v2 init, carrying Fedi's deployed parameters verbatim
