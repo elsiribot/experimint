@@ -117,6 +117,17 @@ fedimint-usdt-client = { path = "modules/usdt/fedimint-usdt-client", version = "
 fedimint-usdt-common = { path = "modules/usdt/fedimint-usdt-common", version = "0.1.0" }
 fedimint-usdt-server = { path = "modules/usdt/fedimint-usdt-server", version = "0.1.0" }
 
+# --- fedi (pinned to the experimint branch of elsiribot/fedi) ----------------
+#
+# rev db07c5e35caba3d40e8f321be95ca0a46468bea9 == elsiribot/fedi `experimint`: fedi master (cb458841e, spv2
+# as deployed) with the fedimint deps switched to the platform branch above
+# and stability-pool-{common,server,client} ported to its module API. The
+# fedimint URL+rev on that branch are byte-identical to this workspace's —
+# that is what keeps cargo resolving one fedimint-core, not two.
+stability-pool-client = { git = "https://github.com/elsiribot/fedi", rev = "db07c5e35caba3d40e8f321be95ca0a46468bea9" }
+stability-pool-common = { git = "https://github.com/elsiribot/fedi", rev = "db07c5e35caba3d40e8f321be95ca0a46468bea9" }
+stability-pool-server = { git = "https://github.com/elsiribot/fedi", rev = "db07c5e35caba3d40e8f321be95ca0a46468bea9" }
+
 # --- third party -------------------------------------------------------------
 # Versions are copied verbatim from the pinned platform branch's
 # `[workspace.dependencies]` so we share resolved versions with it rather than

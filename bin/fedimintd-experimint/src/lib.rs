@@ -2,8 +2,9 @@
 //!
 //! This is a thin wrapper around the platform branch's [`fedimintd::run`]: it
 //! supplies a [`ServerModuleInitRegistry`] carrying the v2 core modules, the
-//! meta module, and this repo's two local modules, and otherwise inherits every
-//! flag, env var, setup UI and API endpoint from upstream.
+//! meta module, Fedi's stability pool v2 (multispend), and this repo's two
+//! local modules, and otherwise inherits every flag, env var, setup UI and API
+//! endpoint from upstream.
 //!
 //! # The intended federation topology
 //!
@@ -16,6 +17,7 @@
 //! | `amm` | constant-product market between units 0 and 1 |
 //! | `lnv2` | Lightning |
 //! | `meta` | guardian-published metadata |
+//! | `multi_sig_stability_pool` | Fedi's stability pool v2 (multispend) |
 //!
 //! Note the **two `mintv2` instances**, one per asset. Both setup paths can
 //! express that.
@@ -78,14 +80,54 @@
 //! - `mintv2` — `FM_ENABLE_MODULE_MINTV2`
 //! - `walletv2` — `FM_ENABLE_MODULE_WALLETV2`
 //! - `usdt` — `FM_ENABLE_MODULE_USDT`
+//! - `multi_sig_stability_pool` — `FM_ENABLE_MODULE_SPV2`
 //!
 //! They are still *available* (tickable in the UI, nameable via `--module`)
 //! without those variables; the variables only decide what starts pre-selected.
 
-use fedimint_server_core::ServerModuleInitRegistry;
+use std::time::Duration;
 
-/// The experimint module set: the v2 core modules, `meta`, and this repo's
-/// `amm` and `usdt`.
+use fedimint_core::Amount;
+use fedimint_server_core::ServerModuleInitRegistry;
+use stability_pool_common::config::{CollateralRatio, OracleConfig};
+use stability_pool_server::StabilityPoolInit;
+use stability_pool_server::envs::{FM_SPV2_CYCLE_DURATION_SECS_ENV, FM_SPV2_TEST_PARAMS_ENV};
+
+/// The stability pool v2 init, carrying Fedi's deployed parameters verbatim
+/// (fedi `crates/fedimint/fedimintd/src/main.rs`). `FM_SPV2_TEST_PARAMS`
+/// switches to the mock oracle and a 15s cycle for devimint-style runs;
+/// `FM_SPV2_CYCLE_DURATION_SECS` overrides the production cycle length.
+#[must_use]
+pub fn spv2_init() -> StabilityPoolInit {
+    let test_params = fedimint_core::envs::is_env_var_set(FM_SPV2_TEST_PARAMS_ENV);
+    let cycle_duration_secs: u64 = std::env::var(FM_SPV2_CYCLE_DURATION_SECS_ENV)
+        .ok()
+        .map(|v| {
+            v.parse()
+                .expect("FM_SPV2_CYCLE_DURATION_SECS must be a u64")
+        })
+        .unwrap_or(600);
+
+    StabilityPoolInit {
+        oracle_config: if test_params {
+            OracleConfig::Mock
+        } else {
+            OracleConfig::Aggregate
+        },
+        cycle_duration: Duration::from_secs(if test_params { 15 } else { cycle_duration_secs }),
+        collateral_ratio: CollateralRatio {
+            provider: 1,
+            seeker: 1,
+        },
+        min_allowed_seek: Amount::from_msats(100_000),
+        min_allowed_provide: Amount::from_msats(100_000),
+        max_allowed_provide_fee_rate_ppb: 2000,
+        min_allowed_cancellation_bps: 100,
+    }
+}
+
+/// The experimint module set: the v2 core modules, `meta`, Fedi's stability
+/// pool v2, and this repo's `amm` and `usdt`.
 ///
 /// One init per kind — see the module docs on why that is unrelated to how many
 /// *instances* of a kind the federation ends up running.
@@ -111,6 +153,10 @@ pub fn experimint_modules() -> ServerModuleInitRegistry {
     // Local modules.
     modules.attach(fedimint_amm_server::AmmInit);
     modules.attach(fedimint_usdt_server::UsdtInit::default());
+
+    // Fedi's stability pool v2 — the server side of multispend. Sourced from
+    // the experimint branch of elsiribot/fedi; parameters in `spv2_init`.
+    modules.attach(spv2_init());
 
     modules
 }
@@ -142,6 +188,7 @@ mod tests {
                 "lnv2".to_string(),
                 "meta".to_string(),
                 "mintv2".to_string(),
+                "multi_sig_stability_pool".to_string(),
                 "usdt".to_string(),
                 "walletv2".to_string(),
             ],

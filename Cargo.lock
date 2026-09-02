@@ -6045,6 +6045,8 @@ dependencies = [
  "fedimint-walletv2-server",
  "fedimintd",
  "serde_json",
+ "stability-pool-common",
+ "stability-pool-server",
  "tokio",
 ]
 
@@ -7167,6 +7169,7 @@ dependencies = [
  "hyper 1.9.0",
  "hyper-util",
  "rustls 0.23.38",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -11395,6 +11398,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.38",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -12657,6 +12661,40 @@ dependencies = [
  "ssh-encoding",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "stability-pool-common"
+version = "0.3.0"
+source = "git+https://github.com/elsiribot/fedi?rev=db07c5e35caba3d40e8f321be95ca0a46468bea9#db07c5e35caba3d40e8f321be95ca0a46468bea9"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "fedimint-core",
+ "secp256k1 0.29.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "stability-pool-server"
+version = "0.3.0"
+source = "git+https://github.com/elsiribot/fedi?rev=db07c5e35caba3d40e8f321be95ca0a46468bea9#db07c5e35caba3d40e8f321be95ca0a46468bea9"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "erased-serde",
+ "fedimint-api-client",
+ "fedimint-core",
+ "fedimint-server-core",
+ "futures",
+ "itertools 0.14.0",
+ "reqwest 0.12.28",
+ "serde_json",
+ "stability-pool-common",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
