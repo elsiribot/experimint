@@ -80,7 +80,9 @@
 //! - `mintv2` — `FM_ENABLE_MODULE_MINTV2`
 //! - `walletv2` — `FM_ENABLE_MODULE_WALLETV2`
 //! - `usdt` — `FM_ENABLE_MODULE_USDT`
-//! - `multi_sig_stability_pool` — `FM_ENABLE_MODULE_SPV2`
+//!
+//! `multi_sig_stability_pool` is opt-in the same way, via
+//! `FM_ENABLE_MODULE_SPV2`, independent of the asset topology above.
 //!
 //! They are still *available* (tickable in the UI, nameable via `--module`)
 //! without those variables; the variables only decide what starts pre-selected.
@@ -209,6 +211,7 @@ mod tests {
 
         assert!(kinds.contains(&ModuleKind::clone_from_str("amm")));
         assert!(kinds.contains(&ModuleKind::clone_from_str("usdt")));
+        assert!(kinds.contains(&ModuleKind::clone_from_str("multi_sig_stability_pool")));
     }
 
     /// The intended topology must pass config generation's asset check.
@@ -237,6 +240,7 @@ mod tests {
             ModuleKind::clone_from_str("usdt"),
             fedimint_usdt_common::UsdtGenParams::default(),
         );
+        params.attach_config_gen_params(ModuleKind::clone_from_str("multi_sig_stability_pool"), ());
 
         fedimint_server::config::validate_module_assets(&registry, &params)
             .expect("the intended topology must validate");

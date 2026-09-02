@@ -201,5 +201,6 @@ mod tests {
 
         assert!(kinds.contains(&ModuleKind::clone_from_str("amm")));
         assert!(kinds.contains(&ModuleKind::clone_from_str("usdt")));
+        assert!(kinds.contains(&ModuleKind::clone_from_str("multi_sig_stability_pool")));
     }
 }

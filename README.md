@@ -3,7 +3,7 @@
 Fedimint module experiments, developed outside the Fedimint tree and built
 against a pinned platform branch.
 
-Three module families live here:
+Two module families are developed here, plus a third attached from elsewhere:
 
 | Family | Crates | What it is |
 | --- | --- | --- |
@@ -318,13 +318,18 @@ crates.
   drives `amm` and `usdt` client-side; there is no library-shaped wallet SDK,
   and the `*-client` crates are WASM-safe but nothing consumes them from a
   browser or a mobile host.
-- **A deployment-shaped run of the full topology.** The topology itself is now
-  covered: `fedimint-usdt-tests`' `tests/full_topology_e2e.rs` stands up one
-  in-process federation with all seven instances (both `mintv2`s included),
-  pegs BTC in over `walletv2`, deposits USDt by proof against a real `anvil`,
-  seeds an `amm` pool with both legs, swaps each way at the quoted price,
-  withdraws the position and checks every guardian's balance sheet. What is
-  still untested is the deployment shape around it: `fedimint-testing`
-  trusted-dealer-generates configs rather than driving the `--module` CLI/UI
-  path, and no Lightning gateway is attached, so `lnv2` boots but never
-  routes.
+- **A deployment-shaped run of the full topology.** The seven-instance
+  *deployed* topology is covered: `fedimint-usdt-tests`'
+  `tests/full_topology_e2e.rs` stands up one in-process federation with all
+  seven instances (both `mintv2`s included), pegs BTC in over `walletv2`,
+  deposits USDt by proof against a real `anvil`, seeds an `amm` pool with both
+  legs, swaps each way at the quoted price, withdraws the position and checks
+  every guardian's balance sheet. It does not attach
+  `multi_sig_stability_pool` — the module is attachable but not part of this
+  deployment's topology (see
+  [`docs/mainnet-deployment.md`](docs/mainnet-deployment.md)), so the
+  now-eight-row instance table above is not fully exercised by this test. What
+  is still untested even for the seven it does cover is the deployment shape
+  around it: `fedimint-testing` trusted-dealer-generates configs rather than
+  driving the `--module` CLI/UI path, and no Lightning gateway is attached, so
+  `lnv2` boots but never routes.

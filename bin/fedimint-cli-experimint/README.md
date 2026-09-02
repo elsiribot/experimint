@@ -99,7 +99,11 @@ documented config-gen ordering produces:
 | 4 | `usdt` | USDt-on-EVM peg |
 | 5 | `amm` | constant-product market between units 0 and 1 |
 | 6 | `meta` | guardian-published metadata |
-| 7 | `multi_sig_stability_pool` | Fedi's stability pool v2 (multispend), opt-in via `FM_ENABLE_MODULE_SPV2` |
+| 7 | `multi_sig_stability_pool` | Fedi's stability pool v2 (multispend), if attached |
+
+The `console` samples in this README are from the deployed federation, which
+does not attach `multi_sig_stability_pool` — they stop at id 6. A federation
+that does attach it gets id 7, same rule as every other row.
 
 **They are not portable.** A federation generated with the flags in another
 order has different ids, and nothing in an invite code or a client database

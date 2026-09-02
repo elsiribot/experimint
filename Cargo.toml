@@ -119,11 +119,19 @@ fedimint-usdt-server = { path = "modules/usdt/fedimint-usdt-server", version = "
 
 # --- fedi (pinned to the experimint branch of elsiribot/fedi) ----------------
 #
-# rev db07c5e35caba3d40e8f321be95ca0a46468bea9 == elsiribot/fedi `experimint`: fedi master (cb458841e, spv2
-# as deployed) with the fedimint deps switched to the platform branch above
-# and stability-pool-{common,server,client} ported to its module API. The
+# rev db07c5e35caba3d40e8f321be95ca0a46468bea9 == elsiribot/fedi
+# `experimint`: fedi master (cb458841e, spv2 as deployed) with the fedimint
+# deps switched to the platform branch above and
+# stability-pool-{common,server,client} ported to its module API. The
 # fedimint URL+rev on that branch are byte-identical to this workspace's —
 # that is what keeps cargo resolving one fedimint-core, not two.
+#
+# To bump: the fedimint URL+rev on `elsiribot/fedi`'s `experimint` branch
+# MUST stay byte-identical to the fedimint block above, or cargo resolves two
+# copies of fedimint-core and every trait impl stops lining up across
+# spv2/amm/usdt. Move this rev, then re-run
+# `cargo check --workspace --all-targets` and refresh `flake.nix`'s
+# `fedi.cargoHash` (`nix build` will print the correct hash on mismatch).
 stability-pool-client = { git = "https://github.com/elsiribot/fedi", rev = "db07c5e35caba3d40e8f321be95ca0a46468bea9" }
 stability-pool-common = { git = "https://github.com/elsiribot/fedi", rev = "db07c5e35caba3d40e8f321be95ca0a46468bea9" }
 stability-pool-server = { git = "https://github.com/elsiribot/fedi", rev = "db07c5e35caba3d40e8f321be95ca0a46468bea9" }

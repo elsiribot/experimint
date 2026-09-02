@@ -30,8 +30,8 @@
 //! Every unit reported here is read back from a module's own declaration, never
 //! from a kind -> unit table kept in this file; see [`UnitSource`] for the three
 //! declarations that exist and [`declared_units`] for the order they are tried
-//! in. Two of the kinds this binary registers declare nothing on the pinned rev,
-//! which the output states rather than papers over.
+//! in. Three of the kinds this binary registers declare nothing on the pinned
+//! rev, which the output states rather than papers over.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -189,8 +189,11 @@ enum UnitSource {
 
     /// Nothing on the pinned platform rev declares this instance's units.
     /// `walletv2` and `lnv2` transact in bitcoin by construction, but neither
-    /// says so through any client-side API, and inventing the answer here is
-    /// exactly the table this command refuses to keep.
+    /// says so through any client-side API; `multi_sig_stability_pool` is a
+    /// third case of the same thing — its accounts are denominated in bitcoin
+    /// (`Amounts::new_bitcoin`) but its client module neither overrides
+    /// `supports_being_primary` nor exposes a unit constant. Inventing the
+    /// answer here is exactly the table this command refuses to keep.
     Undeclared,
 }
 

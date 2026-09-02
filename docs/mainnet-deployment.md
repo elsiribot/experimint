@@ -186,6 +186,14 @@ federation where a future guardian decides to add the instance.
 | `FM_SPV2_TEST_PARAMS` | not set | switches the module to the mock oracle and a 15s cycle — devimint-style, never on mainnet |
 | `FM_SPV2_CYCLE_DURATION_SECS` | not set | overrides the production cycle length; the module's own default is 600s |
 
+`FM_SPV2_TEST_PARAMS` and `FM_SPV2_CYCLE_DURATION_SECS` are config-generation
+knobs, not runtime ones: `spv2_init()` reads them once, and the values it
+produces are frozen into the module's consensus config at DKG. Changing either
+on an already-running guardian is a no-op — the running module reads its own
+consensus config, never the env — and setting them inconsistently across
+guardians during config generation aborts DKG at the post-DKG consensus-hash
+exchange instead of producing a federation running mismatched parameters.
+
 **Attaching it adds an outbound dependency.** `spv2_init()` wires the module to
 `OracleConfig::Aggregate`, under which every guardian independently polls six
 public exchange APIs over HTTPS for the BTC/USD price — CEX.io, Yadio,
