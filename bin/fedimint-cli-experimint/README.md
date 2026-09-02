@@ -1,10 +1,12 @@
 # fedimint-cli-experimint
 
 `fedimint-cli` built with this repo's client module set: the v2 core modules
-(`mintv2`, `walletv2`, `lnv2`), `meta`, and the two local modules `amm` and
-`usdt`. Everything a stock `fedimint-cli` can do, it can do — same flags, same
-subcommands, same JSON output — plus the `module amm` / `module usdt` verbs a
-stock build cannot link, plus its own [`info`](#info).
+(`mintv2`, `walletv2`, `lnv2`), `meta`, the two local modules `amm` and
+`usdt`, and Fedi's stability pool v2 (`multi_sig_stability_pool`, "multispend").
+Everything a stock `fedimint-cli` can do, it can do — same flags, same
+subcommands, same JSON output — plus the `module amm` / `module usdt` /
+`module multi_sig_stability_pool` verbs a stock build cannot link, plus its own
+[`info`](#info).
 
 Written for someone who has never used it. `src/lib.rs`'s rustdoc is the same
 material for someone reading the code; this file is the invocations.
@@ -97,6 +99,7 @@ documented config-gen ordering produces:
 | 4 | `usdt` | USDt-on-EVM peg |
 | 5 | `amm` | constant-product market between units 0 and 1 |
 | 6 | `meta` | guardian-published metadata |
+| 7 | `multi_sig_stability_pool` | Fedi's stability pool v2 (multispend), opt-in via `FM_ENABLE_MODULE_SPV2` |
 
 **They are not portable.** A federation generated with the flags in another
 order has different ids, and nothing in an invite code or a client database

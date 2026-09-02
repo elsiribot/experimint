@@ -172,6 +172,29 @@ public, and the port the live btcpp guardian already holds.
 These only decide what the setup UI pre-selects. Every module in the binary is
 available either way, and the `--module` CLI path ignores them entirely.
 
+### Stability pool v2 (multispend) — attachable, not in this deployment's topology
+
+`multi_sig_stability_pool` (Fedi's stability pool v2) is not in the `--module`
+list in section 5.1, so this federation does not run it. It is documented here
+because it is opt-in the same way `mintv2`/`walletv2`/`usdt` are, and the knobs
+below matter the moment anyone does attach it — including on an already-running
+federation where a future guardian decides to add the instance.
+
+| variable | value | effect |
+| --- | --- | --- |
+| `FM_ENABLE_MODULE_SPV2` | not set | would pre-tick it in the setup UI; irrelevant to the `--module` CLI path used here |
+| `FM_SPV2_TEST_PARAMS` | not set | switches the module to the mock oracle and a 15s cycle — devimint-style, never on mainnet |
+| `FM_SPV2_CYCLE_DURATION_SECS` | not set | overrides the production cycle length; the module's own default is 600s |
+
+**Attaching it adds an outbound dependency.** `spv2_init()` wires the module to
+`OracleConfig::Aggregate`, under which every guardian independently polls six
+public exchange APIs over HTTPS for the BTC/USD price — CEX.io, Yadio,
+Bitstamp, Kraken, Coinbase and Gemini. None of those hosts are reached by any
+other module in this deployment, so a guardian behind an egress filter needs
+to allow them explicitly before enabling `multi_sig_stability_pool`. The
+module does not fail hard if a feed is unreachable — it warns and retries —
+but price fetch degrades as fewer of the six respond.
+
 ### USDT — per guardian, runtime
 
 | variable | value |

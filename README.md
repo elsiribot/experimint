@@ -3,21 +3,22 @@
 Fedimint module experiments, developed outside the Fedimint tree and built
 against a pinned platform branch.
 
-Two module families live here:
+Three module families live here:
 
 | Family | Crates | What it is |
 | --- | --- | --- |
 | `modules/amm` | `fedimint-amm-{common,server,client,tests}` | A constant-product AMM (Uniswap V2 as reference implementation) trading between the federation's `AmountUnit`s. See [`modules/amm/fedimint-amm-spec.md`](modules/amm/fedimint-amm-spec.md). |
 | `modules/usdt` | `fedimint-usdt-{common,server,client,tests}` | USDT-on-EVM peg-in/peg-out via threshold ECDSA and ERC-4337. Lifted from the fork at consensus version 0.12. |
-| `bin/fedimintd-experimint` | — | A `fedimintd` carrying the v2 core modules, `meta`, and both local modules. |
-| `bin/fedimint-cli-experimint` | — | The matching `fedimint-cli`, the only client that can drive `amm` and `usdt`. See [its README](bin/fedimint-cli-experimint/README.md). |
+| `multi_sig_stability_pool` | `stability-pool-{common,server,client}` | Fedi's stability pool v2 ("multispend"): multisig accounts with threshold transfers, and seeker/provider BTC↔fiat stabilization. Sourced from [`elsiribot/fedi`](https://github.com/elsiribot/fedi), branch `experimint`, not this repo's own `modules/`. |
+| `bin/fedimintd-experimint` | — | A `fedimintd` carrying the v2 core modules, `meta`, both local modules, and `multi_sig_stability_pool`. |
+| `bin/fedimint-cli-experimint` | — | The matching `fedimint-cli`, the only client that can drive `amm`, `usdt` and `multi_sig_stability_pool`. See [its README](bin/fedimint-cli-experimint/README.md). |
 
 ## Running a federation
 
 `bin/fedimintd-experimint` is a thin wrapper around the platform branch's
 `fedimintd::run`, supplying this module set: `mintv2`, `walletv2`, `lnv2`,
-`meta`, `amm`, `usdt`. Every flag, env var, setup UI and API endpoint is
-inherited from upstream.
+`meta`, `amm`, `usdt`, `multi_sig_stability_pool`. Every flag, env var, setup
+UI and API endpoint is inherited from upstream.
 
 ```bash
 cargo run -p fedimintd-experimint -- --help
@@ -44,6 +45,7 @@ afterwards.
 | `amm` | constant-product market between units 0 and 1 |
 | `lnv2` | Lightning |
 | `meta` | guardian-published metadata |
+| `multi_sig_stability_pool` | multisig accounts + threshold transfers (Fedi multispend); seeker/provider BTC↔fiat stabilization |
 
 Note the **two `mintv2` instances**, one per asset. Both setup paths express it.
 
@@ -59,7 +61,8 @@ fedimint-cli admin setup set-local-params \
     --module lnv2 \
     --module 'usdt={"chain_id":1}' \
     --module amm \
-    --module meta
+    --module meta \
+    --module multi_sig_stability_pool
 ```
 
 The platform branch has a test (`parses_full_deployment_topology`) asserting
@@ -102,8 +105,10 @@ no on-chain wallet enabled.
 The setup UI pre-selects only modules whose `is_enabled_by_default()` is true —
 here just `lnv2`, `meta` and `amm`. The three carrying the interesting topology
 are opt-in via `FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
-`FM_ENABLE_MODULE_USDT`. They are still *available* without those variables; the
-variables only decide what starts pre-selected.
+`FM_ENABLE_MODULE_USDT`. `multi_sig_stability_pool` is opt-in the same way, via
+`FM_ENABLE_MODULE_SPV2`, independent of the asset topology above. They are
+still *available* without those variables; the variables only decide what
+starts pre-selected.
 
 ## Talking to a federation
 
