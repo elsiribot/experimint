@@ -175,7 +175,7 @@ available either way, and the `--module` CLI path ignores them entirely.
 ### Stability pool v2 (multispend) — attachable, not in this deployment's topology
 
 `multi_sig_stability_pool` (Fedi's stability pool v2) is not in the `--module`
-list in section 5.1, so this federation does not run it. It is documented here
+list in section 5.2, so this federation does not run it. It is documented here
 because it is opt-in the same way `mintv2`/`walletv2`/`usdt` are, and the knobs
 below matter the moment anyone does attach it — including on an already-running
 federation where a future guardian decides to add the instance.
