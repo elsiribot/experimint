@@ -149,12 +149,16 @@ futures = "0.3.32"
 hex = "0.4.3"
 hex_lit = "0.1.1"
 rand = "0.8.5"
+# No "stream": reqwest 0.12's stream feature pulls wasm-streams 0.4, and any
+# consumer that also has a reqwest 0.13 in its graph (alloy, matrix-sdk, iroh 1)
+# gets wasm-streams 0.5 too. Both generate the same wasm-bindgen shims, so a
+# wasm32 link fails with duplicate symbol: intounderlyingsink_*. Nothing here
+# streams a response body -- every transport in this workspace is JSON-RPC.
 reqwest = { version = "0.12.28", features = [
     "json",
     "rustls-tls",
     "charset",
     "http2",
-    "stream",
 ], default-features = false }
 secp256k1 = { version = "0.29.0", default-features = false }
 serde = { version = "1.0.219", features = ["derive"] }
