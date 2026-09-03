@@ -3239,8 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "fedimint-threshold-ecdsa"
-version = "0.11.1"
-source = "git+https://github.com/elsiribot/fedimint?tag=v0.11.1-fedi15-usdt.2#3cb3168a6a7d7ae375a3930c573842f3649b0863"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3249,12 +3248,14 @@ dependencies = [
  "fedimint-aead",
  "fedimint-hkdf",
  "hd-wallet",
+ "hex",
  "rand 0.8.5",
  "ring",
  "round-based",
  "secp256k1 0.29.1",
  "serde",
  "serde-big-array",
+ "serde_json",
  "sha2 0.10.9",
  "sha3",
  "tokio",
