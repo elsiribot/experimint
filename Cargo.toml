@@ -31,9 +31,9 @@ version = "0.1.0"
 # applies across module families too: `amm` and `usdt` must see one and the
 # same `fedimint-core`, or they can never be registered into one federation.
 #
-# rev 51d011a47769c91aabe2ed6f1f62e91e53c50283 == elsiribot/fedimint
-# `experimint-v0.11` ("feat(setup): let the UI build a module instance list,
-# with asset-aware mints"), workspace version 0.12.0-alpha.
+# rev af716441eea22ebd15251e4eaea392dc1f3d70c4 == elsiribot/fedimint
+# `experimint-v0.11` ("chore: drop fedimint-threshold-ecdsa; it lives in
+# experimint now"), workspace version 0.12.0-alpha.
 #
 # Why the fork and not upstream master: the branch carries the `--module`
 # config-gen CLI and the typed per-module `ServerModuleInit::Params` hook.
@@ -44,49 +44,49 @@ version = "0.1.0"
 #
 # To bump: move this rev, then re-run `cargo check --workspace --all-targets`.
 # `branch = "experimint-v0.11"` would also resolve but is not reproducible.
-devimint = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-aead = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-build = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+devimint = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-aead = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-api-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-bip39 = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-build = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
 # The one entry here that is not a bare `{ git, rev }`. `default-features` has
 # to be pinned at the workspace level for a member to be allowed to narrow it
 # at all: cargo rejects `default-features = false` on an inherited dependency
 # whose workspace entry left it at the default. `bin/fedimint-cli-experimint`
 # re-enables `tor` and explains why it leaves `jemalloc` off.
-fedimint-cli = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283", default-features = false }
-fedimint-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-core = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-lnv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-lnv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-logging = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-meta-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-meta-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-rocksdb = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-server ={ git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-walletv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-walletv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
-fedimintd = { git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+fedimint-cli = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4", default-features = false }
+fedimint-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-client-module = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-core = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-lnv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-lnv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-lnv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-logging = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-meta-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-meta-common = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-meta-server = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-mint-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-mint-common = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-mint-server = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-mintv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-mintv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-mintv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-rocksdb = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-server ={ git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-server-core = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-testing = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-walletv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-walletv2-common = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimint-walletv2-server = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
+fedimintd = { git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
 # `hkdf` is what `crypto/threshold-ecdsa` calls the crate; the package is
 # fedimint's own `fedimint-hkdf`, so it lives in this pinned block.
-hkdf = { package = "fedimint-hkdf", git = "https://github.com/elsiribot/fedimint", rev = "51d011a47769c91aabe2ed6f1f62e91e53c50283" }
+hkdf = { package = "fedimint-hkdf", git = "https://github.com/elsiribot/fedimint", rev = "af716441eea22ebd15251e4eaea392dc1f3d70c4" }
 
 # NOTE: fedimint's own `Cargo.lock` is NOT inherited when you depend on it as a
 # git dependency — cargo re-resolves the whole tree from scratch. That can land

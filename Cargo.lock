@@ -3489,7 +3489,7 @@ dependencies = [
 [[package]]
 name = "devimint"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4112,7 +4112,7 @@ dependencies = [
 [[package]]
 name = "fedimint-aead"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4235,7 +4235,7 @@ dependencies = [
 [[package]]
 name = "fedimint-api-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4261,7 +4261,7 @@ dependencies = [
 [[package]]
 name = "fedimint-bip39"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "bip39",
  "fedimint-client",
@@ -4273,7 +4273,7 @@ dependencies = [
 [[package]]
 name = "fedimint-bitcoind"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4289,7 +4289,7 @@ dependencies = [
 [[package]]
 name = "fedimint-build"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "serde_json",
 ]
@@ -4297,7 +4297,7 @@ dependencies = [
 [[package]]
 name = "fedimint-cli"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4370,7 +4370,7 @@ dependencies = [
 [[package]]
 name = "fedimint-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4402,7 +4402,7 @@ dependencies = [
 [[package]]
 name = "fedimint-client-module"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -4434,7 +4434,7 @@ dependencies = [
 [[package]]
 name = "fedimint-connectors"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -4470,7 +4470,7 @@ dependencies = [
 [[package]]
 name = "fedimint-core"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4534,7 +4534,7 @@ dependencies = [
 [[package]]
 name = "fedimint-cursed-redb"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4553,7 +4553,7 @@ dependencies = [
 [[package]]
 name = "fedimint-db-locked"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4566,7 +4566,7 @@ dependencies = [
 [[package]]
 name = "fedimint-derive"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "itertools 0.14.0",
  "proc-macro2",
@@ -4577,7 +4577,7 @@ dependencies = [
 [[package]]
 name = "fedimint-derive-secret"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin_hashes",
@@ -4590,7 +4590,7 @@ dependencies = [
 [[package]]
 name = "fedimint-dummy-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4613,7 +4613,7 @@ dependencies = [
 [[package]]
 name = "fedimint-dummy-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "fedimint-core",
@@ -4624,7 +4624,7 @@ dependencies = [
 [[package]]
 name = "fedimint-dummy-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4641,7 +4641,7 @@ dependencies = [
 [[package]]
 name = "fedimint-eventlog"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4659,7 +4659,7 @@ dependencies = [
 [[package]]
 name = "fedimint-gateway-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -4677,7 +4677,7 @@ dependencies = [
 [[package]]
 name = "fedimint-gateway-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -4748,7 +4748,7 @@ dependencies = [
 [[package]]
 name = "fedimint-gateway-server-db"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -4775,7 +4775,7 @@ dependencies = [
 [[package]]
 name = "fedimint-gateway-ui"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -4808,7 +4808,7 @@ dependencies = [
 [[package]]
 name = "fedimint-gw-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -4840,7 +4840,7 @@ dependencies = [
 [[package]]
 name = "fedimint-gwv2-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -4868,7 +4868,7 @@ dependencies = [
 [[package]]
 name = "fedimint-hkdf"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "bitcoin_hashes",
 ]
@@ -4917,7 +4917,7 @@ dependencies = [
 [[package]]
 name = "fedimint-lightning"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4945,7 +4945,7 @@ dependencies = [
 [[package]]
 name = "fedimint-ln-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -4980,7 +4980,7 @@ dependencies = [
 [[package]]
 name = "fedimint-ln-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5004,7 +5004,7 @@ dependencies = [
 [[package]]
 name = "fedimint-ln-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5028,7 +5028,7 @@ dependencies = [
 [[package]]
 name = "fedimint-lnurl"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "bech32",
  "lightning-invoice",
@@ -5040,7 +5040,7 @@ dependencies = [
 [[package]]
 name = "fedimint-lnv2-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -5073,7 +5073,7 @@ dependencies = [
 [[package]]
 name = "fedimint-lnv2-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5094,7 +5094,7 @@ dependencies = [
 [[package]]
 name = "fedimint-lnv2-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5119,7 +5119,7 @@ dependencies = [
 [[package]]
 name = "fedimint-logging"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "console-subscriber",
@@ -5133,7 +5133,7 @@ dependencies = [
 [[package]]
 name = "fedimint-meta-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5156,7 +5156,7 @@ dependencies = [
 [[package]]
 name = "fedimint-meta-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "fedimint-core",
@@ -5171,7 +5171,7 @@ dependencies = [
 [[package]]
 name = "fedimint-meta-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5191,7 +5191,7 @@ dependencies = [
 [[package]]
 name = "fedimint-metrics"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -5204,7 +5204,7 @@ dependencies = [
 [[package]]
 name = "fedimint-mint-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -5245,7 +5245,7 @@ dependencies = [
 [[package]]
 name = "fedimint-mint-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin_hashes",
@@ -5259,7 +5259,7 @@ dependencies = [
 [[package]]
 name = "fedimint-mint-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5283,7 +5283,7 @@ dependencies = [
 [[package]]
 name = "fedimint-mintv2-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -5322,7 +5322,7 @@ dependencies = [
 [[package]]
 name = "fedimint-mintv2-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin_hashes",
@@ -5336,7 +5336,7 @@ dependencies = [
 [[package]]
 name = "fedimint-mintv2-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5361,7 +5361,7 @@ dependencies = [
 [[package]]
 name = "fedimint-portalloc"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5376,7 +5376,7 @@ dependencies = [
 [[package]]
 name = "fedimint-rocksdb"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5393,7 +5393,7 @@ dependencies = [
 [[package]]
 name = "fedimint-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5449,7 +5449,7 @@ dependencies = [
 [[package]]
 name = "fedimint-server-bitcoin-rpc"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5466,7 +5466,7 @@ dependencies = [
 [[package]]
 name = "fedimint-server-core"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5485,7 +5485,7 @@ dependencies = [
 [[package]]
 name = "fedimint-server-ui"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5513,7 +5513,7 @@ dependencies = [
 [[package]]
 name = "fedimint-tbs"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "bls12_381",
  "fedimint-core",
@@ -5528,7 +5528,7 @@ dependencies = [
 [[package]]
 name = "fedimint-testing"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5569,7 +5569,7 @@ dependencies = [
 [[package]]
 name = "fedimint-testing-core"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -5655,7 +5655,7 @@ dependencies = [
 [[package]]
 name = "fedimint-tpe"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "bitcoin_hashes",
  "bls12_381",
@@ -5670,7 +5670,7 @@ dependencies = [
 [[package]]
 name = "fedimint-ui-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "axum 0.8.9",
  "axum-extra",
@@ -5683,7 +5683,7 @@ dependencies = [
 [[package]]
 name = "fedimint-unknown-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "fedimint-core",
@@ -5694,7 +5694,7 @@ dependencies = [
 [[package]]
 name = "fedimint-unknown-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5838,7 +5838,7 @@ dependencies = [
 [[package]]
 name = "fedimint-util-error"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
 ]
@@ -5846,7 +5846,7 @@ dependencies = [
 [[package]]
 name = "fedimint-wallet-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "aquamarine",
@@ -5877,7 +5877,7 @@ dependencies = [
 [[package]]
 name = "fedimint-wallet-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -5893,7 +5893,7 @@ dependencies = [
 [[package]]
 name = "fedimint-wallet-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5921,7 +5921,7 @@ dependencies = [
 [[package]]
 name = "fedimint-walletv2-client"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5950,7 +5950,7 @@ dependencies = [
 [[package]]
 name = "fedimint-walletv2-common"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -5964,7 +5964,7 @@ dependencies = [
 [[package]]
 name = "fedimint-walletv2-server"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5987,7 +5987,7 @@ dependencies = [
 [[package]]
 name = "fedimintd"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -6025,7 +6025,7 @@ dependencies = [
 [[package]]
 name = "fedimintd-envs"
 version = "0.12.0-alpha"
-source = "git+https://github.com/elsiribot/fedimint?rev=51d011a47769c91aabe2ed6f1f62e91e53c50283#51d011a47769c91aabe2ed6f1f62e91e53c50283"
+source = "git+https://github.com/elsiribot/fedimint?rev=af716441eea22ebd15251e4eaea392dc1f3d70c4#af716441eea22ebd15251e4eaea392dc1f3d70c4"
 
 [[package]]
 name = "fedimintd-experimint"
