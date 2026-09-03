@@ -11,6 +11,14 @@ version = { workspace = true }
 name = "usdt-e2e-test"
 path = "bin/usdt_e2e.rs"
 
+# Long-running local regtest demo federation with the full experimint module
+# set (incl. spv2 under test params), for testing clients against. Same
+# devimint + anvil harness as `usdt-e2e-test`, but parks after startup instead
+# of running a scripted flow. Not part of any CI lane.
+[[bin]]
+name = "demo-fed"
+path = "bin/demo_fed.rs"
+
 # Adversarial security tool: joins a LIVE federation via `--invite`, allocates a
 # deposit address, and runs the no-funds deposit-by-proof attacks against it.
 # Needs a live fed to run; not part of any CI lane. Reuses the shared attack

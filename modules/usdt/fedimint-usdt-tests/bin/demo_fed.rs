@@ -1,0 +1,344 @@
+//! Long-running local regtest demo federation carrying the full experimint
+//! module set, for testing clients against.
+//!
+//! Modeled on `usdt_e2e.rs` (same `devimint` + `anvil` harness, same
+//! Part A/Part B ERC-4337 bootstrap), but instead of running a scripted
+//! deposit->claim flow it stands the federation up, prints the invite code
+//! and the chain fixtures, and then parks until Ctrl-C, leaving four
+//! guardians serving their APIs for any client to join and poke at.
+//!
+//! # Topology
+//!
+//! All seven kinds the binary carries: `walletv2`, a **BTC-denominated**
+//! `mintv2` (unit 0 — so peg-ins and ordinary ecash work), `lnv2`, `meta`,
+//! `amm`, `usdt` (against a real local `anvil` with a freshly deployed test
+//! ERC-20 + ERC-4337 EntryPoint), and `multi_sig_stability_pool` under its
+//! **test params** (mock BTC/USD oracle, 15s cycles — no outbound HTTP, fast
+//! feedback for multispend-style clients).
+//!
+//! Two deliberate deviations from the deployed topology, both forced by
+//! `devimint`'s config-gen driving one instance per kind (see the
+//! `instance-list` follow-up noted in `usdt_e2e.rs`):
+//!
+//! - **No second, USDT-denominated `mintv2`.** The `usdt` module boots,
+//!   reaches `Ready` and serves deposit addresses, but a claim cannot mint
+//!   USDT ecash without a unit-1 mint, so the deposit->claim leg stops at
+//!   observation. Clients can still exercise every query endpoint.
+//! - **No Lightning gateway.** `lnv2` boots and appears in the config, but
+//!   nothing routes.
+//!
+//! # Running
+//!
+//! Needs `bitcoind`/`bitcoin-cli` and `anvil` on PATH, plus the two
+//! experimint binaries via env (devimint would otherwise look for stock
+//! `fedimintd`/`fedimint-cli` names):
+//!
+//! ```text
+//! cargo build -p fedimintd-experimint -p fedimint-cli-experimint \
+//!     -p fedimint-usdt-tests
+//! FM_FEDIMINTD_BASE_EXECUTABLE=target/debug/fedimintd-experimint \
+//! FM_FEDIMINT_CLI_BASE_EXECUTABLE=target/debug/fedimint-cli-experimint \
+//!     cargo run -p fedimint-usdt-tests --bin demo-fed
+//! ```
+
+use std::ffi;
+
+use alloy::network::TransactionBuilder;
+use alloy::primitives::{Address, U256};
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::types::TransactionRequest;
+use alloy::signers::local::PrivateKeySigner;
+use alloy::sol;
+use anyhow::Context;
+use clap::Parser;
+use devimint::cli::{self, cleanup_on_exit};
+use devimint::envs::FM_DEVIMINT_CONFIG_GEN_TIMEOUT_SECS_ENV;
+use devimint::external::{Anvil, Bitcoind};
+use devimint::federation::Federation;
+use fedimint_core::envs::{
+    FM_ENABLE_MODULE_MINTV2_ENV, FM_ENABLE_MODULE_USDT_ENV, FM_ENABLE_MODULE_WALLETV2_ENV,
+    FM_USDT_BROADCASTER_PRIVATE_KEY_ENV, FM_USDT_CONTRACT_ENV, FM_USDT_ENTRY_POINT_ENV,
+    FM_USDT_ETH_USD_PRICE_FEED_ENV,
+};
+use fedimint_usdt_common::{EvmAddress, UsdtAmount};
+use tracing::info;
+
+/// The spv2 env var names, spelled as string literals because their
+/// constants live in `stability_pool_server::envs` (a git dep of the
+/// *binaries*, not of this test crate) and two strings do not justify
+/// pulling the whole server module into the test crate's dependency graph.
+/// If these ever drift, the demo simply boots without spv2 and the module
+/// list printed at startup gives it away.
+const FM_ENABLE_MODULE_SPV2: &str = "FM_ENABLE_MODULE_SPV2";
+const FM_SPV2_TEST_PARAMS: &str = "FM_SPV2_TEST_PARAMS";
+
+#[derive(Parser)]
+#[command(name = "demo-fed")]
+#[command(
+    about = "Long-running local regtest federation with the full experimint module set (incl. spv2)",
+    long_about = None
+)]
+struct Cli {}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let _cli = Cli::parse();
+
+    let args = cli::CommonArgs::parse_from::<_, ffi::OsString>(vec![]);
+    let (process_mgr, task_group) = cli::setup(args).await?;
+
+    let main = async {
+
+        info!("Starting bitcoind + anvil...");
+        let bitcoind = Bitcoind::new(&process_mgr, false).await?;
+        let anvil = Anvil::new(&process_mgr).await?;
+
+        info!("Deploying the test ERC-20 and minting a supply to account 1...");
+        let holder = account_1_address()?;
+        let token = deploy_test_erc20(&anvil, holder, UsdtAmount(10_000_000_000)).await?;
+
+        // Part A: deploy ONLY the EntryPoint (canonical; the module
+        // self-deploys its factory + impl from it at startup). See
+        // `usdt_e2e.rs` for the full reasoning.
+        info!("Deploying the ERC-4337 EntryPoint...");
+        let entry_point = deploy_entry_point(&anvil).await?;
+
+        // SAFETY: single-threaded at this point, and set before any
+        // `fedimintd` subprocess is spawned below -- env vars are captured at
+        // process-spawn time, so every guardian inherits these.
+        unsafe {
+            // The usdt module's threshold-ECDSA DKG exceeds devimint's
+            // default 60s config-gen timeout.
+            std::env::set_var(FM_DEVIMINT_CONFIG_GEN_TIMEOUT_SECS_ENV, "300");
+
+            // The full default-off half of the module set. `lnv2`, `meta` and
+            // `amm` are enabled by default and need no vars. `mintv2` is
+            // deliberately left BTC-denominated (no FM_MINTV2_AMOUNT_UNIT),
+            // so peg-ins and plain ecash work.
+            std::env::set_var(FM_ENABLE_MODULE_MINTV2_ENV, "1");
+            std::env::set_var(FM_ENABLE_MODULE_WALLETV2_ENV, "1");
+            std::env::set_var(FM_ENABLE_MODULE_USDT_ENV, "1");
+
+            // spv2 under test params: mock oracle (no outbound HTTP from the
+            // guardians) and 15s cycles, so multispend-style clients get fast
+            // feedback.
+            std::env::set_var(FM_ENABLE_MODULE_SPV2, "1");
+            std::env::set_var(FM_SPV2_TEST_PARAMS, "1");
+
+            // The usdt module's chain fixtures, mirroring `usdt_e2e.rs`:
+            // freshly deployed token + EntryPoint, anvil account 0 as the
+            // gas-fronting broadcaster, all-zero price feed to select the
+            // static ETH/USD fallback (no Chainlink on anvil).
+            std::env::set_var(FM_USDT_CONTRACT_ENV, token.to_string());
+            std::env::set_var(FM_USDT_ENTRY_POINT_ENV, entry_point.to_string());
+            std::env::set_var(
+                FM_USDT_BROADCASTER_PRIVATE_KEY_ENV,
+                ANVIL_ACCOUNT_0_PRIVATE_KEY,
+            );
+            std::env::set_var(
+                FM_USDT_ETH_USD_PRICE_FEED_ENV,
+                EvmAddress([0u8; 20]).to_string(),
+            );
+        }
+
+        // devimint's DKG phase deliberately unsets
+        // FM_FEDIMINT_CLI_BASE_EXECUTABLE (`use_matching_fedimint_cli_for_dkg`
+        // sees fedimintd's version equal its own package version and assumes
+        // fedimint's dev shell, where a matching `fedimint-cli` is on PATH).
+        // On this machine PATH resolution would then find an unrelated
+        // system-wide stock `fedimint-cli`, whose pre-0.11 setup calls the
+        // fork's config-gen API rejects ("The leader must set the federation
+        // size"). Pin PATH resolution to the experimint CLI by symlinking it
+        // as `fedimint-cli` into a private dir prepended to PATH.
+        let cli_exe = std::env::var("FM_FEDIMINT_CLI_BASE_EXECUTABLE").context(
+            "FM_FEDIMINT_CLI_BASE_EXECUTABLE must point at fedimint-cli-experimint (see module docs)",
+        )?;
+        let cli_exe = std::fs::canonicalize(&cli_exe)
+            .with_context(|| format!("cannot resolve FM_FEDIMINT_CLI_BASE_EXECUTABLE: {cli_exe}"))?;
+        let shim_dir = process_mgr.globals.FM_TEST_DIR.join("bin");
+        std::fs::create_dir_all(&shim_dir).context("creating PATH shim dir")?;
+        let shim = shim_dir.join("fedimint-cli");
+        let _ = std::fs::remove_file(&shim);
+        std::os::unix::fs::symlink(&cli_exe, &shim).context("symlinking fedimint-cli shim")?;
+        // SAFETY: same single-threaded window as the set_var block above.
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    shim_dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+        }
+
+        info!("Starting the federation (real cggmp21 DKG, allow a few minutes)...");
+        let fed = Federation::new(
+            &process_mgr,
+            bitcoind.clone(),
+            false,
+            false,
+            false,
+            0,
+            "default".to_string(),
+        )
+        .await?;
+
+        let invite_code = fed.invite_code()?;
+
+        // Deliberately eprintln!, not tracing: this block is the whole point
+        // of the binary and must not depend on log levels or formatting.
+        eprintln!("\n========================================================");
+        eprintln!("demo federation is up (4 guardians, regtest)");
+        eprintln!("========================================================");
+        eprintln!("invite code:\n{invite_code}\n");
+        eprintln!("join it:");
+        eprintln!("  fedimint-cli-experimint --data-dir <dir> join-federation --invite-code {invite_code}");
+        eprintln!("  fedimint-cli-experimint --data-dir <dir> info\n");
+        eprintln!("anvil RPC:        {}", anvil.rpc_url());
+        eprintln!("test USDT token:  {token}");
+        eprintln!("4337 EntryPoint:  {entry_point}");
+        eprintln!("USDT holder key (anvil account 1, 10_000 USDT): {ANVIL_ACCOUNT_1_PRIVATE_KEY}");
+        eprintln!("spv2: mock oracle, 15s cycles (test params)");
+        eprintln!("\nCtrl-C shuts everything down.");
+        eprintln!("========================================================\n");
+
+        // Park forever; `cleanup_on_exit` turns Ctrl-C into an orderly
+        // task-group shutdown that reaps every spawned daemon.
+        std::future::pending::<()>().await;
+        #[allow(unreachable_code)] // pins the async block's Ok type
+        anyhow::Ok(())
+    };
+
+    cleanup_on_exit(main, task_group).await?;
+    Ok(())
+}
+
+/// Private key of `anvil`'s first deterministic default account (derived
+/// from its well-known dev mnemonic); deploys the fixtures and fronts
+/// broadcaster gas.
+const ANVIL_ACCOUNT_0_PRIVATE_KEY: &str =
+    "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+/// Private key of `anvil`'s second deterministic default account, seeded
+/// with the test ERC-20 supply so a human can send deposits from it.
+const ANVIL_ACCOUNT_1_PRIVATE_KEY: &str =
+    "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+
+sol! {
+    #[sol(rpc)]
+    interface ITestUsdt {
+        function mint(address to, uint256 amount) external;
+    }
+}
+
+fn account_1_address() -> anyhow::Result<EvmAddress> {
+    let signer: PrivateKeySigner = ANVIL_ACCOUNT_1_PRIVATE_KEY
+        .parse()
+        .context("malformed ANVIL_ACCOUNT_1_PRIVATE_KEY")?;
+    Ok(EvmAddress(signer.address().into_array()))
+}
+
+fn wallet_provider(anvil: &Anvil, private_key: &str) -> anyhow::Result<impl Provider + Clone> {
+    let signer: PrivateKeySigner = private_key
+        .parse()
+        .context("malformed anvil dev-account private key")?;
+    let url = anvil
+        .rpc_url()
+        .parse()
+        .with_context(|| format!("invalid anvil url: {}", anvil.rpc_url()))?;
+
+    Ok(ProviderBuilder::new().wallet(signer).connect_http(url))
+}
+
+/// The vendored `TestUsdt` fixture's creation bytecode + ABI (compiled
+/// offline; this harness never invokes `solc`/`forge`). `bin/` targets
+/// cannot import the `tests/` `common` module, so this is duplicated from
+/// `usdt_e2e.rs`, which duplicates it from `tests/common/anvil.rs`.
+const TEST_USDT_FIXTURE_JSON: &str = include_str!("../tests/fixtures/test_usdt.json");
+
+fn test_usdt_creation_bytecode() -> anyhow::Result<Vec<u8>> {
+    let fixture: serde_json::Value = serde_json::from_str(TEST_USDT_FIXTURE_JSON)
+        .context("failed to parse tests/fixtures/test_usdt.json")?;
+    let bytecode_hex = fixture["bytecode"]
+        .as_str()
+        .context("fixture is missing a `bytecode` string field")?;
+    let bytecode_hex = bytecode_hex.strip_prefix("0x").unwrap_or(bytecode_hex);
+
+    hex::decode(bytecode_hex).context("fixture `bytecode` is not valid hex")
+}
+
+/// Deploys the vendored `TestUsdt` ERC-20 fixture to `anvil` (as account 0)
+/// and mints `amount` to `holder`. Returns the deployed contract's address.
+async fn deploy_test_erc20(
+    anvil: &Anvil,
+    holder: EvmAddress,
+    amount: UsdtAmount,
+) -> anyhow::Result<EvmAddress> {
+    let provider = wallet_provider(anvil, ANVIL_ACCOUNT_0_PRIVATE_KEY)?;
+
+    let bytecode = test_usdt_creation_bytecode()?;
+    let deploy_tx = TransactionRequest::default().with_deploy_code(bytecode);
+    let receipt = provider
+        .send_transaction(deploy_tx)
+        .await
+        .context("failed to send TestUsdt creation transaction")?
+        .get_receipt()
+        .await
+        .context("failed to confirm TestUsdt creation transaction")?;
+    let token_address = receipt
+        .contract_address
+        .context("TestUsdt creation receipt is missing a contract_address")?;
+
+    let contract = ITestUsdt::new(token_address, &provider);
+    contract
+        .mint(Address::from(holder.0), U256::from(amount.0))
+        .send()
+        .await
+        .context("failed to send mint() transaction")?
+        .get_receipt()
+        .await
+        .context("failed to confirm mint() transaction")?;
+
+    Ok(EvmAddress(token_address.into_array()))
+}
+
+/// The vendored ERC-4337 v0.7 `EntryPoint` creation artifact (compiled
+/// offline), duplicated from `usdt_e2e.rs` for the same `bin/`-vs-`tests/`
+/// reason as the ERC-20 fixture above.
+const ENTRY_POINT_ARTIFACT_JSON: &str = include_str!("../tests/fixtures/erc4337/EntryPoint.json");
+
+fn artifact_hex_field(artifact_json: &str, field: &str) -> anyhow::Result<Vec<u8>> {
+    let artifact: serde_json::Value = serde_json::from_str(artifact_json)
+        .with_context(|| format!("failed to parse erc4337 artifact JSON (`{field}` lookup)"))?;
+    let hex_str = artifact[field]
+        .as_str()
+        .with_context(|| format!("artifact is missing a `{field}` string field"))?;
+    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+
+    hex::decode(hex_str).with_context(|| format!("artifact `{field}` is not valid hex"))
+}
+
+/// Real-constructor-deploys ONLY the ERC-4337 v0.7 `EntryPoint` (no ctor
+/// args) as account 0, returning its address; the module self-deploys the
+/// factory + impl derived from it (Part A, see `usdt_e2e.rs`).
+async fn deploy_entry_point(anvil: &Anvil) -> anyhow::Result<EvmAddress> {
+    let provider = wallet_provider(anvil, ANVIL_ACCOUNT_0_PRIVATE_KEY)?;
+
+    let entry_point_creation_bytecode = artifact_hex_field(ENTRY_POINT_ARTIFACT_JSON, "bytecode")
+        .context("failed to extract EntryPoint bytecode")?;
+    let entry_point_receipt = provider
+        .send_transaction(
+            TransactionRequest::default().with_deploy_code(entry_point_creation_bytecode),
+        )
+        .await
+        .context("failed to send EntryPoint creation transaction")?
+        .get_receipt()
+        .await
+        .context("failed to confirm EntryPoint creation transaction")?;
+    let entry_point = entry_point_receipt
+        .contract_address
+        .context("EntryPoint creation receipt is missing a contract_address")?;
+
+    Ok(EvmAddress(entry_point.into_array()))
+}
