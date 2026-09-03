@@ -27,6 +27,16 @@
 //! - **No Lightning gateway.** `lnv2` boots and appears in the config, but
 //!   nothing routes.
 //!
+//! # Iroh
+//!
+//! The federation runs the iroh networking stack by default (set
+//! `FM_ENABLE_IROH=0` for a websocket fed). devimint pre-generates every
+//! guardian's iroh node keys and exports `FM_IROH_CONNECT_OVERRIDES_PLAIN`
+//! mapping each node id to `127.0.0.1:<port>`, so neither guardians nor
+//! clients need a relay or external DNS — but that mapping lives in env, so
+//! client processes must `source <test-dir>/env` (or export the override var
+//! printed at startup) before joining.
+//!
 //! # Running
 //!
 //! Needs `bitcoind`/`bitcoin-cli` and `anvil` on PATH, plus the two
@@ -71,6 +81,10 @@ use tracing::info;
 /// list printed at startup gives it away.
 const FM_ENABLE_MODULE_SPV2: &str = "FM_ENABLE_MODULE_SPV2";
 const FM_SPV2_TEST_PARAMS: &str = "FM_SPV2_TEST_PARAMS";
+
+/// `fedimintd`'s iroh switch (`fedimintd_envs::FM_ENABLE_IROH_ENV`), spelled
+/// as a literal for the same reason as the spv2 vars above.
+const FM_ENABLE_IROH: &str = "FM_ENABLE_IROH";
 
 #[derive(Parser)]
 #[command(name = "demo-fed")]
@@ -124,6 +138,17 @@ async fn main() -> anyhow::Result<()> {
             // feedback.
             std::env::set_var(FM_ENABLE_MODULE_SPV2, "1");
             std::env::set_var(FM_SPV2_TEST_PARAMS, "1");
+
+            // Iroh federation by default: config-gen mints iroh node keys
+            // instead of ws p2p/api endpoints (fedimint-server setup honors
+            // the per-peer FM_IROH_*_SECRET_KEY_OVERRIDE vars devimint always
+            // exports, and FM_IROH_CONNECT_OVERRIDES_PLAIN maps every node id
+            // to 127.0.0.1 so nothing needs a relay or external DNS). Respect
+            // an explicit FM_ENABLE_IROH=0/false from the caller to fall back
+            // to a websocket fed.
+            if std::env::var(FM_ENABLE_IROH).is_err() {
+                std::env::set_var(FM_ENABLE_IROH, "1");
+            }
 
             // The usdt module's chain fixtures, mirroring `usdt_e2e.rs`:
             // freshly deployed token + EntryPoint, anvil account 0 as the
@@ -195,6 +220,14 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("join it:");
         eprintln!("  fedimint-cli-experimint --data-dir <dir> join-federation --invite-code {invite_code}");
         eprintln!("  fedimint-cli-experimint --data-dir <dir> info\n");
+        if std::env::var(FM_ENABLE_IROH).is_ok_and(|v| v != "0" && v != "false") {
+            eprintln!("iroh fed: clients must resolve the guardians' node ids locally —");
+            eprintln!("either `source {}/env` before running the CLI, or:", process_mgr.globals.FM_TEST_DIR.display());
+            eprintln!(
+                "  export FM_IROH_CONNECT_OVERRIDES_PLAIN='{}'\n",
+                std::env::var("FM_IROH_CONNECT_OVERRIDES_PLAIN").unwrap_or_default()
+            );
+        }
         eprintln!("anvil RPC:        {}", anvil.rpc_url());
         eprintln!("test USDT token:  {token}");
         eprintln!("4337 EntryPoint:  {entry_point}");
