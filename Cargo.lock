@@ -12667,7 +12667,7 @@ dependencies = [
 [[package]]
 name = "stability-pool-client"
 version = "0.3.0"
-source = "git+https://github.com/elsiribot/fedi?rev=db07c5e35caba3d40e8f321be95ca0a46468bea9#db07c5e35caba3d40e8f321be95ca0a46468bea9"
+source = "git+https://github.com/elsiribot/fedi?rev=00704eca49073bd10744268b50a0a190d5ce7191#00704eca49073bd10744268b50a0a190d5ce7191"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -12692,7 +12692,7 @@ dependencies = [
 [[package]]
 name = "stability-pool-common"
 version = "0.3.0"
-source = "git+https://github.com/elsiribot/fedi?rev=db07c5e35caba3d40e8f321be95ca0a46468bea9#db07c5e35caba3d40e8f321be95ca0a46468bea9"
+source = "git+https://github.com/elsiribot/fedi?rev=00704eca49073bd10744268b50a0a190d5ce7191#00704eca49073bd10744268b50a0a190d5ce7191"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -12706,7 +12706,7 @@ dependencies = [
 [[package]]
 name = "stability-pool-server"
 version = "0.3.0"
-source = "git+https://github.com/elsiribot/fedi?rev=db07c5e35caba3d40e8f321be95ca0a46468bea9#db07c5e35caba3d40e8f321be95ca0a46468bea9"
+source = "git+https://github.com/elsiribot/fedi?rev=00704eca49073bd10744268b50a0a190d5ce7191#00704eca49073bd10744268b50a0a190d5ce7191"
 dependencies = [
  "anyhow",
  "async-trait",
