@@ -95,6 +95,7 @@ fedimint-server = { workspace = true }
 fedimint-testing = { workspace = true }
 fedimint-usdt-client = { workspace = true, features = ["test-util"] }
 fedimint-usdt-common = { workspace = true }
+fedimint-server-core = { workspace = true }
 fedimint-usdt-server = { workspace = true }
 fedimint-walletv2-client = { workspace = true }
 fedimint-walletv2-common = { workspace = true }

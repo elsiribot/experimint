@@ -9,23 +9,22 @@
 //!
 //! # Topology
 //!
-//! All seven kinds the binary carries: `walletv2`, a **BTC-denominated**
-//! `mintv2` (unit 0 — so peg-ins and ordinary ecash work), `lnv2`, `meta`,
-//! `amm`, `usdt` (against a real local `anvil` with a freshly deployed test
-//! ERC-20 + ERC-4337 EntryPoint), and `multi_sig_stability_pool` under its
-//! **test params** (mock BTC/USD oracle, 15s cycles — no outbound HTTP, fast
-//! feedback for multispend-style clients).
+//! The full intended experimint topology, **eight instances** across the
+//! seven kinds: `walletv2`, **two `mintv2` instances** (BTC unit 0 and USDT
+//! unit 1 — so both peg-in ecash and claimed USDT ecash work), `lnv2`,
+//! `usdt` (against a real local `anvil` with a freshly deployed test ERC-20
+//! + ERC-4337 EntryPoint), `amm`, `meta`, and `multi_sig_stability_pool`
+//! under its **test params** (mock BTC/USD oracle, 15s cycles — no outbound
+//! HTTP, fast feedback for multispend-style clients).
 //!
-//! Two deliberate deviations from the deployed topology, both forced by
-//! `devimint`'s config-gen driving one instance per kind (see the
-//! `instance-list` follow-up noted in `usdt_e2e.rs`):
+//! devimint's own config-gen helper cannot express a second instance of one
+//! kind, so this binary spawns the guardians with `pre_dkg` and drives
+//! config-gen itself: the same DKG sequence as `run_cli_dkg_v2`, but the
+//! leader's `set-local-params` carries the fork's repeatable `--module`
+//! instance list (see `run_dkg_with_module_list`).
 //!
-//! - **No second, USDT-denominated `mintv2`.** The `usdt` module boots,
-//!   reaches `Ready` and serves deposit addresses, but a claim cannot mint
-//!   USDT ecash without a unit-1 mint, so the deposit->claim leg stops at
-//!   observation. Clients can still exercise every query endpoint.
-//! - **No Lightning gateway.** `lnv2` boots and appears in the config, but
-//!   nothing routes.
+//! One deviation from a production deployment remains: **no Lightning
+//! gateway** — `lnv2` boots and appears in the config, but nothing routes.
 //!
 //! # Iroh
 //!
@@ -51,7 +50,10 @@
 //!     cargo run -p fedimint-usdt-tests --bin demo-fed
 //! ```
 
+use std::collections::BTreeMap;
 use std::ffi;
+use std::ops::ControlFlow;
+use std::time::Duration;
 
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, U256};
@@ -62,24 +64,25 @@ use alloy::sol;
 use anyhow::Context;
 use clap::Parser;
 use devimint::cli::{self, cleanup_on_exit};
+use devimint::cmd;
 use devimint::envs::FM_DEVIMINT_CONFIG_GEN_TIMEOUT_SECS_ENV;
 use devimint::external::{Anvil, Bitcoind};
 use devimint::federation::Federation;
+use devimint::util::{FedimintCli, poll, poll_with_timeout};
+use fedimint_core::PeerId;
 use fedimint_core::envs::{
-    FM_ENABLE_MODULE_MINTV2_ENV, FM_ENABLE_MODULE_USDT_ENV, FM_ENABLE_MODULE_WALLETV2_ENV,
     FM_USDT_BROADCASTER_PRIVATE_KEY_ENV, FM_USDT_CONTRACT_ENV, FM_USDT_ENTRY_POINT_ENV,
     FM_USDT_ETH_USD_PRICE_FEED_ENV,
 };
+use fedimint_core::module::ApiAuth;
+use fedimint_server_core::ServerModuleInit;
 use fedimint_usdt_common::{EvmAddress, UsdtAmount};
 use tracing::info;
 
-/// The spv2 env var names, spelled as string literals because their
-/// constants live in `stability_pool_server::envs` (a git dep of the
-/// *binaries*, not of this test crate) and two strings do not justify
+/// The spv2 test-params env var name, spelled as a string literal because its
+/// constant lives in `stability_pool_server::envs` (a git dep of the
+/// *binaries*, not of this test crate) and one string does not justify
 /// pulling the whole server module into the test crate's dependency graph.
-/// If these ever drift, the demo simply boots without spv2 and the module
-/// list printed at startup gives it away.
-const FM_ENABLE_MODULE_SPV2: &str = "FM_ENABLE_MODULE_SPV2";
 const FM_SPV2_TEST_PARAMS: &str = "FM_SPV2_TEST_PARAMS";
 
 /// `fedimintd`'s iroh switch (`fedimintd_envs::FM_ENABLE_IROH_ENV`), spelled
@@ -125,18 +128,14 @@ async fn main() -> anyhow::Result<()> {
             // default 60s config-gen timeout.
             std::env::set_var(FM_DEVIMINT_CONFIG_GEN_TIMEOUT_SECS_ENV, "300");
 
-            // The full default-off half of the module set. `lnv2`, `meta` and
-            // `amm` are enabled by default and need no vars. `mintv2` is
-            // deliberately left BTC-denominated (no FM_MINTV2_AMOUNT_UNIT),
-            // so peg-ins and plain ecash work.
-            std::env::set_var(FM_ENABLE_MODULE_MINTV2_ENV, "1");
-            std::env::set_var(FM_ENABLE_MODULE_WALLETV2_ENV, "1");
-            std::env::set_var(FM_ENABLE_MODULE_USDT_ENV, "1");
+            // The module instance list is passed explicitly to the config-gen
+            // leader below (`--module ...`), so no FM_ENABLE_MODULE_* vars are
+            // needed — those only shape the *default* list.
 
             // spv2 under test params: mock oracle (no outbound HTTP from the
             // guardians) and 15s cycles, so multispend-style clients get fast
-            // feedback.
-            std::env::set_var(FM_ENABLE_MODULE_SPV2, "1");
+            // feedback. Read by fedimintd-experimint when constructing
+            // `StabilityPoolInit`.
             std::env::set_var(FM_SPV2_TEST_PARAMS, "1");
 
             // Iroh federation by default: config-gen mints iroh node keys
@@ -197,17 +196,79 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
+        // The usdt config-gen params, derived exactly the way the env-driven
+        // default path would (env overrides applied, factory/impl derived
+        // from the EntryPoint). Serialized into the leader's `--module` spec
+        // below so the explicit instance list carries identical params.
+        let usdt_params =
+            ServerModuleInit::default_config_gen_params(&fedimint_usdt_server::UsdtInit::default());
+        let usdt_json = serde_json::to_string(&usdt_params)
+            .context("serializing usdt config-gen params")?;
+
+        // The intended experimint topology (README's `set-local-params`
+        // example plus spv2): notably TWO `mintv2` instances, one per unit.
+        // devimint's own config-gen path cannot express a second instance of
+        // a kind, which is why this binary drives DKG itself via the fork's
+        // repeatable `--module` flag.
+        let module_specs: Vec<String> = vec![
+            "walletv2".into(),
+            r#"mintv2={"amount_unit":0}"#.into(),
+            r#"mintv2={"amount_unit":1}"#.into(),
+            "lnv2".into(),
+            format!("usdt={usdt_json}"),
+            "amm".into(),
+            "meta".into(),
+            "multi_sig_stability_pool".into(),
+        ];
+
         info!("Starting the federation (real cggmp21 DKG, allow a few minutes)...");
         let fed = Federation::new(
             &process_mgr,
             bitcoind.clone(),
             false,
-            false,
+            true, // pre_dkg: guardians spawn, we drive config-gen ourselves
             false,
             0,
             "default".to_string(),
         )
         .await?;
+
+        let endpoints: BTreeMap<PeerId, String> = fed
+            .vars
+            .iter()
+            .map(|(id, v)| {
+                (
+                    PeerId::from(u16::try_from(*id).expect("peer ids are small")),
+                    v.FM_API_URL.clone(),
+                )
+            })
+            .collect();
+
+        run_dkg_with_module_list(&endpoints, &module_specs).await?;
+
+        // Post-DKG bookkeeping `Federation::new` would have done on its
+        // non-pre_dkg path: wait for every guardian to write its invite code
+        // (the marker that config-gen finished), then copy peer 0's into the
+        // client dir, which is where `Federation::invite_code` reads it from.
+        let config_gen_timeout = Duration::from_secs(300);
+        for peer_vars in fed.vars.values() {
+            let path = peer_vars.FM_DATA_DIR.join("invite-code");
+            poll_with_timeout("awaiting-invite-code", config_gen_timeout, || async {
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .with_context(|| format!("awaiting invite code file: {}", path.display()))
+                    .map_err(ControlFlow::Continue)
+            })
+            .await?;
+        }
+        let client_dir = std::env::var(devimint::envs::FM_CLIENT_DIR_ENV)
+            .context("FM_CLIENT_DIR must be set by devimint setup")?;
+        tokio::fs::copy(
+            fed.vars[&0].FM_DATA_DIR.join("invite-code"),
+            format!("{client_dir}/invite-code"),
+        )
+        .await
+        .context("copying invite-code to the client dir")?;
 
         let invite_code = fed.invite_code()?;
 
@@ -232,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("test USDT token:  {token}");
         eprintln!("4337 EntryPoint:  {entry_point}");
         eprintln!("USDT holder key (anvil account 1, 10_000 USDT): {ANVIL_ACCOUNT_1_PRIVATE_KEY}");
+        eprintln!("topology: 8 instances — walletv2, mintv2(BTC), mintv2(USDT), lnv2, usdt, amm, meta, spv2");
         eprintln!("spv2: mock oracle, 15s cycles (test params)");
         eprintln!("\nCtrl-C shuts everything down.");
         eprintln!("========================================================\n");
@@ -244,6 +306,75 @@ async fn main() -> anyhow::Result<()> {
     };
 
     cleanup_on_exit(main, task_group).await?;
+    Ok(())
+}
+
+/// `run_cli_dkg_v2` with an explicit module instance list: same
+/// status-poll → set-local-params → add-peer → start-dkg sequence, but the
+/// leader's `set-local-params` carries the repeatable `--module` flags that
+/// devimint's own helper cannot express (needed for the second `mintv2`).
+async fn run_dkg_with_module_list(
+    endpoints: &BTreeMap<PeerId, String>,
+    module_specs: &[String],
+) -> anyhow::Result<()> {
+    let auth = ApiAuth::new("pass".to_string());
+
+    // Wait for every guardian's setup API to come up.
+    for endpoint in endpoints.values() {
+        poll("awaiting-setup-status", || async {
+            FedimintCli
+                .setup_status(&auth, endpoint)
+                .await
+                .map_err(ControlFlow::Continue)
+        })
+        .await?;
+    }
+
+    info!("Setting local parameters (leader carries the module instance list)...");
+    let mut setup_codes = BTreeMap::new();
+    for (peer, endpoint) in endpoints {
+        let code = if peer.to_usize() == 0 {
+            let mut command = cmd!(
+                FedimintCli,
+                "--password",
+                auth.as_str(),
+                "admin",
+                "setup",
+                endpoint,
+                "set-local-params",
+                format!("Devimint Guardian {peer}"),
+                "--federation-name",
+                "Experimint Demo",
+                "--federation-size",
+                endpoints.len().to_string()
+            );
+            for spec in module_specs {
+                command = command.arg(&"--module").arg(spec);
+            }
+            serde_json::from_value::<String>(command.out_json().await?)
+                .context("parsing leader setup code")?
+        } else {
+            FedimintCli
+                .set_local_params_follower(peer, &auth, endpoint)
+                .await?
+        };
+        setup_codes.insert(*peer, code);
+    }
+
+    info!("Exchanging peer setup codes...");
+    for (peer, code) in &setup_codes {
+        for (other, endpoint) in endpoints {
+            if other != peer {
+                FedimintCli.add_peer(code, &auth, endpoint).await?;
+            }
+        }
+    }
+
+    info!("Starting DKG...");
+    for endpoint in endpoints.values() {
+        FedimintCli.start_dkg(&auth, endpoint).await?;
+    }
+
     Ok(())
 }
 

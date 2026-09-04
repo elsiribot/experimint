@@ -5821,6 +5821,7 @@ dependencies = [
  "fedimint-mintv2-common",
  "fedimint-mintv2-server",
  "fedimint-server",
+ "fedimint-server-core",
  "fedimint-testing",
  "fedimint-usdt-client",
  "fedimint-usdt-common",
