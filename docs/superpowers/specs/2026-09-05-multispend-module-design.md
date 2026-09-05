@@ -196,10 +196,10 @@ be anything from 1 to `n`.
 AccountId -> AccountState { balance: Amounts, op_counter: u64 }
 ```
 
-That is the entire consensus state. **Accounts are never registered.** The
-account exists exactly when it has a record; the full `Account` is supplied
-inline whenever it is spent from, and checked against the id by hash. The
-module never needs to store a key set.
+That is the entire consensus state. **The key set is never stored.** A record
+is created by the first credit, and the account exists exactly while it has
+one; the full `Account` travels inline in every spend and is checked against
+the id by hash. So there is no registration step and nothing to keep in sync.
 
 `op_counter` increments on every input or output touching the account. It
 exists solely so the non-consensus bulletin board can notice "this account did
@@ -222,7 +222,10 @@ earns bulletin board allowance.
 
 ```rust
 pub enum MultispendInput {
-    Spend { account: Account },      // full account inline
+    Spend {
+        account: Account,   // full account inline, id checked by hash
+        amounts: Amounts,   // what to debit, per unit
+    },
 }
 
 // witness, decoded from ctx.witness()
@@ -230,6 +233,9 @@ pub struct SpendWitness {
     signatures: BTreeMap<u16, schnorr::Signature>,
 }
 ```
+
+`amounts` lives in the input, and so inside the txid, which is what makes a
+co-signer's signature a commitment to the amount being spent.
 
 `verify_input` (stateless, parallel, pre-database):
 
@@ -241,7 +247,7 @@ pub struct SpendWitness {
 `process_input` (has the dbtx):
 
 1. Look up `account.id()`; error if absent.
-2. Balance covers the requested `Amounts` per unit; debit.
+2. Balance covers `amounts` in every unit named; debit.
 3. Bump `op_counter`.
 4. Return `InputMeta { amount, auth: InputAuth::SelfVerified }`.
 
@@ -306,6 +312,10 @@ self-authenticating.
 Only the encrypted proposal body needs an allowance, because it is the only
 thing the guardian cannot check.
 
+`Rejection` is advisory. Because any t of n can sign, a rejection blocks
+nothing; it exists so a client can show "Bob declined" rather than leaving the
+group waiting on someone who never intends to sign.
+
 ### 4.3 Admission policy (per guardian, local)
 
 A proposal is accepted when:
@@ -315,9 +325,9 @@ A proposal is accepted when:
 - `ciphertext` is within the size cap,
 - the account has allowance remaining.
 
-Allowance is a local counter of `MAX` proposals, reset when **either** the
-guardian's own wall clock passes UTC midnight, **or** the account's
-`op_counter` has moved since the counter was last touched. The second condition
+The guardian keeps, per account, a local record of `{ used, day, seen_op }`.
+Allowance is reset when **either** its own wall clock has passed UTC midnight
+since `day`, **or** the account's current `op_counter` differs from `seen_op`. The second condition
 is how "a successful operation restores the allowance" is expressed with zero
 consensus writes: any deposit or withdrawal bumps `op_counter`, the guardian
 notices on the next post, and resets. A group that exhausts its allowance can
