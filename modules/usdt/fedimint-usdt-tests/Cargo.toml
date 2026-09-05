@@ -8,6 +8,22 @@ publish = false
 version = { workspace = true }
 
 [[bin]]
+name = "btc-send"
+path = "bin/btc_send.rs"
+
+[[bin]]
+name = "erc20-send"
+path = "bin/erc20_send.rs"
+
+[[bin]]
+name = "usdt-sweep"
+path = "bin/usdt_sweep.rs"
+
+[[bin]]
+name = "fed-recover"
+path = "bin/fed_recover.rs"
+
+[[bin]]
 name = "usdt-e2e-test"
 path = "bin/usdt_e2e.rs"
 
@@ -95,7 +111,14 @@ fedimint-server = { workspace = true }
 fedimint-testing = { workspace = true }
 fedimint-usdt-client = { workspace = true, features = ["test-util"] }
 fedimint-usdt-common = { workspace = true }
+fedimint-rocksdb = { workspace = true }
 fedimint-server-core = { workspace = true }
+cggmp21 = { workspace = true, features = ["spof"] }
+generic-ec = "0.4"
+fedimint-threshold-ecdsa = { workspace = true }
+miniscript = "12.3.4"
+rand = { workspace = true }
+secp256k1 = { workspace = true }
 fedimint-usdt-server = { workspace = true }
 fedimint-walletv2-client = { workspace = true }
 fedimint-walletv2-common = { workspace = true }
