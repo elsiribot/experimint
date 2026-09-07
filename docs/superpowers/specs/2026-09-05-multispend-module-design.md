@@ -402,3 +402,79 @@ Raised during design, deliberately not built:
   branch needing a fresh round of signatures.
 - Threshold signature schemes generally. The core patch is shaped so these need
   no further core change.
+
+---
+
+## 9. What the core patch actually delivered
+
+Section 2 was a design; it has since been built and reviewed. The branch is
+`experimint-v0.11-input-auth` in `elsiribot/fedimint`, 15 commits off
+`a50619eafc6` (the commit experimint pins), not yet pushed.
+
+It landed as designed, with these differences and consequences.
+
+### 9.1 Differences from section 2
+
+- **`ClientInputAuth::Key` wraps one `Keypair`, not a `Vec`.** The plan called
+  for a runtime assertion that a `Vec` held exactly one key. Review overruled
+  it: the invariant is a compile-time fact instead.
+- **`verify_input` failures now surface as `TransactionError::Input(err)`.**
+  The rayon pass previously collapsed every module rejection into
+  `InvalidWitnessLength`. It now collects results in index order and takes the
+  first `Err` deterministically, so a rejected multisig spend is diagnosable.
+  Costs early exit on invalid transactions; bounded by transaction size.
+- **The client only emits `Witnessed` when an input actually carries witness
+  bytes**, otherwise `NaiveMultisig`. Emitting `Witnessed` unconditionally made
+  a patched client wire-incompatible with every unpatched guardian.
+
+### 9.2 The safety obligation this module must discharge
+
+`verify_input` is stateless — no database. So a self-verifying module cannot
+look its keys up. The obligation is two-sided and **both halves are required**:
+
+1. `verify_input` verifies the witness signatures against the key material
+   carried **inside the input**, bound to `ctx.txid_message()`.
+2. `process_input` must then confirm that key material is the *authorized* one
+   — for us, that `account.id()` matches a funded account record.
+
+Doing only the first makes the input forgeable: an attacker supplies their own
+account struct, signs with their own keys, and passes verification. Section 3.4
+already has this shape (`Account` inline, `AccountId` is its hash, checked
+against the stored record); it is restated here because it is the single thing
+that must not be got wrong.
+
+### 9.3 The client cannot use the transaction builder
+
+**This invalidates the flow sketched in section 5.** `ClientInputAuth::Witness`
+takes fixed bytes, but the witness must sign the txid, and the txid is not
+knowable before `build()`: the nonce is generated inside it, and
+`finalize_transaction` calls it after the primary module may have added change
+inputs and outputs. Section 2.5 asked for an arm that *produces* bytes from the
+txid; a closure would not have helped either, because the real flow is
+*proposer builds the exact transaction → members sign that txid → a different
+party assembles and submits*, which needs a pre-built `Transaction`, not a
+rebuilt one.
+
+So the multispend client must assemble a `Transaction` itself and call
+`IGlobalFederationApi::submit_transaction` directly, bypassing
+`TransactionBuilder`. Consequences the module owns:
+
+- Choosing its own nonce, and computing the txid before collecting signatures.
+- No primary-module change handling. A spend must balance exactly, or pair the
+  `Spend` input with a `Credit` output back to the same account.
+- No client state machines from the builder; the module tracks its own
+  submissions.
+
+`ClientInputAuth::Witness` remains the right arm for an input the *builder*
+handles, but this module does not go through the builder.
+
+### 9.4 Deployment
+
+- **All guardians must be upgraded before any client is.** A `Witnessed`
+  transaction is undecodable to an unpatched guardian, which rejects it as
+  `UnsupportedSignatureScheme`.
+- **There is no negotiable signal.** The `CORE_CONSENSUS_VERSION` bump to 2.2
+  is inert: compatibility is decided on major only, and API discovery ignores
+  minor. A client cannot ask whether a federation accepts `Witnessed`; it finds
+  out from a rejection. If the module needs to know, it must compare
+  `config.global.consensus_version` against 2.2 itself.
