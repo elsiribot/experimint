@@ -1375,7 +1375,7 @@ pub(crate) async fn process_spend(
 }
 ```
 
-Check `Amounts`' subtraction API at this rev — it must fail rather than saturate when any unit is short, including a unit the balance does not contain at all. If no per-unit checked subtraction exists, write one and unit-test it; a saturating subtraction here mints money.
+`Amounts::checked_sub(&self, other: &Self) -> Option<Self>` exists at `fedimint-core/src/module/mod.rs:308` and is already correct for this. I read it: a unit the balance does not contain reads as `Amount::ZERO` via `or_default()`, and `prev.checked_sub(*amount)?` returns `None` rather than saturating, so an overdraft and a wrong-unit spend both fail. **Use it. Do not write your own** — a saturating subtraction here would mint money.
 
 Then the trait methods:
 
