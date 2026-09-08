@@ -5387,6 +5387,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "fedimint-multispend-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "erased-serde",
+ "fedimint-api-client",
+ "fedimint-client",
+ "fedimint-core",
+ "fedimint-dummy-client",
+ "fedimint-dummy-common",
+ "fedimint-dummy-server",
+ "fedimint-mintv2-client",
+ "fedimint-mintv2-common",
+ "fedimint-mintv2-server",
+ "fedimint-multispend-common",
+ "fedimint-multispend-server",
+ "fedimint-server-core",
+ "fedimint-testing",
+ "futures",
+ "serde",
+ "strum 0.27.1",
+ "strum_macros 0.27.1",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "fedimint-portalloc"
 version = "0.12.0-alpha"
 source = "git+https://github.com/elsiribot/fedimint?rev=b7a752db799a962c4a5e0d3c87bc2ac37e9799c2#b7a752db799a962c4a5e0d3c87bc2ac37e9799c2"

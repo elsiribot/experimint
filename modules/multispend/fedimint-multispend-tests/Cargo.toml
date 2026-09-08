@@ -1,0 +1,42 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-multispend-tests contains integration tests for the multispend module"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-multispend-tests"
+publish = false
+repository = { workspace = true }
+version = { workspace = true }
+
+[lib]
+name = "fedimint_multispend_tests"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-dummy-client = { workspace = true }
+fedimint-dummy-server = { workspace = true }
+fedimint-mintv2-client = { workspace = true }
+fedimint-mintv2-server = { workspace = true }
+fedimint-multispend-server = { path = "../fedimint-multispend-server" }
+fedimint-server-core = { workspace = true }
+fedimint-testing = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+fedimint-api-client = { workspace = true }
+fedimint-client = { workspace = true }
+fedimint-dummy-common = { workspace = true }
+fedimint-mintv2-common = { workspace = true }
+fedimint-multispend-common = { path = "../fedimint-multispend-common" }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

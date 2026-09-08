@@ -10,6 +10,7 @@ members = [
     "modules/amm/fedimint-amm-tests",
     "modules/multispend/fedimint-multispend-common",
     "modules/multispend/fedimint-multispend-server",
+    "modules/multispend/fedimint-multispend-tests",
     "modules/usdt/fedimint-usdt-client",
     "modules/usdt/fedimint-usdt-common",
     "modules/usdt/fedimint-usdt-server",
@@ -69,6 +70,7 @@ fedimint-connectors = { git = "https://github.com/elsiribot/fedimint", rev = "b7
 fedimint-core = { git = "https://github.com/elsiribot/fedimint", rev = "b7a752db799a962c4a5e0d3c87bc2ac37e9799c2" }
 fedimint-derive-secret = { git = "https://github.com/elsiribot/fedimint", rev = "b7a752db799a962c4a5e0d3c87bc2ac37e9799c2" }
 fedimint-dummy-client = { git = "https://github.com/elsiribot/fedimint", rev = "b7a752db799a962c4a5e0d3c87bc2ac37e9799c2" }
+fedimint-dummy-common = { git = "https://github.com/elsiribot/fedimint", rev = "b7a752db799a962c4a5e0d3c87bc2ac37e9799c2" }
 fedimint-dummy-server = { git = "https://github.com/elsiribot/fedimint", rev = "b7a752db799a962c4a5e0d3c87bc2ac37e9799c2" }
 fedimint-eventlog = { git = "https://github.com/elsiribot/fedimint", rev = "b7a752db799a962c4a5e0d3c87bc2ac37e9799c2" }
 fedimint-lnv2-client = { git = "https://github.com/elsiribot/fedimint", rev = "b7a752db799a962c4a5e0d3c87bc2ac37e9799c2" }
