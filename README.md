@@ -105,11 +105,14 @@ no on-chain wallet enabled.
 ### Modules are not pre-ticked by default
 
 The setup UI pre-selects only modules whose `is_enabled_by_default()` is true —
-here `lnv2`, `meta`, `amm` and `multispend` (none of the four override the
-trait's default of `true`; `multispend` opts nothing out despite having no
-client yet). The three carrying the interesting topology are opt-in via
+here `lnv2`, `meta` and `amm` (none of the three override the trait's default
+of `true`). Everything else is opt-in via an env var:
 `FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
-`FM_ENABLE_MODULE_USDT`. `multi_sig_stability_pool` is opt-in the same way, via
+`FM_ENABLE_MODULE_USDT` carry the interesting topology; `multispend` is
+opt-in via `FM_ENABLE_MODULE_MULTISPEND` because it has no client crate yet
+and the module set is fixed at DKG, so pre-ticking it by default would strand
+an operator who forgot to untick it with a permanently client-less module.
+`multi_sig_stability_pool` is opt-in the same way, via
 `FM_ENABLE_MODULE_SPV2`, independent of the asset topology above. They are
 still *available* without those variables; the variables only decide what
 starts pre-selected.

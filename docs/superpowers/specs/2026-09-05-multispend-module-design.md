@@ -197,9 +197,14 @@ AccountId -> AccountState { balance: Amounts, op_counter: u64 }
 ```
 
 That is the entire consensus state. **The key set is never stored.** A record
-is created by the first credit, and the account exists exactly while it has
-one; the full `Account` travels inline in every spend and is checked against
-the id by hash. So there is no registration step and nothing to keep in sync.
+is created by the first credit, so there is no registration step and nothing
+to keep in sync. Record existence is *not*, however, a lasting proxy for "this
+account has funds": draining an account to exactly zero (3.4) leaves its
+record in place with a zero balance rather than deleting it. A drained account
+and a never-funded one both have zero balance, but only the former has a row —
+anything gating on "is this account funded" (4.3) must check the balance, not
+whether a record exists. The full `Account` travels inline in every spend and
+is checked against the id by hash.
 
 `op_counter` increments on every input or output touching the account. It
 exists solely so the non-consensus bulletin board can notice "this account did
@@ -267,6 +272,35 @@ anyone had signed.
 
 `account_balance(AccountId) -> Option<AccountState>`. Read-only.
 
+### 3.6 Known limitation: unbounded state growth
+
+`process_output` creates a row for any `AccountId` on any well-formed credit —
+no minimum amount, no fee, and nothing ever reaps a row (a drained account
+keeps its record, 3.2). This is a deliberate phase-1 scoping decision, not an
+oversight the module should silently work around; recording it here so it is
+visible and decided on before this module is ever pointed at real money (it is
+not, as of this writing — 9.4's "no client crate" and `is_enabled_by_default()
+== false` both apply).
+
+The arithmetic: `Credit { account: AccountId, amounts: Amounts }` encodes to
+roughly 32 bytes for the id plus a few bytes per unit entry, call it ~42 bytes
+per output. A single transaction has a practical size cap around 50 KB, which
+fits on the order of 1,100 `Credit` outputs. At the protocol minimum of 1 msat
+each, that is **~1,100 permanent consensus rows for ~1.1 sat** — nothing like
+mint notes, whose row count is intrinsically bounded by face value via
+denominations.
+
+Three options, none picked yet:
+
+1. Delete the record when a spend (3.4) drains the balance to exactly zero,
+   trading the `op_counter` history (4.3 relies on it to reset allowance) for
+   bounded storage.
+2. A minimum credit amount, rejecting `Credit`s below it in `process_output`.
+3. A per-record fee, charged either on credit or on an idle-time basis.
+
+This needs a decision before mainnet handles adversarial volumes; not blocking
+for phase 1.
+
 ## 4. Bulletin board (non-consensus)
 
 ### 4.1 Shape
@@ -325,6 +359,15 @@ A proposal is accepted when:
 - `ciphertext` is within the size cap,
 - the account has allowance remaining.
 
+**Admission is keyed on balance, never on record existence.** 3.2 notes that a
+drained account keeps its consensus record after being spent to exactly zero;
+that record is indistinguishable in *shape* from a funded one, so an admission
+check must read the `balance` field and compare it to zero, not merely check
+whether `account_balance` returns `Some`. Getting this wrong would grant a
+drained account permanent free bulletin-board allowance, and an attacker can
+manufacture such a record cheaply — see 3.6, "unbounded state growth," for
+exactly how cheaply.
+
 The guardian keeps, per account, a local record of `{ used, day, seen_op }`.
 Allowance is reset when **either** its own wall clock has passed UTC midnight
 since `day`, **or** the account's current `op_counter` differs from `seen_op`. The second condition
@@ -333,6 +376,30 @@ consensus writes: any deposit or withdrawal bumps `op_counter`, the guardian
 notices on the next post, and resets. A group that exhausts its allowance can
 always unstick itself with a deposit, which costs a real fedimint transaction
 and so is not itself a DoS vector.
+
+**Defect, unresolved: the reset is free, not merely cheap.** The argument
+above assumes a deposit "costs a real fedimint transaction," implying that
+cost gates the reset. As phase 1 implements crediting (3.3, `process_output`),
+that is false: a `Credit` needs no input at all when it is exactly balanced by
+another output in the same transaction (3.4's account-to-account transfer is
+the intended case of this), and there is no minimum credit and no fee (3.6).
+So crediting *any* account — including one an attacker fully controls — 1 msat
+bumps its `op_counter` for free. Concretely: post the full daily allowance
+against the target account, credit 1 msat to *any* account you control (not
+even the target), which is unconditionally free, then reset and repeat. The
+allowance was meant to be the DoS defense; as specified it defends nothing.
+This is a phase-1-caused sharpening of what was already a soft assumption in
+the original design, not a new problem this document invented — flagging it
+now, before a client exists to make it exploitable, rather than resolving it
+here. Candidate resolutions, unpicked:
+
+- Reset only on a *spend* (3.4), which requires t signatures and so has a real
+  authorization cost regardless of transaction fees.
+- Rate-limit the reset itself (e.g. at most once per `day` window regardless
+  of how many operations occur), independent of what triggers it.
+
+Both change the DoS/liveness trade-off in ways that want a human decision, not
+an implementation default.
 
 `MAX`, the ciphertext cap and the retention window are **guardian-local
 configuration**, not consensus parameters — guardians are free to disagree.

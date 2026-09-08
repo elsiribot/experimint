@@ -79,18 +79,20 @@
 //! federation's native unit, and a lightning-only federation denominates in it
 //! with no on-chain wallet enabled.
 //!
-//! # Modules are not enabled by default
+//! # Modules are not pre-ticked by default
 //!
 //! `default_modules` (what the setup UI pre-ticks) is the subset whose
 //! `is_enabled_by_default()` is true. On this module set that is `lnv2`,
-//! `meta`, `amm` and `multispend` — none of the four override the trait's
-//! default (`true`), same as `amm`; `multispend` opts nothing out despite
-//! having no client yet. The three that carry the interesting topology are all
-//! opt-in:
+//! `meta` and `amm` — none of the three override the trait's default
+//! (`true`). Everything else is opt-in:
 //!
 //! - `mintv2` — `FM_ENABLE_MODULE_MINTV2`
 //! - `walletv2` — `FM_ENABLE_MODULE_WALLETV2`
 //! - `usdt` — `FM_ENABLE_MODULE_USDT`
+//! - `multispend` — `FM_ENABLE_MODULE_MULTISPEND`. It has no client crate yet
+//!   and the module set is fixed at DKG, so pre-ticking it by default would
+//!   strand an operator who forgot to untick it with a permanently
+//!   client-less module.
 //!
 //! `multi_sig_stability_pool` is opt-in the same way, via
 //! `FM_ENABLE_MODULE_SPV2`, independent of the asset topology above.
