@@ -1312,6 +1312,13 @@ Expected: FAIL to compile — the two helpers are undefined.
 
 - [ ] **Step 3: Implement**
 
+First, two things Task 3 and Task 4 did not leave you:
+
+- **Add a `MalformedAmounts` variant to `MultispendInputError`** in `fedimint-multispend-common/src/types.rs`. Task 3 shipped the enum before this need was known; this is its first use. Message: `"The input's amounts are not well-formed"`.
+- **`amounts_are_well_formed`** already exists in that same module — Task 4 added it after review found that a wire-decoded `Amounts` can carry explicit zero entries that no safe constructor produces, and that `checked_add_mut` asserts on them per entry. Import it; do not write a second copy.
+
+Then add a test alongside the others proving the input side is guarded: build `{BITCOIN: 5, custom_unit: 0}` as a raw `BTreeMap` with `Amount::ZERO` inserted directly, consensus-encode and decode it back through `Decodable` (`Amounts::new_custom` filters zeros, so a value built that way proves nothing), and assert `verify_spend` returns `MalformedAmounts`. Confirm it fails before you add the guard.
+
 ```rust
 /// Half one of the obligation in spec §9.2: verify the witness against the
 /// key material carried inside the input, bound to the txid.
@@ -1324,7 +1331,18 @@ pub(crate) fn verify_spend(
     input: &MultispendInput,
     ctx: &InputAuthCtx<'_>,
 ) -> Result<(), MultispendInputError> {
-    let MultispendInput::Spend { account, .. } = input;
+    let MultispendInput::Spend { account, amounts } = input;
+
+    // `Amounts` derives `Decodable` with no invariant enforcement, so a
+    // crafted input can carry explicit zero-amount entries no safe
+    // constructor would produce. `checked_add_mut` asserts per entry, and
+    // `process_input` hands these straight back to core's `FundingVerifier`,
+    // which calls it — so an unvalidated zero entry panics a debug node and
+    // corrupts a release one. Task 4 added this helper for the same reason on
+    // the output side; reject here, statelessly, before anything else.
+    if !amounts_are_well_formed(amounts) {
+        return Err(MultispendInputError::MalformedAmounts);
+    }
 
     let witness = SpendWitness::decode(ctx.witness())?;
 
