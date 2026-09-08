@@ -1,6 +1,6 @@
 [package]
 authors = { workspace = true }
-description = "fedimintd built with the experimint module set (v2 core modules + meta + amm + usdt)"
+description = "fedimintd built with the experimint module set (v2 core modules + meta + amm + usdt + multispend)"
 edition = { workspace = true }
 license = { workspace = true }
 name = "fedimintd-experimint"
@@ -24,6 +24,7 @@ fedimint-core = { workspace = true }
 fedimint-lnv2-server = { workspace = true }
 fedimint-meta-server = { workspace = true }
 fedimint-mintv2-server = { workspace = true }
+fedimint-multispend-server = { workspace = true }
 fedimint-server-core = { workspace = true }
 fedimint-usdt-server = { workspace = true }
 fedimint-walletv2-server = { workspace = true }

@@ -6102,6 +6102,7 @@ dependencies = [
  "fedimint-lnv2-server",
  "fedimint-meta-server",
  "fedimint-mintv2-server",
+ "fedimint-multispend-server",
  "fedimint-server",
  "fedimint-server-core",
  "fedimint-usdt-common",

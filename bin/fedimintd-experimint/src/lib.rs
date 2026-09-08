@@ -2,9 +2,17 @@
 //!
 //! This is a thin wrapper around the platform branch's [`fedimintd::run`]: it
 //! supplies a [`ServerModuleInitRegistry`] carrying the v2 core modules, the
-//! meta module, Fedi's stability pool v2 (multispend), and this repo's two
-//! local modules, and otherwise inherits every flag, env var, setup UI and API
-//! endpoint from upstream.
+//! meta module, Fedi's stability pool v2, and this repo's three local modules,
+//! and otherwise inherits every flag, env var, setup UI and API endpoint from
+//! upstream.
+//!
+//! **Two things share the name "multispend" here and are not the same
+//! module.** Fedi's stability pool v2 is branded "multispend" in the Fedi app
+//! and is what the parenthetical below refers to; `modules/multispend`
+//! (kind `multispend`, [`fedimint_multispend_server::MultispendInit`]) is this
+//! repo's own from-scratch module — naive t-of-n multisig accounts holding any
+//! `AmountUnit`, built to eventually replace what the stability pool does
+//! internally. They are unrelated code, registered side by side.
 //!
 //! # The intended federation topology
 //!
@@ -18,6 +26,7 @@
 //! | `lnv2` | Lightning |
 //! | `meta` | guardian-published metadata |
 //! | `multi_sig_stability_pool` | Fedi's stability pool v2 (multispend) |
+//! | `multispend` | t-of-n multisig accounts holding any `AmountUnit`; no client yet |
 //!
 //! Note the **two `mintv2` instances**, one per asset. Both setup paths can
 //! express that.
@@ -73,8 +82,10 @@
 //! # Modules are not enabled by default
 //!
 //! `default_modules` (what the setup UI pre-ticks) is the subset whose
-//! `is_enabled_by_default()` is true. On this module set that is only `lnv2`,
-//! `meta` and `amm`. The three that carry the interesting topology are all
+//! `is_enabled_by_default()` is true. On this module set that is `lnv2`,
+//! `meta`, `amm` and `multispend` — none of the four override the trait's
+//! default (`true`), same as `amm`; `multispend` opts nothing out despite
+//! having no client yet. The three that carry the interesting topology are all
 //! opt-in:
 //!
 //! - `mintv2` — `FM_ENABLE_MODULE_MINTV2`
@@ -129,7 +140,7 @@ pub fn spv2_init() -> StabilityPoolInit {
 }
 
 /// The experimint module set: the v2 core modules, `meta`, Fedi's stability
-/// pool v2, and this repo's `amm` and `usdt`.
+/// pool v2, and this repo's `amm`, `usdt` and `multispend`.
 ///
 /// One init per kind — see the module docs on why that is unrelated to how many
 /// *instances* of a kind the federation ends up running.
@@ -155,6 +166,7 @@ pub fn experimint_modules() -> ServerModuleInitRegistry {
     // Local modules.
     modules.attach(fedimint_amm_server::AmmInit);
     modules.attach(fedimint_usdt_server::UsdtInit::default());
+    modules.attach(fedimint_multispend_server::MultispendInit);
 
     // Fedi's stability pool v2 — the server side of multispend. Sourced from
     // the experimint branch of elsiribot/fedi; parameters in `spv2_init`.
@@ -170,7 +182,7 @@ mod tests {
 
     use super::*;
 
-    /// The registry must carry exactly the seven kinds this binary promises.
+    /// The registry must carry exactly the eight kinds this binary promises.
     ///
     /// Pins the set so that dropping a module (or silently gaining one) is a
     /// test failure rather than a federation that comes up missing a module
@@ -191,6 +203,7 @@ mod tests {
                 "meta".to_string(),
                 "mintv2".to_string(),
                 "multi_sig_stability_pool".to_string(),
+                "multispend".to_string(),
                 "usdt".to_string(),
                 "walletv2".to_string(),
             ],
@@ -198,12 +211,15 @@ mod tests {
         );
     }
 
-    /// `amm` and `usdt` must both be present and distinct.
+    /// `amm`, `usdt` and `multispend` must all be present and distinct.
     ///
-    /// This is the composition claim the whole workspace repin was for: two
+    /// This is the composition claim the whole workspace repin was for:
     /// module families built against one `fedimint-core`, registrable side by
     /// side. `attach` panics on a duplicate kind, so a regression that made
     /// them collide would fail here rather than at guardian startup.
+    /// `multispend` and `multi_sig_stability_pool` share a colloquial name
+    /// ("multispend" is Fedi's brand for its stability pool) but are distinct
+    /// kinds — this asserts both are attached, not merged.
     #[test]
     fn local_modules_coexist() {
         let registry = experimint_modules();
@@ -211,6 +227,7 @@ mod tests {
 
         assert!(kinds.contains(&ModuleKind::clone_from_str("amm")));
         assert!(kinds.contains(&ModuleKind::clone_from_str("usdt")));
+        assert!(kinds.contains(&ModuleKind::clone_from_str("multispend")));
         assert!(kinds.contains(&ModuleKind::clone_from_str("multi_sig_stability_pool")));
     }
 

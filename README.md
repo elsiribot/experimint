@@ -3,22 +3,23 @@
 Fedimint module experiments, developed outside the Fedimint tree and built
 against a pinned platform branch.
 
-Two module families are developed here, plus a third attached from elsewhere:
+Three module families are developed here, plus a fourth attached from elsewhere:
 
 | Family | Crates | What it is |
 | --- | --- | --- |
 | `modules/amm` | `fedimint-amm-{common,server,client,tests}` | A constant-product AMM (Uniswap V2 as reference implementation) trading between the federation's `AmountUnit`s. See [`modules/amm/fedimint-amm-spec.md`](modules/amm/fedimint-amm-spec.md). |
 | `modules/usdt` | `fedimint-usdt-{common,server,client,tests}` | USDT-on-EVM peg-in/peg-out via threshold ECDSA and ERC-4337. Lifted from the fork at consensus version 0.12. |
+| `modules/multispend` | `fedimint-multispend-{common,server,tests}` | t-of-n multisig accounts holding any `AmountUnit`, spendable by any t of n signers to fund arbitrary transaction outputs. **No client crate**: a real client must hand-assemble transactions rather than use `TransactionBuilder`, since the witness signs a txid the builder doesn't fix until `build()` — a later phase. Distinct from `multi_sig_stability_pool` below despite the overlapping name. |
 | `multi_sig_stability_pool` | `stability-pool-{common,server,client}` | Fedi's stability pool v2 ("multispend"): multisig accounts with threshold transfers, and seeker/provider BTC↔fiat stabilization. Sourced from [`elsiribot/fedi`](https://github.com/elsiribot/fedi), branch `experimint`, not this repo's own `modules/`. |
-| `bin/fedimintd-experimint` | — | A `fedimintd` carrying the v2 core modules, `meta`, both local modules, and `multi_sig_stability_pool`. |
-| `bin/fedimint-cli-experimint` | — | The matching `fedimint-cli`, the only client that can drive `amm`, `usdt` and `multi_sig_stability_pool`. See [its README](bin/fedimint-cli-experimint/README.md). |
+| `bin/fedimintd-experimint` | — | A `fedimintd` carrying the v2 core modules, `meta`, all three local modules, and `multi_sig_stability_pool`. |
+| `bin/fedimint-cli-experimint` | — | The matching `fedimint-cli`, the only client that can drive `amm`, `usdt` and `multi_sig_stability_pool`. `multispend` has no client, so nothing here can drive it. See [its README](bin/fedimint-cli-experimint/README.md). |
 
 ## Running a federation
 
 `bin/fedimintd-experimint` is a thin wrapper around the platform branch's
 `fedimintd::run`, supplying this module set: `mintv2`, `walletv2`, `lnv2`,
-`meta`, `amm`, `usdt`, `multi_sig_stability_pool`. Every flag, env var, setup
-UI and API endpoint is inherited from upstream.
+`meta`, `amm`, `usdt`, `multi_sig_stability_pool`, `multispend`. Every flag,
+env var, setup UI and API endpoint is inherited from upstream.
 
 ```bash
 cargo run -p fedimintd-experimint -- --help
@@ -46,6 +47,7 @@ afterwards.
 | `lnv2` | Lightning |
 | `meta` | guardian-published metadata |
 | `multi_sig_stability_pool` | multisig accounts + threshold transfers (Fedi multispend); seeker/provider BTC↔fiat stabilization |
+| `multispend` | t-of-n multisig accounts holding any `AmountUnit`; no client yet, so not part of the `--module` example below |
 
 Note the **two `mintv2` instances**, one per asset. Both setup paths express it.
 
@@ -103,8 +105,10 @@ no on-chain wallet enabled.
 ### Modules are not pre-ticked by default
 
 The setup UI pre-selects only modules whose `is_enabled_by_default()` is true —
-here just `lnv2`, `meta` and `amm`. The three carrying the interesting topology
-are opt-in via `FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
+here `lnv2`, `meta`, `amm` and `multispend` (none of the four override the
+trait's default of `true`; `multispend` opts nothing out despite having no
+client yet). The three carrying the interesting topology are opt-in via
+`FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
 `FM_ENABLE_MODULE_USDT`. `multi_sig_stability_pool` is opt-in the same way, via
 `FM_ENABLE_MODULE_SPV2`, independent of the asset topology above. They are
 still *available* without those variables; the variables only decide what

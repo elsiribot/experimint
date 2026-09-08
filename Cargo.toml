@@ -123,6 +123,7 @@ fedimint-threshold-ecdsa = { path = "crypto/threshold-ecdsa", version = "0.1.0" 
 fedimint-amm-client = { path = "modules/amm/fedimint-amm-client", version = "0.1.0" }
 fedimint-amm-common = { path = "modules/amm/fedimint-amm-common", version = "0.1.0" }
 fedimint-amm-server = { path = "modules/amm/fedimint-amm-server", version = "0.1.0" }
+fedimint-multispend-server = { path = "modules/multispend/fedimint-multispend-server", version = "0.1.0" }
 fedimint-usdt-client = { path = "modules/usdt/fedimint-usdt-client", version = "0.1.0" }
 fedimint-usdt-common = { path = "modules/usdt/fedimint-usdt-common", version = "0.1.0" }
 fedimint-usdt-server = { path = "modules/usdt/fedimint-usdt-server", version = "0.1.0" }
