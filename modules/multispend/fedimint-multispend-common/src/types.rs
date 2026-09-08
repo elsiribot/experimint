@@ -117,7 +117,9 @@ impl SpendWitness {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
+#[derive(
+    Debug, Error, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable, Hash,
+)]
 pub enum MultispendInputError {
     #[error("The witness could not be decoded")]
     MalformedWitness,
@@ -135,16 +137,34 @@ pub enum MultispendInputError {
     MalformedAmounts,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
+#[derive(
+    Debug, Error, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable, Hash,
+)]
 pub enum MultispendOutputError {
     /// Either the whole amount is zero — which would create an account
-    /// record with no funds, breaking the invariant that an account exists
-    /// exactly while it has a balance — or an individual unit within it is,
-    /// which `Amounts`' arithmetic cannot tolerate (see
-    /// [`amounts_are_well_formed`]). Enforced in `process_output` (Task 4);
-    /// this only names the error.
+    /// record with no funds — or an individual unit within it is, which
+    /// `Amounts`' arithmetic cannot tolerate (see [`amounts_are_well_formed`]).
+    /// Enforced in `process_output` (Task 4); this only names the error.
+    ///
+    /// Rejecting an all-zero credit does NOT establish "an account exists
+    /// exactly while it has a balance": a drained account (spent down to
+    /// exactly zero via `process_spend`'s `checked_sub`) keeps its record
+    /// with `balance: Amounts::ZERO` by design. Record existence and
+    /// "currently funded" are different questions — see `db::AccountState`'s
+    /// doc comment.
     #[error("A credit must be non-empty and have a non-zero amount for every unit")]
     ZeroCredit,
+    /// `credit_account` hit `Amounts::checked_add`'s overflow ceiling. Only
+    /// reachable for a non-BITCOIN unit: `AmountUnit::BITCOIN`'s total supply
+    /// is bounded well under `u64::MAX` msats by the wallet backing it, but
+    /// this module accepts arbitrary units (spec — scope), and nothing
+    /// bounds an attacker-chosen unit's issuance the same way. Returned
+    /// instead of panicking: every guardian evaluates `process_output`
+    /// identically inside consensus, so a panic here would be a
+    /// deterministic, simultaneous halt of the whole federation rather than
+    /// a single rejected transaction.
+    #[error("Crediting this account would overflow its balance for this unit")]
+    BalanceOverflow,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable, Serialize, Deserialize)]

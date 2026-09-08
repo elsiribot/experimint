@@ -81,7 +81,7 @@
             # It is shared across all three packages because it hashes the
             # vendored *workspace* lockfile, not the selected package. Adding a
             # workspace member changes it for every one of them at once.
-            cargoHash = "sha256-hwIWfwUUxC7y339uaJKZuwGFcSUzlx2sWqdu2bepSYk=";
+            cargoHash = "sha256-iOkL9NM7K3oRwmyyoS7hB4YTqIr5fyGcYmB/dodQEco=";
 
             # The workspace also contains the `*-tests` crates, which drag in
             # `fedimint-testing` -> the gateway -> `fedimint-ldk-node`. None of

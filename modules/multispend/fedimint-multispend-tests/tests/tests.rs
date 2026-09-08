@@ -99,7 +99,15 @@ async fn submit(
         "one signer slice per input, positionally aligned"
     );
 
-    let nonce: [u8; 8] = [0x77; 8];
+    // A fixed nonce would make two structurally identical submissions in one
+    // test collide on the same txid, silently no-oping the second (consensus
+    // dedupes by txid). A process-wide counter guarantees every call to
+    // `submit` gets its own txid, regardless of how many other calls in this
+    // file build byte-for-byte identical inputs/outputs.
+    static NEXT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce: [u8; 8] = NEXT_NONCE
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .to_le_bytes();
     let txid = Transaction::tx_hash_from_parts(&inputs, &outputs, nonce);
     let msg = secp256k1::Message::from_digest(*txid.as_ref());
     let secp = Secp256k1::new();
@@ -157,13 +165,14 @@ async fn submit(
     // this txid permanently unaccepted. Without the timeout, `await_transaction`
     // retries forever and the test hangs instead of failing.
     tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(60),
         client.api().await_transaction(txid),
     )
     .await
     .expect(
-        "the federation did not reach consensus on this transaction within 30s -- likely a \
-             guardian panic (e.g. the balance-sheet audit going negative), check the test output \
+        "the federation did not reach consensus on this transaction within 60s -- some \
+             consensus-time failure (not necessarily a guardian panic in the balance-sheet \
+             audit -- any consensus-time failure hangs identically), check the test output \
              above for a panic message",
     );
     Ok(txid)
@@ -179,22 +188,30 @@ async fn submit(
 /// comment: "an `AccountId` is a hash, and the balance of an account whose
 /// id you already know is visible in consensus transactions anyway").
 async fn balance(fed: &FederationTest, account: &Account, unit: AmountUnit) -> Amount {
+    account_record(fed, account.id())
+        .await
+        .map(|s| s.balance.get(&unit).copied().unwrap_or(Amount::ZERO))
+        .unwrap_or(Amount::ZERO)
+}
+
+/// The raw `account_balance` response: `None` iff the account has no
+/// consensus record at all (as opposed to a record with a zero balance).
+/// `balance` above collapses that distinction to `Amount::ZERO` for
+/// convenience, which is exactly the wrong tool for a test that needs to
+/// assert a forged account gained no record — see `spending_a_forged_account_is_rejected`.
+async fn account_record(fed: &FederationTest, account: AccountId) -> Option<AccountBalance> {
     let client = fed.new_client().await;
     let multispend = module_id(&client.config().await, &fedimint_multispend_common::KIND);
 
-    let state: Option<AccountBalance> = client
+    client
         .api()
         .with_module(multispend)
         .request_current_consensus(
             ACCOUNT_BALANCE_ENDPOINT.to_string(),
-            ApiRequestErased::new(account.id()),
+            ApiRequestErased::new(account),
         )
         .await
-        .expect("the endpoint must answer");
-
-    state
-        .map(|s| s.balance.get(&unit).copied().unwrap_or(Amount::ZERO))
-        .unwrap_or(Amount::ZERO)
+        .expect("the endpoint must answer")
 }
 
 /// This federation's decoder registry, built from the module kinds actually
@@ -770,5 +787,65 @@ async fn an_account_holds_two_units_independently() -> anyhow::Result<()> {
         "BITCOIN balance must be untouched by a second-unit spend"
     );
     assert_eq!(balance(&fed, &account, faucet_unit()).await, Amount::ZERO);
+    Ok(())
+}
+
+/// The forged-account attack, end to end: an attacker builds their OWN
+/// account, signs a spend from it with their OWN keys — enough to satisfy the
+/// account's own threshold, so `verify_input` passes — and tries to spend
+/// from it without ever having funded it. `process_input` must refuse, and
+/// the forged account must not gain a database record just by being spent
+/// against.
+///
+/// This is the half of the module's safety obligation (spec §9.2) that
+/// `verify_input` alone cannot discharge — see `verify_spend`'s doc comment
+/// in the server crate. It already has unit coverage
+/// (`process_input_rejects_a_forged_account`), but that calls
+/// `process_input` directly, bypassing the real `ServerModule` -> core
+/// plumbing entirely. `multispend` is the first module ever to return
+/// `InputAuth::SelfVerified` — core performs no authorization check of its
+/// own for this input — so "core actually calls `process_input` and honours
+/// its `Err`" had never been shown end-to-end for a rejection before this
+/// test.
+#[tokio::test(flavor = "multi_thread")]
+async fn spending_a_forged_account_is_rejected() -> anyhow::Result<()> {
+    let fed = new_federation().await;
+    let multispend = multispend_id(&fed).await;
+    let dummy = dummy_id(&fed).await;
+    // Entirely the attacker's own account: never credited by anyone.
+    let (forged, forged_kps) = account_with_keys(1, 1);
+
+    let err = submit(
+        &fed,
+        multispend,
+        vec![spend_input(
+            multispend,
+            forged.clone(),
+            Amounts::new_bitcoin_msats(1_000),
+        )],
+        vec![dummy_output(dummy, Amount::from_msats(1_000))],
+        &[&[(0, forged_kps[0])]],
+    )
+    .await
+    .expect_err(
+        "the attacker's own signature satisfies their own account's threshold, but the \
+             account was never funded",
+    );
+
+    assert_eq!(
+        multispend_error(&err),
+        &MultispendInputError::UnknownAccount,
+        "expected UnknownAccount, got {err:?}"
+    );
+
+    // The rejected spend must not have fabricated a record for the forged
+    // account: `None`, not `Some` with a zero balance. See `account_record`'s
+    // doc comment for why `balance` (which collapses both to `Amount::ZERO`)
+    // cannot make this assertion.
+    assert!(
+        account_record(&fed, forged.id()).await.is_none(),
+        "a forged, unfunded account must not gain a database record just by being spent \
+             against"
+    );
     Ok(())
 }

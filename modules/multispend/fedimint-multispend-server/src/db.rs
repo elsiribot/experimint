@@ -27,10 +27,18 @@ pub struct AccountPrefix;
 
 /// The module's entire consensus state, one row per account.
 ///
-/// The key set is deliberately absent: it is not stored anywhere. An account
-/// exists exactly while it has a record, and a record is created by its first
-/// credit — so there is no registration step and no way to create an account
-/// without funding it.
+/// The key set is deliberately absent: it is not stored anywhere. A record is
+/// created by an account's first credit, so there is no registration step and
+/// no way to create a record without funding it *at that moment*. But record
+/// existence is NOT a lasting proxy for "this account has funds": draining an
+/// account to exactly zero (spec — `process_spend`'s `checked_sub`) leaves its
+/// record in place with `balance: Amounts::ZERO`, by design (see
+/// `draining_an_account_to_zero_keeps_its_record`) — a drained account and a
+/// never-funded one both answer `AccountId` lookups with "no balance", but
+/// only the former has a row. Anything gating admission on "this account is
+/// funded" (spec §4.3's bulletin board, in a later phase) must check the
+/// *balance*, never merely whether a record exists — an attacker can
+/// manufacture a zero-balance record for 1 msat plus one 1-of-1 spend.
 ///
 /// Note the absent `Serialize`: `Amounts` has no serde impl at this rev
 /// (`fedimint-core/src/module/mod.rs` derives only `Debug, Clone, Eq,

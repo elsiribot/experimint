@@ -141,11 +141,20 @@ impl Account {
     }
 
     /// A 1-of-1 account, which is how an ordinary personal wallet is expressed.
+    ///
+    /// Routed through `try_from` rather than constructing `Self` directly, so
+    /// this stays a second construction path in name only: any invariant
+    /// `TryFrom<AccountUnchecked>` gains in the future (the x-only check
+    /// above is exactly such a case — it postdates this function) applies
+    /// here too, instead of silently being skippable by calling `single`.
+    /// A single well-formed key can never fail `TryFrom`, so the `expect` is
+    /// unreachable, not a real fallibility surface.
     pub fn single(key: PublicKey) -> Self {
-        Self {
+        Self::try_from(AccountUnchecked {
             pub_keys: BTreeSet::from([key]),
             threshold: 1,
-        }
+        })
+        .expect("a single key with threshold 1 always satisfies Account's invariants")
     }
 }
 

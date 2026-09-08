@@ -30,6 +30,7 @@ use fedimint_core::config::{
 use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::Encodable;
+use fedimint_core::envs::is_env_var_set_opt;
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     Amounts, ApiEndpoint, ApiVersion, CORE_CONSENSUS_VERSION, CoreConsensusVersion, InputAuth,
@@ -52,12 +53,18 @@ use fedimint_multispend_common::{
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::migration::ServerModuleDbMigrationFn;
 use fedimint_server_core::{
-    ConfigGenModuleArgs, ServerModule, ServerModuleInit, ServerModuleInitArgs,
+    ConfigGenModuleArgs, EnvVarDoc, ServerModule, ServerModuleInit, ServerModuleInitArgs,
 };
 use futures::StreamExt;
 use strum::IntoEnumIterator;
 
 use crate::db::{AccountKey, AccountPrefix, AccountState, DbKeyPrefix};
+
+/// Set to `1`/`true` to pre-select `multispend` in the setup UI. Unset (or
+/// any other value) leaves it available but not pre-ticked — see
+/// [`ServerModuleInit::is_enabled_by_default`] below for why that matters:
+/// the module set is fixed at DKG, and this phase has no client crate.
+pub const FM_ENABLE_MODULE_MULTISPEND_ENV: &str = "FM_ENABLE_MODULE_MULTISPEND";
 
 /// Generates the module.
 #[derive(Debug, Clone)]
@@ -201,6 +208,23 @@ impl ServerModuleInit for MultispendInit {
     ) -> BTreeMap<DatabaseVersion, ServerModuleDbMigrationFn<Multispend>> {
         BTreeMap::new()
     }
+
+    /// Not pre-ticked: the module set is fixed at DKG, and this phase-1
+    /// module has no client crate. An operator who forgot to untick it (the
+    /// trait default is `true`) would be stuck for the life of the
+    /// federation with a module nothing can talk to. Same reasoning and
+    /// pattern as `mintv2`/`walletv2`, which are opt-in for their own
+    /// per-module reasons.
+    fn is_enabled_by_default(&self) -> bool {
+        is_env_var_set_opt(FM_ENABLE_MODULE_MULTISPEND_ENV).unwrap_or(false)
+    }
+
+    fn get_documented_env_vars(&self) -> Vec<EnvVarDoc> {
+        vec![EnvVarDoc {
+            name: FM_ENABLE_MODULE_MULTISPEND_ENV,
+            description: "Set to 1/true to pre-select the multispend module in the setup UI (experimental, no client crate yet). Disabled by default.",
+        }]
+    }
 }
 
 /// Add to an account's balance, creating its record if this is the first
@@ -213,11 +237,19 @@ impl ServerModuleInit for MultispendInit {
 /// Has no guard of its own: `amounts` is trusted as-is, so every caller must
 /// have already checked it with `amounts_are_well_formed` (or otherwise
 /// guaranteed it has no zero-amount entries) before calling this.
+///
+/// Errors rather than panics on overflow: unlike `AmountUnit::BITCOIN`, whose
+/// total supply is bounded well under `u64::MAX` msats by the wallet backing
+/// it, this module accepts arbitrary units, so nothing bounds an
+/// attacker-chosen unit's issuance the same way. A panic here would run
+/// identically on every guardian inside consensus and halt the federation
+/// deterministically and permanently; a returned error just rejects the one
+/// transaction.
 pub(crate) async fn credit_account(
     dbtx: &mut DatabaseTransaction<'_>,
     account: AccountId,
     amounts: &Amounts,
-) {
+) -> Result<(), MultispendOutputError> {
     let mut state = dbtx
         .get_value(&AccountKey(account))
         .await
@@ -229,10 +261,11 @@ pub(crate) async fn credit_account(
     state.balance = state
         .balance
         .checked_add(amounts)
-        .expect("an account balance cannot overflow: total issuance is bounded");
+        .ok_or(MultispendOutputError::BalanceOverflow)?;
     state.op_counter += 1;
 
     dbtx.insert_entry(&AccountKey(account), &state).await;
+    Ok(())
 }
 
 /// Half one of the obligation in spec §9.2: verify the witness against the
@@ -290,6 +323,19 @@ pub(crate) async fn process_spend(
     input: &MultispendInput,
 ) -> Result<Amounts, MultispendInputError> {
     let MultispendInput::Spend { account, amounts } = input;
+
+    // `verify_input` already rejects malformed (empty/all-zero/mixed-zero)
+    // `amounts` before `process_input` is ever reached — core always calls
+    // `verify_input` first (`fedimint-server`'s
+    // `process_transaction_with_dbtx`). Repeating the check here is defence
+    // in depth, not redundant load-bearing logic: without it, this function's
+    // safety against a zero-amount entry (which `checked_sub` would assert
+    // on, panicking every guardian in consensus) depends on an ordering
+    // invariant enforced only in a different crate, with nothing in this one
+    // to catch a regression that broke it.
+    if !amounts_are_well_formed(amounts) {
+        return Err(MultispendInputError::MalformedAmounts);
+    }
 
     let mut state = dbtx
         .get_value(&AccountKey(account.id()))
@@ -388,7 +434,7 @@ impl ServerModule for Multispend {
             return Err(MultispendOutputError::ZeroCredit);
         }
 
-        credit_account(dbtx, *account, amounts).await;
+        credit_account(dbtx, *account, amounts).await?;
 
         Ok(TransactionItemAmounts {
             amounts: amounts.clone(),
@@ -421,15 +467,22 @@ impl ServerModule for Multispend {
                 module_instance_id,
                 &AccountPrefix,
                 |_, state: AccountState| {
-                    state
-                        .balance
-                        .values()
-                        .map(|amount| {
-                            -i64::try_from(amount.msats).expect(
-                                "an account balance cannot overflow: total issuance is bounded",
-                            )
-                        })
-                        .sum()
+                    // `Audit::add_items`' closure is infallible (`Fn(..) -> i64`,
+                    // no `Result`), and `audit` runs after every consensus item
+                    // and feeds `Audit::net_assets`'s `assert!(.. >= 0)` in the
+                    // engine — so a panic in here, from either the per-unit
+                    // `u64 -> i64` conversion or an overflowing `.sum()` across
+                    // several units on one account, would be a deterministic,
+                    // synchronized halt of the whole federation. Saturate
+                    // instead of asserting: `fold` with `saturating_sub` bounds
+                    // both the individual conversion (an amount whose `msats`
+                    // exceeds `i64::MAX`) and the running total (many units on
+                    // one account) at `i64::MIN`, at the cost of an audit report
+                    // that undercounts what such a pathological account owes
+                    // rather than crashing every guardian to report it exactly.
+                    state.balance.values().fold(0i64, |acc, amount| {
+                        acc.saturating_sub(i64::try_from(amount.msats).unwrap_or(i64::MAX))
+                    })
                 },
             )
             .await;
@@ -535,7 +588,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(1000),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
         dbtx.commit_tx().await;
 
         let mut dbtx = db.begin_transaction().await;
@@ -557,7 +611,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(500),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
         let state = dbtx
             .get_value(&AccountKey(account.id()))
             .await
@@ -584,13 +639,15 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(1000),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
         crate::credit_account(
             &mut dbtx.to_ref_nc(),
             account.id(),
             &Amounts::new_custom(other, Amount::from_msats(7)),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
 
         let state = dbtx.get_value(&AccountKey(account.id())).await.unwrap();
         assert_eq!(
@@ -638,7 +695,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(1000),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
         dbtx.commit_tx().await;
 
         assert_eq!(
@@ -947,7 +1005,8 @@ mod tests {
             funded.id(),
             &Amounts::new_bitcoin_msats(10_000),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
 
         let witness = sign_at(&ctx_for(&[]), &forged_kps, &[0]);
         Multispend::test_verify_input(&spend(&forged), &ctx_for(&witness))
@@ -958,13 +1017,16 @@ mod tests {
             .expect_err("a self-declared account must not be spendable");
         assert_eq!(err, MultispendInputError::UnknownAccount);
 
-        // A mutant that materializes a default record for an unknown account
-        // (rather than genuinely refusing it) would still be caught here:
-        // `checked_sub` on that phantom zero balance would independently
-        // return `InsufficientBalance` for the 500-msat spend, so the
-        // error-variant assertion above cannot by itself distinguish "the
-        // account must exist" from "the account must have funds". Assert
-        // directly that no record was created.
+        // This does NOT catch a mutant that materializes a default record for
+        // an unknown account instead of genuinely refusing it (that mutant is
+        // already caught above: `checked_sub` on the phantom zero balance
+        // would independently return `InsufficientBalance`, not
+        // `UnknownAccount`, so `assert_eq!(err, ...)` fails first).
+        // `process_spend` only calls `insert_entry` *after* `checked_sub`
+        // succeeds, so on any error path — genuine or phantom — no record is
+        // ever written, and this assertion would pass either way. What it
+        // does guard against is a different mutant: `process_spend` writing a
+        // record before, or independent of, the balance check.
         assert!(
             dbtx.get_value(&AccountKey(forged.id())).await.is_none(),
             "a forged, unfunded account must not gain a database record just by being spent \
@@ -986,7 +1048,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(10_000),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
 
         Multispend::test_process_input(&mut dbtx.to_ref_nc(), &spend(&account))
             .await
@@ -1014,7 +1077,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(100),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
 
         let err = Multispend::test_process_input(&mut dbtx.to_ref_nc(), &spend(&account))
             .await
@@ -1036,7 +1100,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(10_000),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
 
         let input = MultispendInput::Spend {
             account: account.clone(),
@@ -1073,7 +1138,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(10_000),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
 
         let module = Multispend;
         let in_point = InPoint {
@@ -1119,7 +1185,8 @@ mod tests {
             account.id(),
             &Amounts::new_bitcoin_msats(500),
         )
-        .await;
+        .await
+        .expect("test setup credit does not overflow");
 
         Multispend::test_process_input(&mut dbtx.to_ref_nc(), &spend(&account))
             .await
