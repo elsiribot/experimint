@@ -5370,6 +5370,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fedimint-multispend-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "erased-serde",
+ "fedimint-core",
+ "fedimint-multispend-common",
+ "fedimint-server-core",
+ "futures",
+ "serde",
+ "strum 0.27.1",
+ "strum_macros 0.27.1",
+ "tokio",
+]
+
+[[package]]
 name = "fedimint-portalloc"
 version = "0.12.0-alpha"
 source = "git+https://github.com/elsiribot/fedimint?rev=b7a752db799a962c4a5e0d3c87bc2ac37e9799c2#b7a752db799a962c4a5e0d3c87bc2ac37e9799c2"

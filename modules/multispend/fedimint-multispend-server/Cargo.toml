@@ -1,0 +1,30 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-multispend-server contains the consensus (server) side of the multispend module"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-multispend-server"
+repository = { workspace = true }
+version = { workspace = true }
+
+[lib]
+name = "fedimint_multispend_server"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-multispend-common = { path = "../fedimint-multispend-common" }
+fedimint-server-core = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true
