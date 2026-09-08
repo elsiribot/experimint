@@ -809,8 +809,8 @@ impl_db_lookup!(
 /// refund is never negative) -- what the original withdrawer gets back as
 /// reissued e-cash. `refund_pubkey` is copied from the withdrawal
 /// ([`UsdtWithdrawalV0::refund_pubkey`]); `Usdt::process_input`'s `RefundV0`
-/// arm returns it as the `InputMeta.pub_key` the fedimint transaction
-/// framework verifies the claim is signed by, so ONLY the original
+/// arm returns it as `InputMeta.auth`'s `InputAuth::Key`, which the fedimint
+/// transaction framework verifies the claim is signed by, so ONLY the original
 /// withdrawer can claim. The record is removed the instant that claim is
 /// processed, so a second claim finds it absent and errors
 /// (`UsdtInputError::UnknownRefund`) -- reissued EXACTLY ONCE. While it lives

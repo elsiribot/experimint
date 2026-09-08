@@ -46,8 +46,8 @@ pub struct FaucetConsensusItem;
 /// [`FaucetInputError::InsufficientBalance`] if the stored balance is less
 /// than `amount`. This is the only real "spend" protection this module has —
 /// deliberately no cryptography beyond the ordinary input-signature check
-/// every module gets for free from `pub_key` (`InputMeta::pub_key`), no
-/// blind signatures, no DKG key material.
+/// every module gets for free from `pub_key` (via `InputMeta.auth`'s
+/// `InputAuth::Key`), no blind signatures, no DKG key material.
 ///
 /// Declares real backing (`Amounts::new_custom(faucet_unit(), amount)`) to
 /// core, exactly like a `mintv2` note spend — this is what a same-transaction

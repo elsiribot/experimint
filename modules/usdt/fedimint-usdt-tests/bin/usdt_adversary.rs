@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The no-funds attacks (need no on-chain deposit): each is a pure fed-tx
     // submission of a crafted `UsdtInput::DepositProofV0`.
-    let cases: Vec<(Attack, Vec<Keypair>)> = vec![
+    let cases: Vec<(Attack, Keypair)> = vec![
         (
             attacks::attack_forged_balance(
                 usdt_contract,
@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
                 block,
                 UsdtAmount(999_999_999_999),
             ),
-            vec![claim_keypair_b],
+            claim_keypair_b,
         ),
         (
             attacks::attack_wrong_account(
@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
                 block,
                 UsdtAmount(500_000_000),
             ),
-            vec![claim_keypair_b],
+            claim_keypair_b,
         ),
         (
             attacks::attack_unanchored(
@@ -138,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
                 block + 10_000,
                 UsdtAmount(500_000_000),
             ),
-            vec![claim_keypair_b],
+            claim_keypair_b,
         ),
         (
             attacks::attack_forged_header(
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
                 block,
                 UsdtAmount(500_000_000),
             ),
-            vec![claim_keypair_b],
+            claim_keypair_b,
         ),
         (
             attacks::attack_oversize(
@@ -158,18 +158,18 @@ async fn main() -> anyhow::Result<()> {
                 block,
                 UsdtAmount(500_000_000),
             ),
-            vec![claim_keypair_b],
+            claim_keypair_b,
         ),
     ];
 
     let attack_count = cases.len();
     println!("\n== deposit-by-proof adversary: {attack_count} no-funds attacks ==");
     let mut breaches = 0usize;
-    for (attack, keys) in cases {
+    for (attack, key) in cases {
         let name = attack.name;
         let declared = attack.declared;
         match usdt
-            .submit_crafted_input_for_test(attack.input.clone(), keys, declared)
+            .submit_crafted_input_for_test(attack.input.clone(), key, declared)
             .await
         {
             Ok(CraftedInputOutcome::Rejected { reason }) => {

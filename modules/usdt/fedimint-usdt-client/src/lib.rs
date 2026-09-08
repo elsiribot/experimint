@@ -23,8 +23,8 @@ use fedimint_client_module::module::recovery::NoModuleBackup;
 use fedimint_client_module::module::{ClientContext, ClientModule, IClientModule};
 use fedimint_client_module::sm::Context;
 use fedimint_client_module::transaction::{
-    ClientInput, ClientInputBundle, ClientOutput, ClientOutputBundle, ClientOutputSM,
-    TransactionBuilder,
+    ClientInput, ClientInputAuth, ClientInputBundle, ClientOutput, ClientOutputBundle,
+    ClientOutputSM, TransactionBuilder,
 };
 use fedimint_core::core::{Decoder, ModuleKind, OperationId};
 use fedimint_core::db::{
@@ -1048,7 +1048,7 @@ impl UsdtClientModule {
                 proof,
                 fee,
             },
-            keys: vec![*claim_keypair],
+            auth: ClientInputAuth::Key(*claim_keypair),
             amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(UsdtAmount(delta.0 - fee.0))),
         })
     }
@@ -1062,7 +1062,7 @@ impl UsdtClientModule {
     /// the `fedimint-usdt-tests` security harness uses to play a malicious
     /// client against the deposit-by-proof flow: it replicates exactly what
     /// [`Self::submit_deposit_proof_input`] does, but with a caller-
-    /// supplied `input`, `keys`, and `declared` value rather than a
+    /// supplied `input`, `key`, and `declared` value rather than a
     /// server-validated one.
     ///
     /// Returns [`CraftedInputOutcome::Rejected`] (the guardians' rejection
@@ -1085,12 +1085,12 @@ impl UsdtClientModule {
     pub async fn submit_crafted_input_for_test(
         &self,
         input: UsdtInput,
-        keys: Vec<Keypair>,
+        key: Keypair,
         declared: UsdtAmount,
     ) -> anyhow::Result<CraftedInputOutcome> {
         let client_input = ClientInput {
             input,
-            keys,
+            auth: ClientInputAuth::Key(key),
             amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(declared)),
         };
 
@@ -1581,12 +1581,12 @@ mod tests {
     use fedimint_derive_secret::DerivableSecret;
 
     use super::{
-        Amount, Amounts, Database, DepositFeeQuoteResponse, DepositProof, DepositStatusResponse,
-        EvmAddress, FEE_QUOTE_UNAVAILABLE_MESSAGE, IDatabaseTransactionOpsCoreTyped, Keypair,
-        OutPoint, PeerId, PoolStateResponse, RefundStatusResponse, SECP256K1, StatusResponse,
-        USDT_UNIT, UsdtAmount, UsdtClientModule, UsdtFederationApi, UsdtInput,
-        UserOpStatusResponse, WithdrawFeeQuoteResponse, WithdrawalStatusResponse, check_fee_cap,
-        ensure_fee_quote_available, secp256k1,
+        Amount, Amounts, ClientInputAuth, Database, DepositFeeQuoteResponse, DepositProof,
+        DepositStatusResponse, EvmAddress, FEE_QUOTE_UNAVAILABLE_MESSAGE,
+        IDatabaseTransactionOpsCoreTyped, Keypair, OutPoint, PeerId, PoolStateResponse,
+        RefundStatusResponse, SECP256K1, StatusResponse, USDT_UNIT, UsdtAmount, UsdtClientModule,
+        UsdtFederationApi, UsdtInput, UserOpStatusResponse, WithdrawFeeQuoteResponse,
+        WithdrawalStatusResponse, check_fee_cap, ensure_fee_quote_available, secp256k1,
     };
     use crate::db::{ClaimKeyKey, NextDepositIndexKey};
 
@@ -1664,11 +1664,14 @@ mod tests {
                 panic!("deposit_proof_input must build a DepositProofV0 input")
             }
         }
-        assert_eq!(
-            input.keys,
-            vec![keypair],
-            "the input must be signed by the claim key"
-        );
+        match input.auth {
+            ClientInputAuth::Key(kp) => {
+                assert_eq!(kp, keypair, "the input must be signed by the claim key");
+            }
+            ClientInputAuth::Witness(_) => {
+                panic!("deposit_proof_input must authorize with a single keypair")
+            }
+        }
         assert_eq!(
             input.amounts,
             Amounts::new_custom(USDT_UNIT, Amount::from_msats(delta.0 - fee.0)),

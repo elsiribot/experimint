@@ -1737,8 +1737,8 @@ pub enum UsdtInput {
     /// and yields a zero delta -- an attacker cannot credit funds they cannot
     /// also derive a `claim_pk` for. Only the newly-proven delta over the
     /// account's existing high-water `credited` is credited, and core verifies
-    /// the fedimint transaction is signed by `InputMeta.pub_key` = `claim_pk`,
-    /// so only the depositor can spend it.
+    /// the fedimint transaction is signed by `claim_pk` (via `InputMeta.auth`'s
+    /// `InputAuth::Key`), so only the depositor can spend it.
     ///
     /// `fee` (in the same [`UsdtAmount`] unit, mirroring
     /// [`UsdtOutputV0::max_fee`] on the withdrawal side)

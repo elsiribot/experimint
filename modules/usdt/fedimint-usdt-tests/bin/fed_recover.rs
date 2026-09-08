@@ -56,8 +56,8 @@ fn usdt_inventory(cfg_dir: &Path, key_dirs: &[PathBuf]) -> anyhow::Result<()> {
 
     use cggmp21::key_share::reconstruct_secret_key;
     use fedimint_threshold_ecdsa::KeyShare;
-    use fedimint_usdt_server::config::UsdtConfigConsensus;
     use fedimint_usdt_common::derive_pool_account;
+    use fedimint_usdt_server::config::UsdtConfigConsensus;
 
     let consensus: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(cfg_dir.join("consensus.json"))?)?;
@@ -139,7 +139,10 @@ async fn main() -> anyhow::Result<()> {
             )
         }
         Some("sweep") => {
-            ensure!(args.len() >= 9, "sweep <dir> <dest> <fee_sats> <priv1..priv5+>");
+            ensure!(
+                args.len() >= 9,
+                "sweep <dir> <dest> <fee_sats> <priv1..priv5+>"
+            );
             sweep(
                 Path::new(&args[2]),
                 &args[3],
@@ -148,7 +151,9 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
-        _ => anyhow::bail!("usage: fed-recover inventory|usdt-inventory|gen-keys|gen-evm|eth-addr|sweep ..."),
+        _ => anyhow::bail!(
+            "usage: fed-recover inventory|usdt-inventory|gen-keys|gen-evm|eth-addr|sweep ..."
+        ),
     }
 }
 
@@ -160,8 +165,9 @@ fn wallet_consensus_cfg(dir: &Path) -> anyhow::Result<WalletConfigConsensus> {
         .as_str()
         .context("missing walletv2 module config")?;
     let bytes = hex::decode(hex_cfg)?;
-    let cfg = WalletConfigConsensus::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
-        .context("decoding WalletConfigConsensus")?;
+    let cfg =
+        WalletConfigConsensus::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+            .context("decoding WalletConfigConsensus")?;
     ensure!(cfg.network == Network::Bitcoin, "expected mainnet config");
     Ok(cfg)
 }
@@ -188,7 +194,11 @@ async fn federation_wallet(dir: &Path) -> anyhow::Result<FederationWallet> {
         .context("no FederationWallet record — wallet may be empty")?;
 
     // Count stragglers (unclaimed deposit outputs) for the report.
-    let outputs = dbtx.find_by_prefix(&OutputPrefix).await.collect::<Vec<_>>().await;
+    let outputs = dbtx
+        .find_by_prefix(&OutputPrefix)
+        .await
+        .collect::<Vec<_>>()
+        .await;
     let spent = dbtx
         .find_by_prefix(&SpentOutputPrefix)
         .await
@@ -226,13 +236,14 @@ fn gen_keys(out_dir: &Path) -> anyhow::Result<()> {
     let secp = Secp256k1::new();
     let (sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
     let key_path = out_dir.join("btc-recovery.key");
-    ensure!(!key_path.exists(), "refusing to overwrite {}", key_path.display());
+    ensure!(
+        !key_path.exists(),
+        "refusing to overwrite {}",
+        key_path.display()
+    );
     std::fs::write(&key_path, format!("{}\n", sk.display_secret()))?;
     std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-    let addr = Address::p2wpkh(
-        &bitcoin::CompressedPublicKey(pk),
-        Network::Bitcoin,
-    );
+    let addr = Address::p2wpkh(&bitcoin::CompressedPublicKey(pk), Network::Bitcoin);
     println!("recovery address: {addr}");
     println!("key written to:   {} (0600)", key_path.display());
     Ok(())
@@ -298,7 +309,11 @@ async fn sweep(
         let base_pk = sk.public_key(&secp);
         let peer: Option<(&PeerId, &PublicKey)> =
             cfg.bitcoin_pks.iter().find(|(_, pk)| **pk == base_pk);
-        ensure!(peer.is_some(), "{} key not in federation pk set", dir.display());
+        ensure!(
+            peer.is_some(),
+            "{} key not in federation pk set",
+            dir.display()
+        );
         let tweaked_sk = sk.add_tweak(&scalar).context("tweak sk")?;
         let tweaked_pk = tweak_public_key(&base_pk, &wallet.tweak);
         assert_eq!(tweaked_sk.public_key(&secp), tweaked_pk, "tweak mismatch");
@@ -316,7 +331,13 @@ async fn sweep(
 
     // Sanity: verify the tx spends the recorded outpoint script.
     let expected_spk = descriptor(&cfg.bitcoin_pks, &wallet.tweak).script_pubkey();
-    eprintln!("spending {} ({} -> {} + {} fee)", wallet.outpoint, wallet.value, send_value, Amount::from_sat(fee_sats));
+    eprintln!(
+        "spending {} ({} -> {} + {} fee)",
+        wallet.outpoint,
+        wallet.value,
+        send_value,
+        Amount::from_sat(fee_sats)
+    );
     eprintln!("input script_pubkey: {}", expected_spk);
     eprintln!("txid: {}", tx.compute_txid());
     println!("{}", bitcoin::consensus::encode::serialize_hex(&tx));
@@ -330,7 +351,11 @@ fn gen_evm(out_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(out_dir)?;
     let (sk, pk) = Secp256k1::new().generate_keypair(&mut rand::thread_rng());
     let key_path = out_dir.join("evm-recovery.key");
-    ensure!(!key_path.exists(), "refusing to overwrite {}", key_path.display());
+    ensure!(
+        !key_path.exists(),
+        "refusing to overwrite {}",
+        key_path.display()
+    );
     std::fs::write(&key_path, format!("{}\n", sk.display_secret()))?;
     std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
     println!("evm address:    {}", fedimint_usdt_common::evm_address(&pk));
@@ -341,7 +366,10 @@ fn gen_evm(out_dir: &Path) -> anyhow::Result<()> {
 /// Print the EVM address for a hex secp256k1 key read from a file. Address
 /// only; the key is never printed.
 fn eth_addr(key_path: &Path) -> anyhow::Result<()> {
-    let hex = std::fs::read_to_string(key_path)?.trim().trim_start_matches("0x").to_string();
+    let hex = std::fs::read_to_string(key_path)?
+        .trim()
+        .trim_start_matches("0x")
+        .to_string();
     let sk = bitcoin::secp256k1::SecretKey::from_slice(&hex::decode(hex)?)?;
     let pk = sk.public_key(&Secp256k1::new());
     println!("{}", fedimint_usdt_common::evm_address(&pk));

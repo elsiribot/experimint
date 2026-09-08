@@ -17,10 +17,16 @@ use bitcoin::{
 
 fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    ensure!(a.len() == 7, "btc-send <key_file> <txid> <vout> <value_sat> <dest> <fee_sat>");
+    ensure!(
+        a.len() == 7,
+        "btc-send <key_file> <txid> <vout> <value_sat> <dest> <fee_sat>"
+    );
     let secp = Secp256k1::new();
 
-    let hexk = std::fs::read_to_string(&a[1])?.trim().trim_start_matches("0x").to_string();
+    let hexk = std::fs::read_to_string(&a[1])?
+        .trim()
+        .trim_start_matches("0x")
+        .to_string();
     let sk = bitcoin::secp256k1::SecretKey::from_slice(&hex::decode(hexk)?)?;
     let privkey = PrivateKey::new(sk, Network::Bitcoin);
     let pk = CompressedPublicKey::from_private_key(&secp, &privkey)?;
@@ -44,14 +50,17 @@ fn main() -> anyhow::Result<()> {
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: Witness::new(),
         }],
-        output: vec![TxOut { value: send, script_pubkey: dest.script_pubkey() }],
+        output: vec![TxOut {
+            value: send,
+            script_pubkey: dest.script_pubkey(),
+        }],
     };
 
     // rust-bitcoin derives the BIP143 scriptCode internally; pass the p2wpkh
     // script_pubkey (OP_0 <20-byte keyhash>), not the derived p2pkh code.
     let spk = from_addr.script_pubkey();
-    let sighash = SighashCache::new(&tx)
-        .p2wpkh_signature_hash(0, &spk, prev_value, EcdsaSighashType::All)?;
+    let sighash =
+        SighashCache::new(&tx).p2wpkh_signature_hash(0, &spk, prev_value, EcdsaSighashType::All)?;
     let sig = secp.sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sk);
     let mut witness = Witness::new();
     let mut sig_ser = sig.serialize_der().to_vec();
@@ -61,7 +70,10 @@ fn main() -> anyhow::Result<()> {
     tx.input[0].witness = witness;
 
     eprintln!("from:  {from_addr}");
-    eprintln!("spend: {} -> {} ({} to {}, {} fee)", outpoint, dest, send, dest, fee);
+    eprintln!(
+        "spend: {} -> {} ({} to {}, {} fee)",
+        outpoint, dest, send, dest, fee
+    );
     eprintln!("txid:  {}", tx.compute_txid());
     println!("{}", bitcoin::consensus::encode::serialize_hex(&tx));
     Ok(())

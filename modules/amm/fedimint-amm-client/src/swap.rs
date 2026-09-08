@@ -50,7 +50,7 @@ use fedimint_amm_common::types::AmmInput;
 use fedimint_api_client::api::DynModuleApi;
 use fedimint_client_module::DynGlobalClientContext;
 use fedimint_client_module::sm::{ClientSMDatabaseTransaction, State, StateTransition};
-use fedimint_client_module::transaction::{ClientInput, ClientInputBundle};
+use fedimint_client_module::transaction::{ClientInput, ClientInputAuth, ClientInputBundle};
 use fedimint_core::core::OperationId;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped as _;
 use fedimint_core::encoding::{Decodable, Encodable};
@@ -377,7 +377,7 @@ fn build_claim_input(keypair: Keypair, unit: AmountUnit, balance: Amount) -> Cli
             pubkey: keypair.public_key(),
             unit,
         },
-        keys: vec![keypair],
+        auth: ClientInputAuth::Key(keypair),
         amounts: Amounts::new_custom(unit, balance),
     }
 }
@@ -697,7 +697,12 @@ mod tests {
 
         let input = build_claim_input(keypair, unit, balance);
 
-        assert_eq!(input.keys, vec![keypair]);
+        match input.auth {
+            ClientInputAuth::Key(kp) => assert_eq!(kp, keypair),
+            ClientInputAuth::Witness(_) => {
+                panic!("build_claim_input must authorize with a single keypair")
+            }
+        }
         assert_eq!(input.amounts, Amounts::new_custom(unit, balance));
         match input.input {
             AmmInput::ClaimBalanceV0 {

@@ -29,7 +29,10 @@ fn signer(p: &str) -> anyhow::Result<PrivateKeySigner> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    ensure!(a.len() == 7, "erc20-send <from_key> <gas_key> <token> <to> <amount> <rpc>");
+    ensure!(
+        a.len() == 7,
+        "erc20-send <from_key> <gas_key> <token> <to> <amount> <rpc>"
+    );
     let from = signer(&a[1])?;
     let gas = signer(&a[2])?;
     let token = Address::from_str(&a[3])?;
@@ -44,14 +47,18 @@ async fn main() -> anyhow::Result<()> {
     if bal < need {
         let gw = EthereumWallet::from(gas.clone());
         let gprov = ProviderBuilder::new().wallet(gw).connect(rpc).await?;
-        let tx = TransactionRequest::default().with_to(from.address()).with_value(need - bal);
+        let tx = TransactionRequest::default()
+            .with_to(from.address())
+            .with_value(need - bal);
         let r = gprov.send_transaction(tx).await?.get_receipt().await?;
         println!("gas fund tx: {}", r.transaction_hash);
     }
     let fw = EthereumWallet::from(from.clone());
     let fprov = ProviderBuilder::new().wallet(fw).connect(rpc).await?;
     let data = IERC20::transferCall { to, amount }.abi_encode();
-    let tx = TransactionRequest::default().with_to(token).with_input(Bytes::from(data));
+    let tx = TransactionRequest::default()
+        .with_to(token)
+        .with_input(Bytes::from(data));
     let r = fprov.send_transaction(tx).await?.get_receipt().await?;
     println!("transfer tx: {} status {}", r.transaction_hash, r.status());
     let dest_bal = IERC20::new(token, &prov).balanceOf(to).call().await?;

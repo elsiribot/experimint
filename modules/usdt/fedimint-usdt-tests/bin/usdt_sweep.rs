@@ -46,26 +46,35 @@ sol! {
 }
 
 fn read_signer(path: &str) -> anyhow::Result<PrivateKeySigner> {
-    let hex = std::fs::read_to_string(path)?.trim().trim_start_matches("0x").to_string();
+    let hex = std::fs::read_to_string(path)?
+        .trim()
+        .trim_start_matches("0x")
+        .to_string();
     Ok(PrivateKeySigner::from_slice(&hex::decode(hex)?)?)
 }
 
 fn cfg(cfg_dir: &str) -> anyhow::Result<UsdtConfigConsensus> {
-    let consensus: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{cfg_dir}/consensus.json"))?)?;
+    let consensus: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!(
+        "{cfg_dir}/consensus.json"
+    ))?)?;
     let hexc = consensus["modules"][USDT_MODULE_INSTANCE.to_string()]["config"]
         .as_str()
         .context("missing usdt module config")?;
-    UsdtConfigConsensus::consensus_decode_whole(&hex::decode(hexc)?, &ModuleDecoderRegistry::default())
-        .context("decode UsdtConfigConsensus")
+    UsdtConfigConsensus::consensus_decode_whole(
+        &hex::decode(hexc)?,
+        &ModuleDecoderRegistry::default(),
+    )
+    .context("decode UsdtConfigConsensus")
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    ensure!(a.len() == 7, "usage: usdt-sweep <plan|run> <cfg_dir> <owner_key> <bc_key> <dest> <rpc>");
-    let (mode, cfg_dir, owner_key, bc_key, dest, rpc) =
-        (&a[1], &a[2], &a[3], &a[4], &a[5], &a[6]);
+    ensure!(
+        a.len() == 7,
+        "usage: usdt-sweep <plan|run> <cfg_dir> <owner_key> <bc_key> <dest> <rpc>"
+    );
+    let (mode, cfg_dir, owner_key, bc_key, dest, rpc) = (&a[1], &a[2], &a[3], &a[4], &a[5], &a[6]);
 
     let c = cfg(cfg_dir)?;
     let owner = read_signer(owner_key)?;
@@ -73,10 +82,20 @@ async fn main() -> anyhow::Result<()> {
     let dest = Address::from_str(dest)?;
     let factory = Address::from(c.account_factory.0);
     let usdt = Address::from(c.usdt_contract.0);
-    let pool = Address::from(derive_pool_account(&c.group_public_key, c.account_factory, c.simple_account_impl).0);
+    let pool = Address::from(
+        derive_pool_account(
+            &c.group_public_key,
+            c.account_factory,
+            c.simple_account_impl,
+        )
+        .0,
+    );
     let owner_eoa = Address::from(evm_address(&c.group_public_key).0);
 
-    ensure!(owner.address() == owner_eoa, "owner key does not match consensus group EOA");
+    ensure!(
+        owner.address() == owner_eoa,
+        "owner key does not match consensus group EOA"
+    );
 
     let provider = ProviderBuilder::new().connect(rpc).await?;
     let usdt_c = IERC20::new(usdt, &provider);
@@ -90,7 +109,10 @@ async fn main() -> anyhow::Result<()> {
     println!("chain_id:        {chain_id}");
     println!("owner EOA:       {owner_eoa}  (ETH {})", owner_eth);
     println!("broadcaster EOA: {}  (ETH {})", bc.address(), bc_eth);
-    println!("pool account:    {pool}  (deployed: {})", !pool_code.is_empty());
+    println!(
+        "pool account:    {pool}  (deployed: {})",
+        !pool_code.is_empty()
+    );
     println!("pool USDT:       {pool_usdt}");
     println!("dest:            {dest}");
     println!("gas price:       {gas_price} wei");
@@ -114,7 +136,9 @@ async fn main() -> anyhow::Result<()> {
     if owner_eth < owner_need {
         let top_up = owner_need - owner_eth;
         println!("\nfunding owner {top_up} wei from broadcaster...");
-        let tx = TransactionRequest::default().with_to(owner_eoa).with_value(top_up);
+        let tx = TransactionRequest::default()
+            .with_to(owner_eoa)
+            .with_value(top_up);
         let r = bc_prov.send_transaction(tx).await?.get_receipt().await?;
         println!("  fund tx: {}", r.transaction_hash);
     }
@@ -133,27 +157,46 @@ async fn main() -> anyhow::Result<()> {
             salt: U256::from_be_bytes(pool_salt()),
         }
         .abi_encode();
-        let tx = TransactionRequest::default().with_to(factory).with_input(Bytes::from(data));
+        let tx = TransactionRequest::default()
+            .with_to(factory)
+            .with_input(Bytes::from(data));
         let r = owner_prov.send_transaction(tx).await?.get_receipt().await?;
-        println!("  deploy tx: {} (status {})", r.transaction_hash, r.status());
+        println!(
+            "  deploy tx: {} (status {})",
+            r.transaction_hash,
+            r.status()
+        );
         let code = provider.get_code_at(pool).await?;
         ensure!(!code.is_empty(), "account still not deployed at {pool}");
     }
 
     // 3. execute(usdt, 0, transfer(dest, pool_usdt)) as the owner.
     println!("sweeping {pool_usdt} USDT -> {dest}...");
-    let transfer = IERC20::transferCall { to: dest, amount: pool_usdt }.abi_encode();
+    let transfer = IERC20::transferCall {
+        to: dest,
+        amount: pool_usdt,
+    }
+    .abi_encode();
     let exec = ISimpleAccount::executeCall {
         dest: usdt,
         value: U256::ZERO,
         func: Bytes::from(transfer),
     }
     .abi_encode();
-    let tx = TransactionRequest::default().with_to(pool).with_input(Bytes::from(exec));
+    let tx = TransactionRequest::default()
+        .with_to(pool)
+        .with_input(Bytes::from(exec));
     let r = owner_prov.send_transaction(tx).await?.get_receipt().await?;
-    println!("  usdt sweep tx: {} (status {})", r.transaction_hash, r.status());
+    println!(
+        "  usdt sweep tx: {} (status {})",
+        r.transaction_hash,
+        r.status()
+    );
     let after = usdt_c.balanceOf(pool).call().await?;
-    ensure!(after == U256::ZERO, "pool still holds {after} USDT after sweep");
+    ensure!(
+        after == U256::ZERO,
+        "pool still holds {after} USDT after sweep"
+    );
     println!("  pool USDT now: {after}");
 
     // 4. Return the owner EOA's leftover ETH to the BROADCASTER (not to dest):
@@ -170,7 +213,10 @@ async fn main() -> anyhow::Result<()> {
             .with_max_fee_per_gas(gp.to::<u128>())
             .with_max_priority_fee_per_gas((gp / U256::from(10u64)).to::<u128>());
         let rr = owner_prov.send_transaction(tx).await?.get_receipt().await?;
-        println!("  returned owner leftover {send} wei to broadcaster: {}", rr.transaction_hash);
+        println!(
+            "  returned owner leftover {send} wei to broadcaster: {}",
+            rr.transaction_hash
+        );
     }
     let bc_final = provider.get_balance(bc.address()).await?;
     println!("  broadcaster ETH left in place for the new fed: {bc_final} wei");

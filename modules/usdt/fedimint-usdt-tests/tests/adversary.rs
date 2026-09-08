@@ -139,7 +139,7 @@ async fn usdt_balance(client: &ClientHandleArc) -> anyhow::Result<Amount> {
 /// Drives a single adversarial [`Attack`] to its verdict against the hermetic
 /// fed and asserts the defense held:
 /// - scripts the mock's block-hash if the attack needs a KNOWN anchor;
-/// - submits the crafted input via the client tx API, signed by `keys`;
+/// - submits the crafted input via the client tx API, signed by `key`;
 /// - if the fed ACCEPTED it (minted value): panic with a `SECURITY FINDING:`;
 /// - retries transient pre-convergence rejections when an anchor was scripted;
 /// - asserts the terminal rejection is the expected class and that the client's
@@ -148,7 +148,7 @@ async fn assert_attack_rejected(
     usdt: &UsdtClientModule,
     client: &ClientHandleArc,
     mock: &MockEvmRpc,
-    keys: Vec<Keypair>,
+    key: Keypair,
     attack: Attack,
 ) -> anyhow::Result<()> {
     if let Some((block, hash)) = attack.hermetic_anchor {
@@ -160,7 +160,7 @@ async fn assert_attack_rejected(
 
     loop {
         let outcome = usdt
-            .submit_crafted_input_for_test(attack.input.clone(), keys.clone(), attack.declared)
+            .submit_crafted_input_for_test(attack.input.clone(), key, attack.declared)
             .await?;
 
         match outcome {
@@ -259,7 +259,7 @@ async fn attack_02_forged_balance_rejected() -> anyhow::Result<()> {
         block,
         UsdtAmount(999_999_999_999),
     );
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair], attack).await?;
+    assert_attack_rejected(&usdt, &client, &mock, claim_keypair, attack).await?;
 
     drop(fed);
     Ok(())
@@ -287,7 +287,7 @@ async fn attack_03_wrong_account_credits_nothing() -> anyhow::Result<()> {
         block,
         UsdtAmount(500_000_000),
     );
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair_b], attack).await?;
+    assert_attack_rejected(&usdt, &client, &mock, claim_keypair_b, attack).await?;
 
     drop(fed);
     Ok(())
@@ -310,7 +310,7 @@ async fn attack_04_unanchored_block_rejected() -> anyhow::Result<()> {
         block + 10_000,
         UsdtAmount(500_000_000),
     );
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair], attack).await?;
+    assert_attack_rejected(&usdt, &client, &mock, claim_keypair, attack).await?;
 
     drop(fed);
     Ok(())
@@ -332,7 +332,7 @@ async fn attack_05_forged_header_rejected() -> anyhow::Result<()> {
         block,
         UsdtAmount(500_000_000),
     );
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair], attack).await?;
+    assert_attack_rejected(&usdt, &client, &mock, claim_keypair, attack).await?;
 
     drop(fed);
     Ok(())
@@ -368,7 +368,7 @@ async fn attack_06_replay_rejected() -> anyhow::Result<()> {
         attacks::synthetic_deposit_proof(USDT_CONTRACT, account, deposit_amount().0, block);
     mock.set_block_hash(block, hash);
     let attack = attacks::attack_replay(claim_keypair.public_key(), proof, deposit_amount());
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair], attack).await?;
+    assert_attack_rejected(&usdt, &client, &mock, claim_keypair, attack).await?;
 
     drop(fed);
     Ok(())
@@ -390,7 +390,7 @@ async fn attack_08_oversize_rejected() -> anyhow::Result<()> {
         block,
         UsdtAmount(500_000_000),
     );
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair], attack).await?;
+    assert_attack_rejected(&usdt, &client, &mock, claim_keypair, attack).await?;
 
     drop(fed);
     Ok(())
@@ -433,7 +433,7 @@ async fn attack_09_stale_growth_rejected() -> anyhow::Result<()> {
         other_block,
         UsdtAmount(deposit_amount().0 / 2),
     );
-    assert_attack_rejected(&usdt, &client, &mock, vec![claim_keypair], attack).await?;
+    assert_attack_rejected(&usdt, &client, &mock, claim_keypair, attack).await?;
 
     drop(fed);
     Ok(())

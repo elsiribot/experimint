@@ -32,7 +32,7 @@ use fedimint_core::envs::{
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     Amounts, ApiEndpoint, ApiError, ApiVersion, Asset, CORE_CONSENSUS_VERSION,
-    CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
+    CoreConsensusVersion, InputAuth, InputMeta, ModuleConsensusVersion, ModuleInit,
     SupportedModuleApiVersions, TransactionItemAmounts, api_endpoint,
 };
 use fedimint_core::net::auth::check_auth;
@@ -2504,14 +2504,15 @@ impl ServerModule for Usdt {
                 // reissued e-cash. Look up (and REMOVE) the refund record so it
                 // can be claimed EXACTLY ONCE -- a second `RefundV0` for the
                 // same `out_point` finds it absent and errors below. Returning
-                // `refund.refund_pubkey` as `InputMeta.pub_key` makes the
-                // fedimint transaction framework verify the claim is signed by
-                // the original withdrawer's client-controlled refund key, so
-                // NO ONE else can claim it (never by `out_point` alone). The
-                // reissued amount balances against the mint primary module,
-                // which mints `refund.amount` of `USDT_UNIT` e-cash; `fees` is
-                // `ZERO` (the incurred gas was already netted out when the
-                // refund was created). A pure consensus-DB read+remove: every
+                // `refund.refund_pubkey` as `InputMeta.auth`'s
+                // `InputAuth::Key` makes the fedimint transaction framework
+                // verify the claim is signed by the original withdrawer's
+                // client-controlled refund key, so NO ONE else can claim it
+                // (never by `out_point` alone). The reissued amount balances
+                // against the mint primary module, which mints
+                // `refund.amount` of `USDT_UNIT` e-cash; `fees` is `ZERO`
+                // (the incurred gas was already netted out when the refund
+                // was created). A pure consensus-DB read+remove: every
                 // guardian computes the identical `InputMeta` and clears the
                 // same record.
                 let Some(refund) = dbtx.get_value(&RefundKey(*out_point)).await else {
@@ -2529,7 +2530,7 @@ impl ServerModule for Usdt {
                         amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(refund.amount)),
                         fees: Amounts::ZERO,
                     },
-                    pub_key: refund.refund_pubkey,
+                    auth: InputAuth::Key(refund.refund_pubkey),
                 })
             }
             UsdtInput::DepositProofV0 {
@@ -4569,7 +4570,7 @@ impl Usdt {
                 amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(UsdtAmount(delta))),
                 fees: Amounts::new_custom(USDT_UNIT, usdt_amount(fee)),
             },
-            pub_key: *claim_pk,
+            auth: InputAuth::Key(*claim_pk),
         })
     }
 
@@ -10427,7 +10428,8 @@ mod tests {
             "the deposit fee is declared as the input's fees"
         );
         assert_eq!(
-            meta.pub_key, claim_pk,
+            meta.auth,
+            InputAuth::Key(claim_pk),
             "e-cash is bound to the depositor's claim key"
         );
         dbtx.commit_tx().await;
@@ -18089,7 +18091,7 @@ mod tests {
             Amounts::new_custom(USDT_UNIT, usdt_amount(UsdtAmount(3_100_000)))
         );
         assert_eq!(meta.amount.fees, Amounts::ZERO);
-        assert_eq!(meta.pub_key, refund_pubkey);
+        assert_eq!(meta.auth, InputAuth::Key(refund_pubkey));
         // The record is gone -> claimed exactly once.
         assert!(
             dbtx.get_value(&RefundKey(out_point)).await.is_none(),
@@ -18110,9 +18112,9 @@ mod tests {
 
     /// **Security finding 09, Step 4.** The claim is authorized ONLY by the
     /// refund pubkey: `process_input` returns exactly that pubkey as
-    /// `InputMeta.pub_key`, which the fedimint transaction framework verifies
-    /// the input signature against -- so a wrong signer's transaction cannot
-    /// balance/settle.
+    /// `InputMeta.auth`'s `InputAuth::Key`, which the fedimint transaction
+    /// framework verifies the input signature against -- so a wrong signer's
+    /// transaction cannot balance/settle.
     #[tokio::test]
     async fn refund_claim_requires_correct_key() {
         let module = test_module_with_block_count(4, 0).await;
@@ -18145,11 +18147,12 @@ mod tests {
             .await
             .expect("claim resolves");
         assert_eq!(
-            meta.pub_key, refund_pubkey,
+            meta.auth,
+            InputAuth::Key(refund_pubkey),
             "process_input must return the withdrawal's own refund_pubkey so only that key can \
              sign the claim"
         );
-        assert_ne!(meta.pub_key, sample_claim_pk());
+        assert_ne!(meta.auth, InputAuth::Key(sample_claim_pk()));
     }
 
     /// **Security finding 09, Step 5 (SOLVENCY-CRITICAL).** Net assets are

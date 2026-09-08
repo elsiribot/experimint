@@ -36,8 +36,8 @@ use fedimint_client_module::module::{
 };
 use fedimint_client_module::sm::{Context, DynState, ModuleNotifier, State, StateTransition};
 use fedimint_client_module::transaction::{
-    ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle,
-    ClientOutputSM, TransactionBuilder,
+    ClientInput, ClientInputAuth, ClientInputBundle, ClientInputSM, ClientOutput,
+    ClientOutputBundle, ClientOutputSM, TransactionBuilder,
 };
 use fedimint_client_module::{DynGlobalClientContext, sm_enum_variant_translation};
 use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
@@ -217,7 +217,7 @@ impl ClientModule for FaucetClientModule {
                         pub_key: self.key.public_key(),
                     },
                     amounts: Amounts::new_custom(unit, missing_input_amount),
-                    keys: vec![self.key],
+                    auth: ClientInputAuth::Key(self.key),
                 };
 
                 let input_sm = ClientInputSM {

@@ -42,7 +42,7 @@ use fedimint_core::db::{
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     AmountUnit, Amounts, ApiEndpoint, ApiError, ApiVersion, CORE_CONSENSUS_VERSION,
-    CoreConsensusVersion, InputMeta, ModuleConsensusVersion, ModuleInit,
+    CoreConsensusVersion, InputAuth, InputMeta, ModuleConsensusVersion, ModuleInit,
     SupportedModuleApiVersions, TransactionItemAmounts, api_endpoint,
 };
 use fedimint_core::{Amount, InPoint, NumPeers, OutPoint, PeerId, push_db_pair_items};
@@ -862,7 +862,7 @@ impl ServerModule for Amm {
                         amounts: Amounts::new_custom(*unit, entry.amount),
                         fees: Amounts::ZERO,
                     },
-                    pub_key: *pubkey,
+                    auth: InputAuth::Key(*pubkey),
                 })
             }
             AmmInput::WithdrawV0 {
@@ -954,7 +954,7 @@ impl ServerModule for Amm {
                         amounts,
                         fees: Amounts::ZERO,
                     },
-                    pub_key: *owner_pk,
+                    auth: InputAuth::Key(*owner_pk),
                 })
             }
             AmmInput::Default { .. } => Err(AmmInputError::UnknownVariant),

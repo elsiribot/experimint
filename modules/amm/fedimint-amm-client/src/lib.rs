@@ -64,8 +64,8 @@ use fedimint_client_module::module::recovery::NoModuleBackup;
 use fedimint_client_module::module::{ClientContext, ClientModule, PrimaryModuleSupport};
 use fedimint_client_module::sm::{Context, DynState, ModuleNotifier, State, StateTransition};
 use fedimint_client_module::transaction::{
-    ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle,
-    ClientOutputSM, TransactionBuilder,
+    ClientInput, ClientInputAuth, ClientInputBundle, ClientInputSM, ClientOutput,
+    ClientOutputBundle, ClientOutputSM, TransactionBuilder,
 };
 use fedimint_client_module::{DynGlobalClientContext, sm_enum_variant_translation};
 use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
@@ -846,7 +846,7 @@ impl AmmClientModule {
 
         let client_input = ClientInput {
             input,
-            keys: vec![owner_keypair],
+            auth: ClientInputAuth::Key(owner_keypair),
             amounts,
         };
 
@@ -1219,7 +1219,7 @@ async fn claim_recovered_balance(
     let input = AmmInput::ClaimBalanceV0 { pubkey, unit };
     let client_input = ClientInput {
         input,
-        keys: vec![keypair],
+        auth: ClientInputAuth::Key(keypair),
         amounts: Amounts::new_custom(unit, amount),
     };
 

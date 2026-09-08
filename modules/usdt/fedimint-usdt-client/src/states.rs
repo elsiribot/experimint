@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use fedimint_client_module::DynGlobalClientContext;
 use fedimint_client_module::sm::{ClientSMDatabaseTransaction, DynState, State, StateTransition};
-use fedimint_client_module::transaction::{ClientInput, ClientInputBundle};
+use fedimint_client_module::transaction::{ClientInput, ClientInputAuth, ClientInputBundle};
 use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, OperationId};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::Amounts;
@@ -193,7 +193,7 @@ impl UsdtStateMachine {
                     input: UsdtInput::RefundV0 {
                         out_point: old_state.common.out_point,
                     },
-                    keys: vec![old_state.common.refund_keypair],
+                    auth: ClientInputAuth::Key(old_state.common.refund_keypair),
                     amounts: Amounts::new_custom(USDT_UNIT, usdt_amount(amount)),
                 };
 

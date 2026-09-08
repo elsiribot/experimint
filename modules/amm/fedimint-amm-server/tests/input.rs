@@ -13,8 +13,8 @@ use fedimint_amm_server::Amm;
 use fedimint_amm_server::db::{BalanceEntry, BalanceKey, LpPosition, LpPositionKey, Pool, PoolKey};
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
-use fedimint_core::module::AmountUnit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_core::module::{AmountUnit, InputAuth};
 use fedimint_core::secp256k1::{self, Keypair, SECP256K1};
 use fedimint_core::{Amount, BitcoinHash, InPoint, NumPeers, PeerId, TransactionId};
 use fedimint_server_core::ServerModule;
@@ -97,8 +97,8 @@ async fn claim_balance_for_nonexistent_balance_fails() {
     assert_eq!(result, Err(AmmInputError::NoSuchBalance));
 }
 
-/// 2. `ClaimBalanceV0` returns `amounts == {unit: stored}`, `pub_key ==
-///    pubkey`, and DELETES the record.
+/// 2. `ClaimBalanceV0` returns `amounts == {unit: stored}`, `auth ==
+///    InputAuth::Key(pubkey)`, and DELETES the record.
 #[tokio::test]
 async fn claim_balance_returns_stored_amount_and_deletes_record() {
     let db = db();
@@ -128,7 +128,7 @@ async fn claim_balance_returns_stored_amount_and_deletes_record() {
         .await
         .expect("claiming an existing balance must succeed");
 
-    assert_eq!(result.pub_key, owner);
+    assert_eq!(result.auth, InputAuth::Key(owner));
     assert_eq!(
         result.amount.amounts.get(&unit(0)),
         Some(&Amount::from_msats(12_345))
@@ -327,7 +327,7 @@ async fn partial_withdraw_debits_reserves_and_keeps_position() {
         .await
         .expect("partial withdraw must succeed");
 
-    assert_eq!(result.pub_key, owner);
+    assert_eq!(result.auth, InputAuth::Key(owner));
     assert_eq!(
         result.amount.amounts.get(&pool.lo()),
         Some(&Amount::from_msats(expected_da))

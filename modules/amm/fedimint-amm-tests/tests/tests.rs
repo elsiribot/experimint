@@ -29,8 +29,8 @@ use fedimint_client::secret::{PlainRootSecretStrategy, RootSecretStrategy};
 use fedimint_client::{ClientHandleArc, RootSecret};
 use fedimint_client_module::secret::DeriveableSecretClientExt;
 use fedimint_client_module::transaction::{
-    ClientInput, ClientInputBundle, ClientOutput, ClientOutputBundle, NeverClientStateMachine,
-    TransactionBuilder,
+    ClientInput, ClientInputAuth, ClientInputBundle, ClientOutput, ClientOutputBundle,
+    NeverClientStateMachine, TransactionBuilder,
 };
 use fedimint_core::Amount;
 use fedimint_core::NumPeersExt as _;
@@ -141,13 +141,13 @@ where
 }
 
 /// Like [`submit_output`], but for a single raw input the caller signs
-/// itself (`keys`) — used for transactions authorised by a keypair the test
+/// itself (`key`) — used for transactions authorised by a keypair the test
 /// generated directly, with no wallet interaction needed to sign it.
 async fn submit_input<I>(
     client: &ClientHandleArc,
     instance_id: ModuleInstanceId,
     input: I,
-    keys: Vec<Keypair>,
+    key: Keypair,
     amounts: Amounts,
     operation_type: &str,
 ) -> anyhow::Result<(OperationId, fedimint_core::OutPointRange)>
@@ -157,7 +157,7 @@ where
     let bundle: ClientInputBundle<I, NeverClientStateMachine> =
         ClientInputBundle::new_no_sm(vec![ClientInput {
             input,
-            keys,
+            auth: ClientInputAuth::Key(key),
             amounts,
         }]);
     let dyn_bundle = bundle.into_dyn(instance_id);
@@ -170,7 +170,7 @@ where
 }
 
 /// Like [`submit_output`]/[`submit_input`] combined: one raw input (signed by
-/// `keys`) and one raw output of a possibly different module, in the same
+/// `key`) and one raw output of a possibly different module, in the same
 /// transaction — used for test 7 (§6.1's overpay-permitted assumption),
 /// which needs `ClaimBalanceV0` (an `amm` input) and a receiving output
 /// (a `faucet` output) to land atomically.
@@ -179,7 +179,7 @@ async fn submit_input_and_output<I, O>(
     client: &ClientHandleArc,
     input_instance_id: ModuleInstanceId,
     input: I,
-    keys: Vec<Keypair>,
+    key: Keypair,
     input_amounts: Amounts,
     output_instance_id: ModuleInstanceId,
     output: O,
@@ -193,7 +193,7 @@ where
     let input_bundle: ClientInputBundle<I, NeverClientStateMachine> =
         ClientInputBundle::new_no_sm(vec![ClientInput {
             input,
-            keys,
+            auth: ClientInputAuth::Key(key),
             amounts: input_amounts,
         }]);
     let output_bundle: ClientOutputBundle<O, NeverClientStateMachine> =
@@ -574,7 +574,7 @@ async fn claim_for_a_non_existent_balance_is_rejected() -> anyhow::Result<()> {
         &client,
         amm_instance_id,
         input,
-        vec![claimant],
+        claimant,
         Amounts::ZERO,
         "claim a non-existent balance",
     )
@@ -803,7 +803,7 @@ async fn overpay_between_tx1_and_tx2_forfeits_only_the_surplus() -> anyhow::Resu
             pubkey: recipient.public_key(),
             unit: faucet_unit(),
         },
-        vec![recipient],
+        recipient,
         Amounts::new_custom(faucet_unit(), original_dy),
         faucet_instance_id,
         fedimint_amm_tests::faucet::common::FaucetOutput::ReceiveV0 {

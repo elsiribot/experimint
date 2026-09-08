@@ -12,10 +12,10 @@
 //! The full intended experimint topology, **eight instances** across the
 //! seven kinds: `walletv2`, **two `mintv2` instances** (BTC unit 0 and USDT
 //! unit 1 — so both peg-in ecash and claimed USDT ecash work), `lnv2`,
-//! `usdt` (against a real local `anvil` with a freshly deployed test ERC-20
-//! + ERC-4337 EntryPoint), `amm`, `meta`, and `multi_sig_stability_pool`
-//! under its **test params** (mock BTC/USD oracle, 15s cycles — no outbound
-//! HTTP, fast feedback for multispend-style clients).
+//! `usdt` (against a real local `anvil` with a freshly deployed test ERC-20 +
+//! ERC-4337 EntryPoint), `amm`, `meta`, and `multi_sig_stability_pool` under
+//! its **test params** (mock BTC/USD oracle, 15s cycles — no outbound HTTP,
+//! fast feedback for multispend-style clients).
 //!
 //! devimint's own config-gen helper cannot express a second instance of one
 //! kind, so this binary spawns the guardians with `pre_dkg` and drives
@@ -105,7 +105,6 @@ async fn main() -> anyhow::Result<()> {
     let (process_mgr, task_group) = cli::setup(args).await?;
 
     let main = async {
-
         info!("Starting bitcoind + anvil...");
         let bitcoind = Bitcoind::new(&process_mgr, false).await?;
         let anvil = Anvil::new(&process_mgr).await?;
@@ -177,8 +176,9 @@ async fn main() -> anyhow::Result<()> {
         let cli_exe = std::env::var("FM_FEDIMINT_CLI_BASE_EXECUTABLE").context(
             "FM_FEDIMINT_CLI_BASE_EXECUTABLE must point at fedimint-cli-experimint (see module docs)",
         )?;
-        let cli_exe = std::fs::canonicalize(&cli_exe)
-            .with_context(|| format!("cannot resolve FM_FEDIMINT_CLI_BASE_EXECUTABLE: {cli_exe}"))?;
+        let cli_exe = std::fs::canonicalize(&cli_exe).with_context(|| {
+            format!("cannot resolve FM_FEDIMINT_CLI_BASE_EXECUTABLE: {cli_exe}")
+        })?;
         let shim_dir = process_mgr.globals.FM_TEST_DIR.join("bin");
         std::fs::create_dir_all(&shim_dir).context("creating PATH shim dir")?;
         let shim = shim_dir.join("fedimint-cli");
@@ -202,8 +202,8 @@ async fn main() -> anyhow::Result<()> {
         // below so the explicit instance list carries identical params.
         let usdt_params =
             ServerModuleInit::default_config_gen_params(&fedimint_usdt_server::UsdtInit::default());
-        let usdt_json = serde_json::to_string(&usdt_params)
-            .context("serializing usdt config-gen params")?;
+        let usdt_json =
+            serde_json::to_string(&usdt_params).context("serializing usdt config-gen params")?;
 
         // The intended experimint topology (README's `set-local-params`
         // example plus spv2): notably TWO `mintv2` instances, one per unit.
@@ -279,11 +279,16 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("========================================================");
         eprintln!("invite code:\n{invite_code}\n");
         eprintln!("join it:");
-        eprintln!("  fedimint-cli-experimint --data-dir <dir> join-federation --invite-code {invite_code}");
+        eprintln!(
+            "  fedimint-cli-experimint --data-dir <dir> join-federation --invite-code {invite_code}"
+        );
         eprintln!("  fedimint-cli-experimint --data-dir <dir> info\n");
         if std::env::var(FM_ENABLE_IROH).is_ok_and(|v| v != "0" && v != "false") {
             eprintln!("iroh fed: clients must resolve the guardians' node ids locally —");
-            eprintln!("either `source {}/env` before running the CLI, or:", process_mgr.globals.FM_TEST_DIR.display());
+            eprintln!(
+                "either `source {}/env` before running the CLI, or:",
+                process_mgr.globals.FM_TEST_DIR.display()
+            );
             eprintln!(
                 "  export FM_IROH_CONNECT_OVERRIDES_PLAIN='{}'\n",
                 std::env::var("FM_IROH_CONNECT_OVERRIDES_PLAIN").unwrap_or_default()
@@ -293,7 +298,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("test USDT token:  {token}");
         eprintln!("4337 EntryPoint:  {entry_point}");
         eprintln!("USDT holder key (anvil account 1, 10_000 USDT): {ANVIL_ACCOUNT_1_PRIVATE_KEY}");
-        eprintln!("topology: 8 instances — walletv2, mintv2(BTC), mintv2(USDT), lnv2, usdt, amm, meta, spv2");
+        eprintln!(
+            "topology: 8 instances — walletv2, mintv2(BTC), mintv2(USDT), lnv2, usdt, amm, meta, spv2"
+        );
         eprintln!("spv2: mock oracle, 15s cycles (test params)");
         eprintln!("\nCtrl-C shuts everything down.");
         eprintln!("========================================================\n");
