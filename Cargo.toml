@@ -8,6 +8,7 @@ members = [
     "modules/amm/fedimint-amm-common",
     "modules/amm/fedimint-amm-server",
     "modules/amm/fedimint-amm-tests",
+    "modules/multispend/fedimint-multispend-common",
     "modules/usdt/fedimint-usdt-client",
     "modules/usdt/fedimint-usdt-common",
     "modules/usdt/fedimint-usdt-server",

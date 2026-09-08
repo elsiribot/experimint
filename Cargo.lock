@@ -5360,6 +5360,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fedimint-multispend-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fedimint-core",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "fedimint-portalloc"
 version = "0.12.0-alpha"
 source = "git+https://github.com/elsiribot/fedimint?rev=b7a752db799a962c4a5e0d3c87bc2ac37e9799c2#b7a752db799a962c4a5e0d3c87bc2ac37e9799c2"
