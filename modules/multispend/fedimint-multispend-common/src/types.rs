@@ -131,6 +131,8 @@ pub enum MultispendInputError {
     UnknownAccount,
     #[error("Account balance is insufficient")]
     InsufficientBalance,
+    #[error("The input's amounts are not well-formed")]
+    MalformedAmounts,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]

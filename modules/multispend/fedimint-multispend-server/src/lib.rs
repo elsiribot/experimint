@@ -5,13 +5,14 @@
 //! account (spec §3.4), `audit` (spec §9), and the `account_balance` API
 //! endpoint (spec §3.5).
 //!
-//! `verify_input`/`process_input` — the security-critical spend path — are
-//! deliberately NOT implemented here; that is Task 5, landing alone so a
-//! reviewer can give it full attention. `process_input` below is an
-//! intentionally panicking placeholder: `ServerModule::process_input` has no
-//! default implementation, so the trait cannot be satisfied without a body,
-//! but nothing in this task calls it (there is no input-side test, and this
-//! task builds no integration test crate).
+//! `verify_input`/`process_input` (spec §9.2) are the security-critical spend
+//! path: `verify_input` (`verify_spend`) statelessly checks a t-of-n
+//! signature witness against the key material carried inside the input,
+//! bound to the txid; `process_input` (`process_spend`) then requires that
+//! the account id names a funded record and debits it. Both halves are
+//! required — see `verify_spend`'s doc comment for why the first alone is
+//! forgeable. `process_input` returns `InputAuth::SelfVerified`: core
+//! performs no authorization check of its own for this input.
 //!
 //! `consensus_proposal` returns `vec![]` and `process_consensus_item` is
 //! unreachable: `MultispendConsensusItem` is uninhabited (spec — this module
@@ -31,9 +32,9 @@ use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransacti
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
-    Amounts, ApiEndpoint, ApiVersion, CORE_CONSENSUS_VERSION, CoreConsensusVersion, InputMeta,
-    ModuleConsensusVersion, ModuleInit, SupportedModuleApiVersions, TransactionItemAmounts,
-    api_endpoint,
+    Amounts, ApiEndpoint, ApiVersion, CORE_CONSENSUS_VERSION, CoreConsensusVersion, InputAuth,
+    InputAuthCtx, InputMeta, ModuleConsensusVersion, ModuleInit, SupportedModuleApiVersions,
+    TransactionItemAmounts, api_endpoint,
 };
 use fedimint_core::{InPoint, OutPoint, PeerId};
 use fedimint_multispend_common::account::AccountId;
@@ -43,7 +44,7 @@ use fedimint_multispend_common::config::{
 use fedimint_multispend_common::endpoints::{ACCOUNT_BALANCE_ENDPOINT, AccountBalance};
 use fedimint_multispend_common::types::{
     MultispendConsensusItem, MultispendInput, MultispendInputError, MultispendOutput,
-    MultispendOutputError, MultispendOutputOutcome, amounts_are_well_formed,
+    MultispendOutputError, MultispendOutputOutcome, SpendWitness, amounts_are_well_formed,
 };
 use fedimint_multispend_common::{
     MODULE_CONSENSUS_VERSION, MultispendCommonInit, MultispendModuleTypes,
@@ -234,6 +235,78 @@ pub(crate) async fn credit_account(
     dbtx.insert_entry(&AccountKey(account), &state).await;
 }
 
+/// Half one of the obligation in spec §9.2: verify the witness against the
+/// key material carried inside the input, bound to the txid.
+///
+/// Stateless by necessity — `verify_input` has no database access — which is
+/// exactly why this alone is NOT sufficient. An attacker can supply their own
+/// `Account` and their own signatures and pass this check. `process_input`
+/// closes it by requiring the account id to name a funded record.
+pub(crate) fn verify_spend(
+    input: &MultispendInput,
+    ctx: &InputAuthCtx<'_>,
+) -> Result<(), MultispendInputError> {
+    let MultispendInput::Spend { account, amounts } = input;
+
+    // `Amounts` derives `Decodable` with no invariant enforcement, so a
+    // crafted input can carry explicit zero-amount entries no safe
+    // constructor would produce. `checked_add_mut` asserts per entry, and
+    // `process_input` hands these straight back to core's `FundingVerifier`,
+    // which calls it — so an unvalidated zero entry panics a debug node and
+    // corrupts a release one. Task 4 added this helper for the same reason on
+    // the output side; reject here, statelessly, before anything else.
+    if !amounts_are_well_formed(amounts) {
+        return Err(MultispendInputError::MalformedAmounts);
+    }
+
+    let witness = SpendWitness::decode(ctx.witness())?;
+
+    let provided = witness.signatures.len() as u64;
+    if provided < account.threshold() {
+        return Err(MultispendInputError::ThresholdNotMet {
+            provided,
+            threshold: account.threshold(),
+        });
+    }
+
+    for (&idx, sig) in &witness.signatures {
+        let pub_key = account
+            .pub_key_at(idx)
+            .ok_or(MultispendInputError::SignatureIndexOutOfRange(idx))?;
+
+        // `verify_schnorr` binds to the txid and cannot be pointed at another
+        // message. Do not replace it with a hand-rolled check.
+        if !ctx.verify_schnorr(pub_key, sig) {
+            return Err(MultispendInputError::InvalidSignature(idx));
+        }
+    }
+
+    Ok(())
+}
+
+/// Half two: the account must be one the module actually holds funds for.
+pub(crate) async fn process_spend(
+    dbtx: &mut DatabaseTransaction<'_>,
+    input: &MultispendInput,
+) -> Result<Amounts, MultispendInputError> {
+    let MultispendInput::Spend { account, amounts } = input;
+
+    let mut state = dbtx
+        .get_value(&AccountKey(account.id()))
+        .await
+        .ok_or(MultispendInputError::UnknownAccount)?;
+
+    state.balance = state
+        .balance
+        .checked_sub(amounts)
+        .ok_or(MultispendInputError::InsufficientBalance)?;
+    state.op_counter += 1;
+
+    dbtx.insert_entry(&AccountKey(account.id()), &state).await;
+
+    Ok(amounts.clone())
+}
+
 /// Multispend module.
 #[derive(Debug)]
 pub struct Multispend;
@@ -263,17 +336,30 @@ impl ServerModule for Multispend {
         match consensus_item {}
     }
 
-    /// Task 5's job. `ServerModule::process_input` has no default
-    /// implementation, so this placeholder exists purely to let the trait
-    /// compile; nothing in Task 4 calls it. See this crate's top-level doc
-    /// comment.
+    fn verify_input(
+        &self,
+        input: &MultispendInput,
+        ctx: &InputAuthCtx<'_>,
+    ) -> Result<(), MultispendInputError> {
+        verify_spend(input, ctx)
+    }
+
     async fn process_input<'a, 'b, 'c>(
         &'a self,
-        _dbtx: &mut DatabaseTransaction<'c>,
-        _input: &'b MultispendInput,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b MultispendInput,
         _in_point: InPoint,
     ) -> Result<InputMeta, MultispendInputError> {
-        unimplemented!("process_input is Task 5's security-critical spend path")
+        let amounts = process_spend(dbtx, input).await?;
+
+        Ok(InputMeta {
+            amount: TransactionItemAmounts {
+                amounts,
+                fees: Amounts::ZERO,
+            },
+            // Authorization was checked in `verify_input`, bound to the txid.
+            auth: InputAuth::SelfVerified,
+        })
     }
 
     async fn process_output<'a, 'b>(
@@ -373,6 +459,30 @@ impl ServerModule for Multispend {
     }
 }
 
+impl Multispend {
+    /// Test-only wrapper around [`verify_spend`] so it can be exercised
+    /// without a configured `Multispend` instance. Calls the exact same
+    /// logic `ServerModule::verify_input` calls; there is no second
+    /// implementation to keep in sync.
+    #[cfg(test)]
+    pub(crate) fn test_verify_input(
+        input: &MultispendInput,
+        ctx: &InputAuthCtx<'_>,
+    ) -> Result<(), MultispendInputError> {
+        verify_spend(input, ctx)
+    }
+
+    /// Test-only wrapper around [`process_spend`]. See
+    /// [`Self::test_verify_input`]'s doc comment.
+    #[cfg(test)]
+    pub(crate) async fn test_process_input(
+        dbtx: &mut DatabaseTransaction<'_>,
+        input: &MultispendInput,
+    ) -> Result<Amounts, MultispendInputError> {
+        process_spend(dbtx, input).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -382,14 +492,17 @@ mod tests {
     use fedimint_core::encoding::{Decodable, Encodable};
     use fedimint_core::module::registry::ModuleDecoderRegistry;
     use fedimint_core::module::{
-        AmountUnit, Amounts, ApiEndpointContext, ApiRequestErased, serde_json,
+        AmountUnit, Amounts, ApiEndpointContext, ApiRequestErased, InputAuthCtx, serde_json,
     };
     use fedimint_core::secp256k1::rand::rngs::OsRng;
     use fedimint_core::secp256k1::{Keypair, Secp256k1};
     use fedimint_core::{BitcoinHash, OutPoint, TransactionId};
     use fedimint_multispend_common::account::{Account, AccountId, AccountUnchecked};
     use fedimint_multispend_common::endpoints::{ACCOUNT_BALANCE_ENDPOINT, AccountBalance};
-    use fedimint_multispend_common::types::{MultispendOutput, MultispendOutputError};
+    use fedimint_multispend_common::types::{
+        MultispendInput, MultispendInputError, MultispendOutput, MultispendOutputError,
+        SpendWitness,
+    };
     use fedimint_server_core::ServerModule as _;
 
     use crate::Multispend;
@@ -644,5 +757,275 @@ mod tests {
             None,
             "a rejected mixed credit must not create an account record"
         );
+    }
+
+    /// An account plus the keypairs behind it, in the same ascending order
+    /// the account's indices use.
+    fn account_with_keys(n: usize, threshold: u64) -> (Account, Vec<Keypair>) {
+        let secp = Secp256k1::new();
+        let mut kps: Vec<Keypair> = (0..n).map(|_| Keypair::new(&secp, &mut OsRng)).collect();
+        kps.sort_by_key(|kp| kp.public_key());
+
+        let pub_keys = kps.iter().map(|kp| kp.public_key()).collect();
+        let account = Account::try_from(AccountUnchecked {
+            pub_keys,
+            threshold,
+        })
+        .unwrap();
+        (account, kps)
+    }
+
+    fn sign_at(ctx: &InputAuthCtx<'_>, kps: &[Keypair], idxs: &[u16]) -> Vec<u8> {
+        let secp = Secp256k1::new();
+        let signatures = idxs
+            .iter()
+            .map(|&i| {
+                (
+                    i,
+                    secp.sign_schnorr(&ctx.txid_message(), &kps[usize::from(i)]),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        SpendWitness { signatures }.encode_to_vec()
+    }
+
+    const TXID: [u8; 32] = [0x33; 32];
+
+    fn ctx_for(witness: &[u8]) -> InputAuthCtx<'_> {
+        InputAuthCtx::new(TransactionId::from_byte_array(TXID), 0, witness)
+    }
+
+    fn spend(account: &Account) -> MultispendInput {
+        MultispendInput::Spend {
+            account: account.clone(),
+            amounts: Amounts::new_bitcoin_msats(500),
+        }
+    }
+
+    #[test]
+    fn accepts_exactly_threshold_signatures() {
+        let (account, kps) = account_with_keys(3, 2);
+        let witness = sign_at(&ctx_for(&[]), &kps, &[0, 2]);
+
+        Multispend::test_verify_input(&spend(&account), &ctx_for(&witness))
+            .expect("2 of 3 is enough");
+    }
+
+    #[test]
+    fn accepts_more_than_threshold_signatures() {
+        let (account, kps) = account_with_keys(3, 2);
+        let witness = sign_at(&ctx_for(&[]), &kps, &[0, 1, 2]);
+
+        Multispend::test_verify_input(&spend(&account), &ctx_for(&witness))
+            .expect("any t of n, and more than t is still fine");
+    }
+
+    #[test]
+    fn rejects_below_threshold() {
+        let (account, kps) = account_with_keys(3, 2);
+        let witness = sign_at(&ctx_for(&[]), &kps, &[1]);
+
+        assert_eq!(
+            Multispend::test_verify_input(&spend(&account), &ctx_for(&witness)),
+            Err(MultispendInputError::ThresholdNotMet {
+                provided: 1,
+                threshold: 2
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_signature_over_a_different_txid() {
+        let (account, kps) = account_with_keys(3, 2);
+
+        // Sign a different transaction entirely.
+        let other = InputAuthCtx::new(TransactionId::from_byte_array([0x44; 32]), 0, &[]);
+        let witness = sign_at(&other, &kps, &[0, 1]);
+
+        assert_eq!(
+            Multispend::test_verify_input(&spend(&account), &ctx_for(&witness)),
+            Err(MultispendInputError::InvalidSignature(0)),
+            "this is the detach-and-reattach attack; it must not verify"
+        );
+    }
+
+    #[test]
+    fn rejects_a_signature_by_a_non_member() {
+        let (account, _) = account_with_keys(3, 2);
+        let (_, outsiders) = account_with_keys(3, 2);
+        let witness = sign_at(&ctx_for(&[]), &outsiders, &[0, 1]);
+
+        assert!(Multispend::test_verify_input(&spend(&account), &ctx_for(&witness)).is_err());
+    }
+
+    #[test]
+    fn rejects_an_out_of_range_index() {
+        let (account, kps) = account_with_keys(3, 2);
+        let secp = Secp256k1::new();
+        let sig = secp.sign_schnorr(&ctx_for(&[]).txid_message(), &kps[0]);
+
+        let witness = SpendWitness {
+            signatures: BTreeMap::from([(0u16, sig), (9u16, sig)]),
+        }
+        .encode_to_vec();
+
+        assert_eq!(
+            Multispend::test_verify_input(&spend(&account), &ctx_for(&witness)),
+            Err(MultispendInputError::SignatureIndexOutOfRange(9))
+        );
+    }
+
+    #[test]
+    fn rejects_a_malformed_witness() {
+        let (account, _) = account_with_keys(3, 2);
+        assert_eq!(
+            Multispend::test_verify_input(&spend(&account), &ctx_for(&[0xde, 0xad])),
+            Err(MultispendInputError::MalformedWitness)
+        );
+    }
+
+    /// `Amounts` derives `Decodable` with no invariant enforcement, so a
+    /// crafted `MultispendInput::Spend` can carry an explicit zero-amount
+    /// entry that no safe constructor (`new_bitcoin`, `new_custom`) would
+    /// ever produce -- `Amounts::new_custom` filters zeros, so building the
+    /// value that way would prove nothing. Build it the way it would
+    /// actually arrive on the wire: consensus-encode a raw
+    /// `BTreeMap<AmountUnit, Amount>` with an explicit zero entry, then
+    /// decode it back as `Amounts`.
+    #[test]
+    fn rejects_malformed_amounts() {
+        let (account, _) = account_with_keys(3, 2);
+
+        let modules = ModuleDecoderRegistry::default();
+        let mut raw = BTreeMap::new();
+        raw.insert(AmountUnit::BITCOIN, Amount::from_msats(5));
+        raw.insert(AmountUnit::new_custom(1), Amount::ZERO);
+        let bytes = raw.consensus_encode_to_vec();
+        let amounts = Amounts::consensus_decode_whole(&bytes, &modules)
+            .expect("a BTreeMap<AmountUnit, Amount> we just encoded decodes as Amounts");
+        assert_eq!(
+            amounts.len(),
+            2,
+            "both the genuine and the explicit zero entry must survive decoding, or this \
+             test isn't reproducing the wire shape the bug depends on"
+        );
+
+        let input = MultispendInput::Spend {
+            account: account.clone(),
+            amounts,
+        };
+
+        assert_eq!(
+            Multispend::test_verify_input(&input, &ctx_for(&[])),
+            Err(MultispendInputError::MalformedAmounts)
+        );
+    }
+
+    #[tokio::test]
+    async fn process_input_rejects_a_forged_account() {
+        // The attack the two-sided obligation exists to stop: an attacker
+        // builds their OWN account, signs with their OWN keys -- so
+        // verify_input passes -- and tries to spend. process_input must
+        // refuse, because that account id has no funded record.
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let (funded, _) = account_with_keys(3, 2);
+        let (forged, forged_kps) = account_with_keys(1, 1);
+
+        let mut dbtx = db.begin_transaction().await;
+        crate::credit_account(
+            &mut dbtx.to_ref_nc(),
+            funded.id(),
+            &Amounts::new_bitcoin_msats(10_000),
+        )
+        .await;
+
+        let witness = sign_at(&ctx_for(&[]), &forged_kps, &[0]);
+        Multispend::test_verify_input(&spend(&forged), &ctx_for(&witness))
+            .expect("the attacker's own signatures verify against their own account");
+
+        let err = Multispend::test_process_input(&mut dbtx.to_ref_nc(), &spend(&forged))
+            .await
+            .expect_err("a self-declared account must not be spendable");
+        assert_eq!(err, MultispendInputError::UnknownAccount);
+    }
+
+    #[tokio::test]
+    async fn process_input_debits_and_counts() {
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let (account, _) = account_with_keys(3, 2);
+
+        let mut dbtx = db.begin_transaction().await;
+        crate::credit_account(
+            &mut dbtx.to_ref_nc(),
+            account.id(),
+            &Amounts::new_bitcoin_msats(10_000),
+        )
+        .await;
+
+        Multispend::test_process_input(&mut dbtx.to_ref_nc(), &spend(&account))
+            .await
+            .expect("a funded account can be spent");
+
+        let state = dbtx.get_value(&AccountKey(account.id())).await.unwrap();
+        assert_eq!(
+            state.balance.get(&AmountUnit::BITCOIN),
+            Some(&Amount::from_msats(9_500))
+        );
+        assert_eq!(state.op_counter, 2, "credit then spend");
+    }
+
+    #[tokio::test]
+    async fn process_input_rejects_an_overdraft() {
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let (account, _) = account_with_keys(3, 2);
+
+        let mut dbtx = db.begin_transaction().await;
+        crate::credit_account(
+            &mut dbtx.to_ref_nc(),
+            account.id(),
+            &Amounts::new_bitcoin_msats(100),
+        )
+        .await;
+
+        let err = Multispend::test_process_input(&mut dbtx.to_ref_nc(), &spend(&account))
+            .await
+            .expect_err("500 > 100");
+        assert_eq!(err, MultispendInputError::InsufficientBalance);
+    }
+
+    #[tokio::test]
+    async fn process_input_rejects_spending_a_unit_the_account_lacks() {
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let (account, _) = account_with_keys(2, 1);
+
+        let mut dbtx = db.begin_transaction().await;
+        crate::credit_account(
+            &mut dbtx.to_ref_nc(),
+            account.id(),
+            &Amounts::new_bitcoin_msats(10_000),
+        )
+        .await;
+
+        let input = MultispendInput::Spend {
+            account: account.clone(),
+            amounts: Amounts::new_custom(AmountUnit::new_custom(1), Amount::from_msats(1)),
+        };
+
+        let err = Multispend::test_process_input(&mut dbtx.to_ref_nc(), &input)
+            .await
+            .expect_err("a BTC balance must not fund a USDT spend");
+        assert_eq!(err, MultispendInputError::InsufficientBalance);
     }
 }
