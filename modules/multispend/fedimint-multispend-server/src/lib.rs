@@ -35,7 +35,7 @@ use fedimint_core::module::{
     ModuleConsensusVersion, ModuleInit, SupportedModuleApiVersions, TransactionItemAmounts,
     api_endpoint,
 };
-use fedimint_core::{InPoint, OutPoint, PeerId};
+use fedimint_core::{Amount, InPoint, OutPoint, PeerId};
 use fedimint_multispend_common::account::AccountId;
 use fedimint_multispend_common::config::{
     MultispendClientConfig, MultispendConfig, MultispendConfigConsensus, MultispendConfigPrivate,
@@ -282,11 +282,17 @@ impl ServerModule for Multispend {
 
         // A zero credit would create an account record with no funds, which
         // the "an account exists exactly while it has a balance" invariant
-        // relies on being impossible. `Amounts` never stores an explicit
-        // zero-amount entry (every constructor skips one, and
-        // `checked_add_mut` asserts against ever inserting one), so an empty
-        // map is exactly "every unit's amount is zero" here.
-        if amounts.is_empty() {
+        // relies on being impossible. `amounts.is_empty()` is NOT sufficient
+        // to catch this: that only holds for `Amounts` values built through
+        // its safe constructors (`new_bitcoin`, `new_custom`,
+        // `checked_add_mut`), which filter zero entries, but this `amounts`
+        // is decoded off the wire, and `Amounts`'s derived `Decodable`
+        // enforces no such invariant — a hand-crafted, consensus-encoded
+        // credit can carry an explicit zero-amount entry, making the map
+        // non-empty while still being worth nothing. Checking that every
+        // value is zero is vacuously true on an empty map too, so it covers
+        // both shapes in one expression.
+        if amounts.values().all(|amount| *amount == Amount::ZERO) {
             return Err(MultispendOutputError::ZeroCredit);
         }
 
@@ -367,13 +373,17 @@ mod tests {
 
     use fedimint_core::Amount;
     use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
+    use fedimint_core::encoding::{Decodable, Encodable};
+    use fedimint_core::module::registry::ModuleDecoderRegistry;
     use fedimint_core::module::{
         AmountUnit, Amounts, ApiEndpointContext, ApiRequestErased, serde_json,
     };
     use fedimint_core::secp256k1::rand::rngs::OsRng;
     use fedimint_core::secp256k1::{Keypair, Secp256k1};
+    use fedimint_core::{BitcoinHash, OutPoint, TransactionId};
     use fedimint_multispend_common::account::{Account, AccountId, AccountUnchecked};
     use fedimint_multispend_common::endpoints::{ACCOUNT_BALANCE_ENDPOINT, AccountBalance};
+    use fedimint_multispend_common::types::{MultispendOutput, MultispendOutputError};
     use fedimint_server_core::ServerModule as _;
 
     use crate::Multispend;
@@ -517,6 +527,59 @@ mod tests {
                 balance: BTreeMap::from([(AmountUnit::BITCOIN, Amount::from_msats(1000))]),
                 op_counter: 1,
             })
+        );
+    }
+
+    /// `Amounts` derives `Decodable` on its wrapped `BTreeMap` with no custom
+    /// impl, so nothing on the wire stops a hand-crafted zero-amount entry
+    /// from surviving decode, unlike `new_custom`/`checked_add_mut`, which
+    /// filter/assert against ever inserting one. Build the adversarial value
+    /// the way it would actually arrive: consensus-encode a raw
+    /// `BTreeMap<AmountUnit, Amount>` containing an explicit zero entry, then
+    /// decode it back as `Amounts` — this is exactly what happens to a
+    /// transaction that comes in over the wire, and it must not be
+    /// mistakeable for `Amounts::ZERO`'s empty map.
+    #[tokio::test]
+    async fn wire_decoded_zero_credit_is_rejected() {
+        let modules = ModuleDecoderRegistry::default();
+        let mut raw = BTreeMap::new();
+        raw.insert(AmountUnit::new_custom(9), Amount::ZERO);
+        let bytes = raw.consensus_encode_to_vec();
+        let amounts = Amounts::consensus_decode_whole(&bytes, &modules)
+            .expect("a BTreeMap<AmountUnit, Amount> we just encoded decodes as Amounts");
+        assert_eq!(
+            amounts.len(),
+            1,
+            "the explicit zero entry must survive decoding, or this test isn't reproducing \
+             the wire shape the bug depends on"
+        );
+
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let account = account(2, 1);
+        let module = Multispend;
+        let output = MultispendOutput::Credit {
+            account: account.id(),
+            amounts,
+        };
+        let out_point = OutPoint {
+            txid: TransactionId::all_zeros(),
+            out_idx: 0,
+        };
+
+        let mut dbtx = db.begin_transaction().await;
+        let result = module
+            .process_output(&mut dbtx.to_ref_nc(), &output, out_point)
+            .await;
+        assert_eq!(result, Err(MultispendOutputError::ZeroCredit));
+        dbtx.commit_tx().await;
+
+        assert_eq!(
+            account_balance(&db, account.id()).await,
+            None,
+            "a rejected zero credit must not create an account record"
         );
     }
 }
