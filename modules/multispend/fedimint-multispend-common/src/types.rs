@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use fedimint_core::Amount;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::Amounts;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
@@ -11,6 +12,27 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::account::{Account, AccountId};
+
+/// True if `amounts` is safe to hand to `Amounts`' arithmetic.
+///
+/// `Amounts` derives `Decodable` with no invariant enforcement, so a crafted
+/// transaction can carry explicit zero-amount entries that no safe
+/// constructor (`new_bitcoin`, `new_custom`, `checked_add_mut`, ...) would
+/// ever produce — those all filter or assert against a zero entry ever being
+/// inserted. `checked_add_mut` asserts per entry, not on the total, so such a
+/// value panics a debug node's `debug_assert!` and, on a release node,
+/// silently inserts a spurious zero-valued entry that persists in an
+/// `AccountState.balance` forever. Every wire-supplied `Amounts` — whether it
+/// arrives via a `MultispendOutput::Credit` or (Task 5) a
+/// `MultispendInput::Spend` — must be checked with this before it is added to
+/// any balance or returned to core inside `TransactionItemAmounts`.
+///
+/// Also rejects the empty map: an all-zero (or entirely empty) `amounts`
+/// carries no value, and `process_output` relies on that to keep the
+/// invariant that an account record exists only while it holds a balance.
+pub fn amounts_are_well_formed(amounts: &Amounts) -> bool {
+    !amounts.is_empty() && amounts.values().all(|amount| *amount != Amount::ZERO)
+}
 
 /// Debits a t-of-n account.
 ///
@@ -113,10 +135,13 @@ pub enum MultispendInputError {
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
 pub enum MultispendOutputError {
-    /// A zero credit would create an account record with no funds, breaking
-    /// the invariant that an account exists exactly while it has a balance.
-    /// Enforced in `process_output` (Task 4); this only names the error.
-    #[error("A credit must be for a non-zero amount")]
+    /// Either the whole amount is zero — which would create an account
+    /// record with no funds, breaking the invariant that an account exists
+    /// exactly while it has a balance — or an individual unit within it is,
+    /// which `Amounts`' arithmetic cannot tolerate (see
+    /// [`amounts_are_well_formed`]). Enforced in `process_output` (Task 4);
+    /// this only names the error.
+    #[error("A credit must be non-empty and have a non-zero amount for every unit")]
     ZeroCredit,
 }
 

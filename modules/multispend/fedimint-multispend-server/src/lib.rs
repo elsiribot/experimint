@@ -35,7 +35,7 @@ use fedimint_core::module::{
     ModuleConsensusVersion, ModuleInit, SupportedModuleApiVersions, TransactionItemAmounts,
     api_endpoint,
 };
-use fedimint_core::{Amount, InPoint, OutPoint, PeerId};
+use fedimint_core::{InPoint, OutPoint, PeerId};
 use fedimint_multispend_common::account::AccountId;
 use fedimint_multispend_common::config::{
     MultispendClientConfig, MultispendConfig, MultispendConfigConsensus, MultispendConfigPrivate,
@@ -43,7 +43,7 @@ use fedimint_multispend_common::config::{
 use fedimint_multispend_common::endpoints::{ACCOUNT_BALANCE_ENDPOINT, AccountBalance};
 use fedimint_multispend_common::types::{
     MultispendConsensusItem, MultispendInput, MultispendInputError, MultispendOutput,
-    MultispendOutputError, MultispendOutputOutcome,
+    MultispendOutputError, MultispendOutputOutcome, amounts_are_well_formed,
 };
 use fedimint_multispend_common::{
     MODULE_CONSENSUS_VERSION, MultispendCommonInit, MultispendModuleTypes,
@@ -208,6 +208,10 @@ impl ServerModuleInit for MultispendInit {
 /// Shared by `Multispend::process_output` and (per spec) Task 5's spend path,
 /// which also credits — a spend moves value out of one account and, in the
 /// general case, into others.
+///
+/// Has no guard of its own: `amounts` is trusted as-is, so every caller must
+/// have already checked it with `amounts_are_well_formed` (or otherwise
+/// guaranteed it has no zero-amount entries) before calling this.
 pub(crate) async fn credit_account(
     dbtx: &mut DatabaseTransaction<'_>,
     account: AccountId,
@@ -280,19 +284,21 @@ impl ServerModule for Multispend {
     ) -> Result<TransactionItemAmounts, MultispendOutputError> {
         let MultispendOutput::Credit { account, amounts } = output;
 
-        // A zero credit would create an account record with no funds, which
-        // the "an account exists exactly while it has a balance" invariant
-        // relies on being impossible. `amounts.is_empty()` is NOT sufficient
-        // to catch this: that only holds for `Amounts` values built through
+        // A zero (or all-zero, or partially-zero) credit must be rejected
+        // before it reaches `credit_account`. `amounts.is_empty()` alone is
+        // NOT sufficient: that only holds for `Amounts` values built through
         // its safe constructors (`new_bitcoin`, `new_custom`,
         // `checked_add_mut`), which filter zero entries, but this `amounts`
         // is decoded off the wire, and `Amounts`'s derived `Decodable`
         // enforces no such invariant — a hand-crafted, consensus-encoded
-        // credit can carry an explicit zero-amount entry, making the map
-        // non-empty while still being worth nothing. Checking that every
-        // value is zero is vacuously true on an empty map too, so it covers
-        // both shapes in one expression.
-        if amounts.values().all(|amount| *amount == Amount::ZERO) {
+        // credit can carry an explicit zero-amount entry for one unit
+        // alongside a genuine positive amount for another, which is neither
+        // empty nor all-zero. `Amounts::checked_add_mut` asserts per entry,
+        // not on the total, so a mixed credit like that would panic a debug
+        // node and persist a spurious zero entry on a release one.
+        // `amounts_are_well_formed` checks both the empty/all-zero and the
+        // mixed case in one expression.
+        if !amounts_are_well_formed(amounts) {
             return Err(MultispendOutputError::ZeroCredit);
         }
 
@@ -580,6 +586,63 @@ mod tests {
             account_balance(&db, account.id()).await,
             None,
             "a rejected zero credit must not create an account record"
+        );
+    }
+
+    /// The `.all(|amount| *amount == Amount::ZERO)` guard this replaces only
+    /// catches an all-zero (or empty) `amounts`. A *mixed* credit — a
+    /// genuine positive amount for one unit alongside an explicit
+    /// zero-amount entry for another — sails right through it, because
+    /// `.all(zero)` is false as soon as any entry is non-zero. That mixed
+    /// value still isn't safe: `Amounts::checked_add_mut` asserts per entry,
+    /// not on the total, so the zero entry panics a debug node and persists
+    /// a spurious zero-valued entry into `AccountState.balance` on a release
+    /// one. Build it the way it would actually arrive on the wire — same
+    /// technique as `wire_decoded_zero_credit_is_rejected` above — since
+    /// `Amounts::new_custom`/`new_bitcoin` both filter zero entries and so
+    /// cannot construct this shape directly.
+    #[tokio::test]
+    async fn wire_decoded_mixed_zero_credit_is_rejected() {
+        let modules = ModuleDecoderRegistry::default();
+        let mut raw = BTreeMap::new();
+        raw.insert(AmountUnit::BITCOIN, Amount::from_msats(5));
+        raw.insert(AmountUnit::new_custom(9), Amount::ZERO);
+        let bytes = raw.consensus_encode_to_vec();
+        let amounts = Amounts::consensus_decode_whole(&bytes, &modules)
+            .expect("a BTreeMap<AmountUnit, Amount> we just encoded decodes as Amounts");
+        assert_eq!(
+            amounts.len(),
+            2,
+            "both the genuine and the explicit zero entry must survive decoding, or this \
+             test isn't reproducing the wire shape the bug depends on"
+        );
+
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let account = account(2, 1);
+        let module = Multispend;
+        let output = MultispendOutput::Credit {
+            account: account.id(),
+            amounts,
+        };
+        let out_point = OutPoint {
+            txid: TransactionId::all_zeros(),
+            out_idx: 0,
+        };
+
+        let mut dbtx = db.begin_transaction().await;
+        let result = module
+            .process_output(&mut dbtx.to_ref_nc(), &output, out_point)
+            .await;
+        assert_eq!(result, Err(MultispendOutputError::ZeroCredit));
+        dbtx.commit_tx().await;
+
+        assert_eq!(
+            account_balance(&db, account.id()).await,
+            None,
+            "a rejected mixed credit must not create an account record"
         );
     }
 }
