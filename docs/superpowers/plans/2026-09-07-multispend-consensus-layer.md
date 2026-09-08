@@ -767,7 +767,7 @@ Everything except the input, so the security-critical path lands alone in Task 5
   - `MultispendInit`, `Multispend`
   - `Multispend::process_output` crediting an account
   - `DbKeyPrefix::Account = 0x01`
-  - the `account_balance` API endpoint, returning `Option<AccountState>`
+  - `AccountBalance { balance: BTreeMap<AmountUnit, Amount>, op_counter: u64 }` in the common crate, and the `account_balance` API endpoint returning `Option<AccountBalance>`
 
 - [ ] **Step 1: Create the crate**
 
@@ -813,7 +813,11 @@ pub struct AccountPrefix;
 /// exists exactly while it has a record, and a record is created by its first
 /// credit — so there is no registration step and no way to create an account
 /// without funding it.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Encodable, Decodable)]
+/// Note the absent `Serialize`: `Amounts` has no serde impl at this rev
+/// (`fedimint-core/src/module/mod.rs:237` derives only `Debug, Clone, Eq,
+/// PartialEq, Hash, Encodable, Decodable`, and there is no manual impl). That
+/// is why `AccountBalance` below exists.
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
 pub struct AccountState {
     pub balance: Amounts,
     /// Incremented by every input or output touching this account.
@@ -827,6 +831,40 @@ pub struct AccountState {
 impl_db_record!(key = AccountKey, value = AccountState, db_prefix = DbKeyPrefix::Account);
 impl_db_lookup!(key = AccountKey, query_prefix = AccountPrefix);
 ```
+
+**`Amounts` cannot cross the API boundary or a `Serialize` derive.** It has no
+serde impl, which is why the AMM's own endpoints work in `Amount` per unit
+rather than `Amounts` (`modules/amm/fedimint-amm-common/src/endpoints.rs:38`
+is a `(pubkey, unit) -> Option<Amount>` point lookup for exactly this reason).
+`AmountUnit` and `Amount` both do have serde, so the fix is a serde-able view
+type, which belongs in the **common** crate beside the endpoint constant:
+
+```rust
+// fedimint-multispend-common/src/endpoints.rs
+use std::collections::BTreeMap;
+
+use fedimint_core::Amount;
+use fedimint_core::module::AmountUnit;
+use serde::{Deserialize, Serialize};
+
+/// What `account_balance` returns. A serde-able view of `AccountState`,
+/// which cannot itself be serialized because `Amounts` has no serde impl.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AccountBalance {
+    pub balance: BTreeMap<AmountUnit, Amount>,
+    pub op_counter: u64,
+}
+```
+
+The server converts with `state.balance.iter().map(|(u, a)| (*u, *a)).collect()`
+— `Amounts` derefs to `BTreeMap<AmountUnit, Amount>`
+(`fedimint-core/src/module/mod.rs:242`), so this is a plain copy.
+
+**This also affects `dump_database`.** The AMM's `push_db_pair_items!` requires
+`Serialize` on the value type, which `AccountState` no longer has. Either dump
+the `AccountBalance` view instead of the raw record, or omit the `Account`
+prefix from `dump_database` with a comment saying why. Pick one and say which
+in your report.
 
 - [ ] **Step 3: Write the failing test**
 
@@ -987,8 +1025,15 @@ fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
     vec![api_endpoint! {
         ACCOUNT_BALANCE_ENDPOINT,
         ApiVersion::new(0, 0),
-        async |_module: &Multispend, context, account: AccountId| -> Option<AccountState> {
-            Ok(context.dbtx().get_value(&AccountKey(account)).await)
+        async |_module: &Multispend, context, account: AccountId| -> Option<AccountBalance> {
+            Ok(context
+                .dbtx()
+                .get_value(&AccountKey(account))
+                .await
+                .map(|state| AccountBalance {
+                    balance: state.balance.iter().map(|(u, a)| (*u, *a)).collect(),
+                    op_counter: state.op_counter,
+                }))
         }
     }]
 }
@@ -1476,7 +1521,7 @@ async fn submit(
 
 /// Read an account's balance in one unit through the module's API.
 async fn balance(fed: &FederationTest, account: &Account, unit: AmountUnit) -> Amount {
-    let state: Option<AccountState> = fed
+    let state: Option<AccountBalance> = fed
         .api_request(ACCOUNT_BALANCE_ENDPOINT, account.id())
         .await
         .expect("the endpoint must answer");
