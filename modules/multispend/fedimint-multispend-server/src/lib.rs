@@ -492,11 +492,12 @@ mod tests {
     use fedimint_core::encoding::{Decodable, Encodable};
     use fedimint_core::module::registry::ModuleDecoderRegistry;
     use fedimint_core::module::{
-        AmountUnit, Amounts, ApiEndpointContext, ApiRequestErased, InputAuthCtx, serde_json,
+        AmountUnit, Amounts, ApiEndpointContext, ApiRequestErased, InputAuth, InputAuthCtx,
+        serde_json,
     };
     use fedimint_core::secp256k1::rand::rngs::OsRng;
     use fedimint_core::secp256k1::{Keypair, Secp256k1};
-    use fedimint_core::{BitcoinHash, OutPoint, TransactionId};
+    use fedimint_core::{BitcoinHash, InPoint, OutPoint, TransactionId};
     use fedimint_multispend_common::account::{Account, AccountId, AccountUnchecked};
     use fedimint_multispend_common::endpoints::{ACCOUNT_BALANCE_ENDPOINT, AccountBalance};
     use fedimint_multispend_common::types::{
@@ -855,7 +856,13 @@ mod tests {
         let (_, outsiders) = account_with_keys(3, 2);
         let witness = sign_at(&ctx_for(&[]), &outsiders, &[0, 1]);
 
-        assert!(Multispend::test_verify_input(&spend(&account), &ctx_for(&witness)).is_err());
+        assert_eq!(
+            Multispend::test_verify_input(&spend(&account), &ctx_for(&witness)),
+            Err(MultispendInputError::InvalidSignature(0)),
+            "an outsider's signature must be rejected as invalid at the index it was \
+             supplied for, not merely rejected for some reason or other -- `is_err()` alone \
+             would also pass for a decode or threshold failure"
+        );
     }
 
     #[test]
@@ -950,6 +957,19 @@ mod tests {
             .await
             .expect_err("a self-declared account must not be spendable");
         assert_eq!(err, MultispendInputError::UnknownAccount);
+
+        // A mutant that materializes a default record for an unknown account
+        // (rather than genuinely refusing it) would still be caught here:
+        // `checked_sub` on that phantom zero balance would independently
+        // return `InsufficientBalance` for the 500-msat spend, so the
+        // error-variant assertion above cannot by itself distinguish "the
+        // account must exist" from "the account must have funds". Assert
+        // directly that no record was created.
+        assert!(
+            dbtx.get_value(&AccountKey(forged.id())).await.is_none(),
+            "a forged, unfunded account must not gain a database record just by being spent \
+             against"
+        );
     }
 
     #[tokio::test]
@@ -1027,5 +1047,94 @@ mod tests {
             .await
             .expect_err("a BTC balance must not fund a USDT spend");
         assert_eq!(err, MultispendInputError::InsufficientBalance);
+    }
+
+    /// Every other spend test goes through `test_process_input`, which
+    /// returns only the debited `Amounts` -- nothing exercises the
+    /// `InputMeta` assembly `ServerModule::process_input` actually returns.
+    /// Call the real trait method (`Multispend` needs no configuration to
+    /// construct, so there's nothing awkward about it) and check both fields
+    /// a mutant could silently flip: swapping `InputAuth::SelfVerified` for
+    /// `InputAuth::Key(..)` would hand authorization back to core, which
+    /// performs none of its own for an input this module claims to have
+    /// already verified; a nonzero `fees` would silently start charging
+    /// spends.
+    #[tokio::test]
+    async fn process_input_reports_self_verified_auth_and_zero_fees() {
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let (account, _) = account_with_keys(3, 2);
+
+        let mut dbtx = db.begin_transaction().await;
+        crate::credit_account(
+            &mut dbtx.to_ref_nc(),
+            account.id(),
+            &Amounts::new_bitcoin_msats(10_000),
+        )
+        .await;
+
+        let module = Multispend;
+        let in_point = InPoint {
+            txid: TransactionId::from_byte_array(TXID),
+            in_idx: 0,
+        };
+        let meta = module
+            .process_input(&mut dbtx.to_ref_nc(), &spend(&account), in_point)
+            .await
+            .expect("a funded account can be spent");
+
+        assert_eq!(
+            meta.auth,
+            InputAuth::SelfVerified,
+            "process_input must keep asserting SelfVerified -- core performs no \
+             authorization check of its own for this input, so verify_input must remain \
+             the only gate"
+        );
+        assert_eq!(
+            meta.amount.fees,
+            Amounts::ZERO,
+            "a spend must not carry a fee"
+        );
+    }
+
+    /// `checked_sub` in `process_spend` removes units that hit zero, so
+    /// spending an account down to exactly zero stores
+    /// `AccountState { balance: Amounts::ZERO, op_counter }` rather than
+    /// deleting the record. This is intentional, consensus-relevant
+    /// behaviour, not an oversight -- document it so a future reader doesn't
+    /// "fix" it into deleting drained accounts.
+    #[tokio::test]
+    async fn draining_an_account_to_zero_keeps_its_record() {
+        let db = Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        );
+        let (account, _) = account_with_keys(3, 2);
+
+        let mut dbtx = db.begin_transaction().await;
+        crate::credit_account(
+            &mut dbtx.to_ref_nc(),
+            account.id(),
+            &Amounts::new_bitcoin_msats(500),
+        )
+        .await;
+
+        Multispend::test_process_input(&mut dbtx.to_ref_nc(), &spend(&account))
+            .await
+            .expect("spending the exact balance is allowed");
+
+        let state = dbtx.get_value(&AccountKey(account.id())).await.expect(
+            "a drained account must still have a record: an unfunded account and a \
+                 drained one are different states, and deleting the record would erase the \
+                 op_counter history",
+        );
+        assert_eq!(
+            state.balance,
+            Amounts::ZERO,
+            "the balance must be exactly zero, not merely absent"
+        );
+        assert_eq!(state.op_counter, 2, "credit then spend");
     }
 }

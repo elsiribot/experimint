@@ -52,6 +52,27 @@ impl TryFrom<AccountUnchecked> for Account {
             "account has {} keys, the maximum is {MAX_ACCOUNT_KEYS}",
             raw.pub_keys.len()
         );
+
+        // `pub_keys` dedupes on the full 33-byte compressed key, but schnorr
+        // verification (`InputAuthCtx::verify_schnorr`) compares only the
+        // x-only key. A point `M` and its negation `-M` are distinct
+        // compressed keys sharing an x-coordinate, and one private key
+        // produces valid signatures for both -- so admitting both would let
+        // that single key satisfy two "independent" members, collapsing the
+        // threshold below what it appears to require.
+        let distinct_x_only = raw
+            .pub_keys
+            .iter()
+            .map(|pub_key| pub_key.x_only_public_key().0)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        ensure!(
+            distinct_x_only == raw.pub_keys.len(),
+            "two keys in this account share an x-coordinate: one private key would produce \
+             valid signatures for both, letting it satisfy two members at once and collapse \
+             the threshold"
+        );
+
         ensure!(raw.threshold != 0, "account threshold must not be zero");
         if raw.threshold > raw.pub_keys.len() as u64 {
             bail!(
@@ -238,6 +259,67 @@ mod tests {
             three.id(),
             "a 2-of-3 and a 3-of-3 over the same keys must be different accounts, \
              or funds could be spent under a lower threshold than the depositor agreed to"
+        );
+    }
+
+    /// A public key and its negation are distinct 33-byte compressed keys
+    /// (so they dedupe as two separate entries in `pub_keys`) but share an
+    /// x-coordinate, and schnorr verification (`InputAuthCtx::verify_schnorr`)
+    /// compares only the x-only key. One private key produces valid
+    /// signatures for both, so an account admitting both members has fewer
+    /// independent signers than its `pub_keys.len()` suggests -- a
+    /// `{M, -M}` account with `threshold: 2` looks like 2-of-3 (with a third
+    /// honest key) but is satisfiable by `M`'s holder alone.
+    #[test]
+    fn rejects_an_x_only_key_collision() {
+        let secp = Secp256k1::new();
+        let m = Keypair::new(&secp, &mut OsRng).public_key();
+        let neg_m = m.negate(&secp);
+        assert_ne!(
+            m, neg_m,
+            "a key and its negation must be distinct compressed public keys, or this test \
+             isn't reproducing the collision it claims to"
+        );
+        assert_eq!(
+            m.x_only_public_key().0,
+            neg_m.x_only_public_key().0,
+            "a key and its negation must share an x-coordinate, or this test isn't \
+             reproducing the collision it claims to"
+        );
+
+        let raw = AccountUnchecked {
+            pub_keys: BTreeSet::from([m, neg_m]),
+            threshold: 2,
+        };
+
+        let err = Account::try_from(raw).expect_err(
+            "two keys sharing an x-coordinate must be rejected: one private key would \
+             satisfy both, collapsing the threshold",
+        );
+        assert!(
+            err.to_string().contains("x-coordinate"),
+            "the error should say plainly that two keys share an x-coordinate: {err}"
+        );
+    }
+
+    /// Same collision as [`rejects_an_x_only_key_collision`], but proving the
+    /// check is reached through the decoder, not just `TryFrom` -- mirrors
+    /// `decoding_rejects_an_invalid_account` below.
+    #[test]
+    fn decoding_rejects_an_x_only_key_collision() {
+        let secp = Secp256k1::new();
+        let m = Keypair::new(&secp, &mut OsRng).public_key();
+        let neg_m = m.negate(&secp);
+
+        let raw = AccountUnchecked {
+            pub_keys: BTreeSet::from([m, neg_m]),
+            threshold: 2,
+        };
+        let bytes = raw.consensus_encode_to_vec();
+
+        assert!(
+            Account::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default()).is_err(),
+            "an x-only key collision must not survive decoding either"
         );
     }
 
