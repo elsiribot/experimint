@@ -279,8 +279,9 @@ no minimum amount, no fee, and nothing ever reaps a row (a drained account
 keeps its record, 3.2). This is a deliberate phase-1 scoping decision, not an
 oversight the module should silently work around; recording it here so it is
 visible and decided on before this module is ever pointed at real money (it is
-not, as of this writing — 9.4's "no client crate" and `is_enabled_by_default()
-== false` both apply).
+not, as of this writing — §5's client does not exist yet, and
+`is_enabled_by_default()` returns `false`, so no federation gets this module
+without an operator deliberately ticking it).
 
 The arithmetic: `Credit { account: AccountId, amounts: Amounts }` encodes to
 roughly 32 bytes for the id plus a few bytes per unit entry, call it ~42 bytes

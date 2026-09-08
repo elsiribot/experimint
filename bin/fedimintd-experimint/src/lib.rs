@@ -83,8 +83,9 @@
 //!
 //! `default_modules` (what the setup UI pre-ticks) is the subset whose
 //! `is_enabled_by_default()` is true. On this module set that is `lnv2`,
-//! `meta` and `amm` — none of the three override the trait's default
-//! (`true`). Everything else is opt-in:
+//! `meta` and `amm`. `meta` and `amm` inherit the trait's default (`true`);
+//! `lnv2` overrides it but defaults to `true`, so `FM_ENABLE_MODULE_LNV2=0`
+//! unticks it. Everything else defaults to off and is opt-in:
 //!
 //! - `mintv2` — `FM_ENABLE_MODULE_MINTV2`
 //! - `walletv2` — `FM_ENABLE_MODULE_WALLETV2`

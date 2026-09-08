@@ -28,8 +28,14 @@ use crate::account::{Account, AccountId};
 /// any balance or returned to core inside `TransactionItemAmounts`.
 ///
 /// Also rejects the empty map: an all-zero (or entirely empty) `amounts`
-/// carries no value, and `process_output` relies on that to keep the
-/// invariant that an account record exists only while it holds a balance.
+/// carries no value, and `process_output` relies on that so that a *credit*
+/// can never be what brings an account record into existence without funding
+/// it.
+///
+/// Note the narrower claim. A record does **not** exist only while it holds a
+/// balance: spending an account to exactly zero leaves the record behind with
+/// an empty balance. Anything deciding whether an account is funded must read
+/// the balance, never the record's existence — see the spec's §4.3.
 pub fn amounts_are_well_formed(amounts: &Amounts) -> bool {
     !amounts.is_empty() && amounts.values().all(|amount| *amount != Amount::ZERO)
 }

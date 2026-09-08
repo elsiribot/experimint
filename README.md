@@ -105,8 +105,9 @@ no on-chain wallet enabled.
 ### Modules are not pre-ticked by default
 
 The setup UI pre-selects only modules whose `is_enabled_by_default()` is true —
-here `lnv2`, `meta` and `amm` (none of the three override the trait's default
-of `true`). Everything else is opt-in via an env var:
+here `lnv2`, `meta` and `amm`. `meta` and `amm` inherit the trait's default of
+`true`; `lnv2` overrides it but defaults to `true`, so `FM_ENABLE_MODULE_LNV2=0`
+unticks it. Everything else defaults to off and is opt-in via an env var:
 `FM_ENABLE_MODULE_MINTV2`, `FM_ENABLE_MODULE_WALLETV2` and
 `FM_ENABLE_MODULE_USDT` carry the interesting topology; `multispend` is
 opt-in via `FM_ENABLE_MODULE_MULTISPEND` because it has no client crate yet
