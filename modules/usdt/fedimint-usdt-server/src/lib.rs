@@ -644,6 +644,222 @@ fn resolve_poll_interval(raw: Option<String>) -> u64 {
     }
 }
 
+/// Env var overriding how long the deposit scanner may go without issuing an
+/// `eth_getLogs` request while confirmed blocks are pending -- the scanner's
+/// latency/cost dial. See [`scan_max_lag_secs`].
+///
+/// Defined HERE rather than alongside every other `FM_USDT_*` var in
+/// `fedimint_core::envs` only because that module lives in the pinned
+/// fedimint fork: adding one there means moving the workspace's `rev`, which
+/// re-resolves every fedimint crate (see the note at the top of
+/// `Cargo.toml`). A guardian-local knob that no other crate reads does not
+/// justify that, so it sits next to its only consumer.
+const FM_USDT_SCAN_MAX_LAG_SECS_ENV: &str = "FM_USDT_SCAN_MAX_LAG_SECS";
+
+/// Default seconds the deposit scanner may go without issuing a request while
+/// confirmed blocks are pending, when [`FM_USDT_SCAN_MAX_LAG_SECS_ENV`] is
+/// unset.
+///
+/// This is the most expensive dial in the module. `eth_getLogs` costs 255
+/// Infura credits against 80 for a plain call, so the scanner is the single
+/// costliest loop a guardian runs. Before this trigger existed the scanner
+/// fired on EVERY poll tick and read whatever range happened to exist --
+/// ~1.3 blocks at steady state on a 12s chain -- burning ~5,400 requests/day
+/// where `2026-09-06-usdt-deposit-discovery-design.md:110` had budgeted ~144.
+/// `scan_batch_blocks` never closed that gap because it is applied as an
+/// upper CAP on the range, never as a fill threshold.
+///
+/// At 60s one request covers ~5 blocks: ~1,440 requests/day. Raising it
+/// trades discovery latency for cost close to linearly (180 yields ~480/day),
+/// and that latency is ON TOP of the ~2.4 minutes `confirmation_depth`
+/// already imposes before a deposit is claimable at all. Full accounting in
+/// `docs/superpowers/specs/2026-09-11-usdt-rpc-budget-design.md`.
+const DEFAULT_SCAN_MAX_LAG_SECS: u64 = 60;
+
+/// Lower bound on [`scan_max_lag_secs`], mirroring how
+/// [`MIN_POLL_INTERVAL_SECS`] floors the base interval. A value at or below
+/// the poll interval would let the time trigger fire on every tick, which is
+/// exactly the per-tick scanning this trigger exists to stop.
+const MIN_SCAN_MAX_LAG_SECS: u64 = 15;
+
+/// Block grid that every scan request's `to` is snapped DOWN to, so a request
+/// always covers `[last_grid + 1, next_grid]`.
+///
+/// The point is cross-guardian cache alignment. Guardians run independent
+/// cursors and restart at different times, so their ranges would otherwise
+/// never coincide and a shared upstream cache (a reverse proxy, or the
+/// provider's own) would hit ~0% of the time. Snapping to a grid of ABSOLUTE
+/// block heights -- never to a guardian's own cursor -- makes every
+/// caught-up guardian issue byte-identical ranges for the same span of chain.
+///
+/// Five, not fifty, because the grid and the flush cadence must agree: a
+/// 50-block grid would force waiting for a 50-block boundary (~10 minutes on
+/// a 12s chain), contradicting [`DEFAULT_SCAN_MAX_LAG_SECS`]. Five blocks is
+/// ~60s of chain and divides `scan_batch_blocks`'s default of 50 evenly, so
+/// backfill batches stay grid-aligned too. Keep
+/// `SCAN_GRID_BLOCKS ≈ FM_USDT_SCAN_MAX_LAG_SECS / 12` (12s blocks) if either
+/// is retuned, so one flush spans one grid cell. Raising the lag without
+/// raising the grid is safe but wasteful -- the flush then spans several
+/// cells and the request is issued at the next grid boundary at or past the
+/// deadline, so alignment still holds and only the latency bound loosens.
+///
+/// Alignment is a cost optimisation and NEVER a correctness requirement:
+/// coverage is still gapless and monotonic whatever the grid, because
+/// `plan_scan_range` only ever moves the cursor forward to a boundary it has
+/// fully read.
+const SCAN_GRID_BLOCKS: u64 = 5;
+
+/// Pure parse/clamp for [`scan_max_lag_secs`], split out for the same reason
+/// as [`resolve_poll_interval`]: it is testable without depending on
+/// `is_running_in_test_env()` (always true under the test harness) or on
+/// mutating the process environment. `None` or an unparseable value yields
+/// [`DEFAULT_SCAN_MAX_LAG_SECS`], and any parsed value is floored at
+/// [`MIN_SCAN_MAX_LAG_SECS`].
+fn resolve_scan_max_lag(raw: Option<String>) -> u64 {
+    match raw {
+        Some(secs) => match secs.trim().parse::<u64>() {
+            Ok(secs) => secs.max(MIN_SCAN_MAX_LAG_SECS),
+            Err(_) => DEFAULT_SCAN_MAX_LAG_SECS,
+        },
+        None => DEFAULT_SCAN_MAX_LAG_SECS,
+    }
+}
+
+/// Seconds the deposit scanner may go without issuing an `eth_getLogs`
+/// request while confirmed blocks are pending.
+///
+/// Under the test harness this collapses to `1`, matching
+/// [`poll_interval_secs`], so test timing is unchanged. In production it
+/// reads [`FM_USDT_SCAN_MAX_LAG_SECS_ENV`] (default
+/// [`DEFAULT_SCAN_MAX_LAG_SECS`], floored at [`MIN_SCAN_MAX_LAG_SECS`]).
+/// Guardian-local: it changes observation cadence, never a consensus-agreed
+/// value, so guardians may run different values without diverging.
+fn scan_max_lag_secs() -> u64 {
+    if is_running_in_test_env() {
+        return 1;
+    }
+    resolve_scan_max_lag(std::env::var(FM_USDT_SCAN_MAX_LAG_SECS_ENV).ok())
+}
+
+/// [`SCAN_GRID_BLOCKS`], or `1` under the test harness.
+///
+/// Tests run against anvil or a mock, where there is no shared upstream cache
+/// for alignment to pay off against -- and anvil chains are short enough that
+/// withholding the newest partial grid cell would delay (or, on a chain that
+/// stops being mined, permanently withhold) discovery of blocks a test just
+/// produced. A grid of 1 disables snapping without special-casing any of the
+/// range arithmetic.
+fn scan_grid_blocks() -> u64 {
+    if is_running_in_test_env() {
+        return 1;
+    }
+    SCAN_GRID_BLOCKS
+}
+
+/// Largest multiple of `grid` at or below `value` (identity for a grid of 0
+/// or 1, so callers need no special case).
+const fn align_down_to_grid(value: u64, grid: u64) -> u64 {
+    if grid <= 1 {
+        value
+    } else {
+        value - value % grid
+    }
+}
+
+/// What [`Usdt::scan_step`] did this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanOutcome {
+    /// A range was read and recorded. `backlog` is true when at least one
+    /// further full batch is ALREADY pending, i.e. this guardian is
+    /// backfilling or catching up and should tick again promptly rather than
+    /// idling a full poll interval.
+    Scanned { backlog: bool },
+    /// Nothing was read: neither trigger fired, no complete grid cell was
+    /// available yet, or the RPC read failed. Deliberately does NOT reset the
+    /// caller's lag timer, so a failed read is retried on the next tick
+    /// instead of waiting out another full `max_lag`.
+    Idle,
+}
+
+/// Decides whether to issue a scan request this tick and over what range;
+/// `None` means "not yet".
+///
+/// Pure (no clock, no RPC, no DB) so the whole trigger/alignment policy is
+/// unit-testable, mirroring how [`resolve_poll_interval`] splits parsing from
+/// [`poll_interval_secs`].
+///
+/// Fires when EITHER at least `scan_batch_blocks` confirmed blocks are
+/// pending, OR `since_last_scan` has reached `max_lag`. The block trigger
+/// governs cold-start backfill and catch-up, where ranges are large and
+/// waiting out the timer would needlessly stretch a restart's recovery; the
+/// time trigger governs steady state, where a full batch would take ~10
+/// minutes to accumulate on a 12s chain.
+///
+/// The returned `to` is always snapped down to `grid` (see
+/// [`SCAN_GRID_BLOCKS`]), so a partially-complete cell is left for a later
+/// tick rather than read as a range no other guardian would ask for.
+///
+/// Invariants preserved for [`scan::CandidateLog::record_scan`]: the returned
+/// range is non-empty (`to >= from`), starts exactly one past what is already
+/// covered (gapless), and `to` strictly exceeds the prior cursor (monotonic).
+fn plan_scan_range(
+    cursor: u64,
+    target: u64,
+    scan_batch_blocks: u64,
+    grid: u64,
+    since_last_scan: Duration,
+    max_lag: Duration,
+) -> Option<(u64, u64)> {
+    // Consensus has not observed the chain yet.
+    if target == 0 {
+        return None;
+    }
+
+    // `scan_batch_blocks` is operator-supplied (`UsdtConfigLocal`); a zero
+    // would make every computed range empty and stall discovery outright.
+    let batch = scan_batch_blocks.max(1);
+
+    // A grid COARSER than the batch could never complete a cell within one
+    // request, permanently stalling a guardian whose provider caps ranges
+    // below `SCAN_GRID_BLOCKS` (free tiers go as low as ~10 blocks). Degrade
+    // to the batch size: alignment is an optimisation, and guardians sharing
+    // a `scan_batch_blocks` still share a grid.
+    let grid = grid.min(batch).max(1);
+
+    // `floor` is the last block already covered; the request is
+    // `[floor + 1, to]`.
+    let floor = if cursor == 0 {
+        // Cold start: begin one retention window back rather than at block 1,
+        // aligned so even the first request of a fresh process is on-grid.
+        let start = target
+            .saturating_sub(scan::CANDIDATE_RETENTION_BLOCKS)
+            .max(1);
+        align_down_to_grid(start.saturating_sub(1), grid)
+    } else {
+        // An existing cursor is used as-is, never re-aligned downward: that
+        // would re-read blocks already covered. A cursor left off-grid by an
+        // older build self-heals on the first scan, since `to` is aligned.
+        cursor
+    };
+
+    let pending = target.saturating_sub(floor);
+    if pending == 0 {
+        return None;
+    }
+    if pending < batch && since_last_scan < max_lag {
+        return None;
+    }
+
+    let to = align_down_to_grid(target.min(floor.saturating_add(batch)), grid);
+    if to <= floor {
+        // Pending blocks exist but do not complete a grid cell. Wait for the
+        // next boundary rather than issuing an unaligned range.
+        return None;
+    }
+
+    Some((floor.saturating_add(1), to))
+}
+
 /// Maximum number of submitted `UserOp`s [`Usdt::spawn_user_op_submitter`]
 /// processes concurrently (security finding 19), bounding this guardian's
 /// simultaneous outbound RPC load while still ensuring a stall on one op
@@ -3827,44 +4043,70 @@ impl Usdt {
         } = handles;
 
         task_group.spawn_cancellable("usdt-transfer-scanner", async move {
+            let max_lag = Duration::from_secs(scan_max_lag_secs());
+            // MONOTONIC deliberately (mirroring `spawn_anchor_watchdog`'s
+            // reasoning): this timer gates RPC spend, so a wall-clock
+            // adjustment must not be able to fire it early or stall it.
+            let mut last_scan = Instant::now(); // nosemgrep: ban-instant-now
             loop {
                 let mut dbtx = db.begin_transaction_nc().await;
                 let ccount = consensus_block_count(&mut dbtx.to_ref_nc(), num_peers).await;
                 drop(dbtx);
+                // `target == 0` (consensus has not observed the chain yet) is
+                // handled inside `plan_scan_range`, which simply declines.
                 let target = ccount.saturating_sub(confirmation_depth);
 
-                let caught_up = if target == 0 {
-                    true // consensus hasn't observed the chain yet; wait
-                } else {
-                    !Self::scan_step(
-                        &evm_rpc,
-                        &transfer_candidates,
-                        target,
-                        usdt_contract,
-                        &group_public_key,
-                        scan_batch_blocks,
-                    )
-                    .await
+                let backlog = match Self::scan_step(
+                    &evm_rpc,
+                    &transfer_candidates,
+                    target,
+                    usdt_contract,
+                    &group_public_key,
+                    scan_batch_blocks,
+                    last_scan.elapsed(),
+                    max_lag,
+                )
+                .await
+                {
+                    ScanOutcome::Scanned { backlog } => {
+                        last_scan = Instant::now(); // nosemgrep: ban-instant-now
+                        backlog
+                    }
+                    // Includes a failed RPC read: leaving the timer alone
+                    // means the next tick retries immediately rather than
+                    // waiting out another full `max_lag`.
+                    ScanOutcome::Idle => false,
                 };
 
                 // While behind (cold-start backfill / catch-up), pause only
-                // briefly between batches; otherwise idle a full poll tick.
-                let pause = if caught_up {
-                    Duration::from_secs(poll_interval_secs())
-                } else {
+                // briefly between batches; otherwise tick at the base interval
+                // and let the triggers decide whether to spend a request.
+                let pause = if backlog {
                     Duration::from_secs(1)
+                } else {
+                    Duration::from_secs(poll_interval_secs())
                 };
                 fedimint_core::runtime::sleep(pause).await;
             }
         });
     }
 
-    /// One bounded scan advance toward `target`: reads the next
-    /// `scan_batch_blocks`-sized range past the log's cursor (cold start:
-    /// `target - CANDIDATE_RETENTION_BLOCKS`), filters, records. Returns
-    /// whether it advanced (false = already caught up, or the RPC read
-    /// failed and will be retried next tick). Extracted from the spawn
-    /// loop so the advance/backfill/cursor logic is unit-testable.
+    /// One bounded scan advance toward `target`, IF either trigger fires.
+    ///
+    /// The range (and the decision to scan at all) comes from
+    /// [`plan_scan_range`]: at least `scan_batch_blocks` pending, or
+    /// `since_last_scan >= max_lag`, with `to` snapped down to
+    /// [`scan_grid_blocks`] so guardians issue identical ranges. Cold start
+    /// (`cursor == 0`) begins one `CANDIDATE_RETENTION_BLOCKS` window back.
+    ///
+    /// Extracted from the spawn loop so the advance/backfill/cursor logic is
+    /// unit-testable; the loop owns the monotonic timer and resets it only on
+    /// [`ScanOutcome::Scanned`].
+    // The two timing parameters are passed in rather than read from a clock
+    // here precisely so tests can drive the triggers deterministically;
+    // bundling them into a struct purely to satisfy the argument count would
+    // obscure that at every call site for no benefit.
+    #[allow(clippy::too_many_arguments)]
     async fn scan_step(
         evm_rpc: &DynServerEvmRpc,
         transfer_candidates: &Arc<Mutex<scan::CandidateLog>>,
@@ -3872,24 +4114,23 @@ impl Usdt {
         usdt_contract: fedimint_usdt_common::EvmAddress,
         group_public_key: &secp256k1::PublicKey,
         scan_batch_blocks: u64,
-    ) -> bool {
+        since_last_scan: Duration,
+        max_lag: Duration,
+    ) -> ScanOutcome {
         let cursor = transfer_candidates
             .lock()
             .expect("not poisoned")
             .scanned_to();
-        let from = if cursor == 0 {
-            target
-                .saturating_sub(scan::CANDIDATE_RETENTION_BLOCKS)
-                .max(1)
-        } else {
-            cursor.saturating_add(1)
+        let Some((from, to)) = plan_scan_range(
+            cursor,
+            target,
+            scan_batch_blocks,
+            scan_grid_blocks(),
+            since_last_scan,
+            max_lag,
+        ) else {
+            return ScanOutcome::Idle;
         };
-        if from > target {
-            return false;
-        }
-        let to = from
-            .saturating_add(scan_batch_blocks.saturating_sub(1))
-            .min(target);
         match rpc_deadline(evm_rpc.get_transfer_logs(usdt_contract, from, to)).await {
             Ok(logs) => {
                 let found = scan::filter_scan_candidates(&logs, group_public_key);
@@ -3913,7 +4154,11 @@ impl Usdt {
                     .lock()
                     .expect("not poisoned")
                     .record_scan(to, found);
-                true
+                ScanOutcome::Scanned {
+                    // Still at least a full batch behind: keep the fast
+                    // backfill cadence instead of idling a poll interval.
+                    backlog: target.saturating_sub(to) >= scan_batch_blocks.max(1),
+                }
             }
             Err(err) => {
                 debug!(
@@ -3922,7 +4167,7 @@ impl Usdt {
                     from, to,
                     "transfer-scan read failed, retrying next tick"
                 );
-                false
+                ScanOutcome::Idle
             }
         }
     }
@@ -8835,6 +9080,187 @@ mod tests {
             resolve_poll_interval(Some(String::new())),
             DEFAULT_POLL_INTERVAL_SECS
         );
+    }
+
+    #[test]
+    fn scan_max_lag_resolves_default_override_and_clamp() {
+        // Unset -> default.
+        assert_eq!(resolve_scan_max_lag(None), DEFAULT_SCAN_MAX_LAG_SECS);
+        // A valid override is applied verbatim (whitespace trimmed, mirroring
+        // how operators paste env values).
+        assert_eq!(resolve_scan_max_lag(Some("180".to_string())), 180);
+        assert_eq!(resolve_scan_max_lag(Some("  300 ".to_string())), 300);
+        // Below the floor is clamped up: a lag at or under the poll interval
+        // would let the time trigger fire every tick, reinstating exactly the
+        // per-tick scanning this trigger exists to prevent.
+        assert_eq!(
+            resolve_scan_max_lag(Some("1".to_string())),
+            MIN_SCAN_MAX_LAG_SECS
+        );
+        assert_eq!(
+            resolve_scan_max_lag(Some("0".to_string())),
+            MIN_SCAN_MAX_LAG_SECS
+        );
+        // An exactly-at-floor value is preserved.
+        assert_eq!(
+            resolve_scan_max_lag(Some(MIN_SCAN_MAX_LAG_SECS.to_string())),
+            MIN_SCAN_MAX_LAG_SECS
+        );
+        // Unparseable -> default (never a panic, mirroring the other envs).
+        assert_eq!(
+            resolve_scan_max_lag(Some("not-a-number".to_string())),
+            DEFAULT_SCAN_MAX_LAG_SECS
+        );
+        assert_eq!(
+            resolve_scan_max_lag(Some(String::new())),
+            DEFAULT_SCAN_MAX_LAG_SECS
+        );
+        // The floor must stay above the base poll interval, or the time
+        // trigger degenerates into "every tick".
+        const { assert!(MIN_SCAN_MAX_LAG_SECS > MIN_POLL_INTERVAL_SECS) };
+    }
+
+    /// The grid and the flush cadence have to agree: one flush should span
+    /// about one grid cell on a 12s chain, and the grid must divide the
+    /// default batch so backfill batches stay aligned too. Both are stated in
+    /// [`SCAN_GRID_BLOCKS`]'s doc comment; assert them so a retune of one
+    /// constant alone fails here rather than silently costing hit rate.
+    #[test]
+    fn scan_grid_and_flush_cadence_agree() {
+        assert_eq!(DEFAULT_SCAN_MAX_LAG_SECS / 12, SCAN_GRID_BLOCKS);
+        assert_eq!(
+            crate::config::default_scan_batch_blocks() % SCAN_GRID_BLOCKS,
+            0
+        );
+    }
+
+    #[test]
+    fn align_down_to_grid_snaps_and_is_identity_for_degenerate_grids() {
+        assert_eq!(align_down_to_grid(103, 5), 100);
+        assert_eq!(align_down_to_grid(100, 5), 100);
+        assert_eq!(align_down_to_grid(4, 5), 0);
+        // A grid of 0 or 1 must not divide by zero or change the value.
+        assert_eq!(align_down_to_grid(103, 1), 103);
+        assert_eq!(align_down_to_grid(103, 0), 103);
+    }
+
+    /// Steady state: the time trigger fires, and the range issued is
+    /// grid-aligned on ABSOLUTE block heights -- which is what makes two
+    /// guardians holding different cursors converge on byte-identical
+    /// requests, and so lets a shared upstream cache hit.
+    #[test]
+    fn plan_scan_range_snaps_to_absolute_grid() {
+        let lag = Duration::from_secs(60);
+        let fired = Duration::from_secs(60);
+
+        // Cursor 100, chain confirmed to 108: only [101, 105] is a complete
+        // cell; 106..108 waits for the next boundary rather than being read
+        // as a range nobody else would ask for.
+        assert_eq!(
+            plan_scan_range(100, 108, 50, 5, fired, lag),
+            Some((101, 105))
+        );
+
+        // A guardian whose cursor sits mid-cell asks for a range ENDING on
+        // the same boundary as the guardian above -- different `from`, same
+        // `to`, and from the next scan onward the two agree entirely.
+        assert_eq!(
+            plan_scan_range(102, 108, 50, 5, fired, lag),
+            Some((103, 105))
+        );
+        // Having converged, both now issue the identical next range.
+        assert_eq!(
+            plan_scan_range(105, 113, 50, 5, fired, lag),
+            Some((106, 110))
+        );
+    }
+
+    /// The time trigger is what fires at steady state: a full 50-block batch
+    /// takes ~10 minutes to accumulate on a 12s chain, so waiting for it
+    /// would blow through the latency budget.
+    #[test]
+    fn plan_scan_range_time_trigger_governs_steady_state() {
+        let lag = Duration::from_secs(60);
+
+        // Timer not yet up, and far short of a batch: spend nothing.
+        assert_eq!(
+            plan_scan_range(100, 108, 50, 5, Duration::from_secs(59), lag),
+            None
+        );
+        // Timer up: issue the aligned range.
+        assert_eq!(
+            plan_scan_range(100, 108, 50, 5, lag, lag),
+            Some((101, 105))
+        );
+    }
+
+    /// The block trigger governs backfill and catch-up: with a batch or more
+    /// pending, scan immediately instead of waiting out the timer, and report
+    /// `backlog` so the caller keeps the fast cadence.
+    #[test]
+    fn plan_scan_range_block_trigger_governs_catch_up() {
+        let lag = Duration::from_secs(60);
+
+        // 900 blocks behind, timer nowhere near: fire anyway, one full
+        // batch-sized (and still grid-aligned) step.
+        assert_eq!(
+            plan_scan_range(100, 1_000, 50, 5, Duration::ZERO, lag),
+            Some((101, 150))
+        );
+        // Successive steps keep advancing by a full batch -- catch-up must
+        // not be throttled to one grid cell per tick.
+        assert_eq!(
+            plan_scan_range(150, 1_000, 50, 5, Duration::ZERO, lag),
+            Some((151, 200))
+        );
+    }
+
+    /// Cold start backfills from the retention floor, on-grid, and fires on
+    /// the block trigger so a restart does not idle first.
+    #[test]
+    fn plan_scan_range_cold_start_is_grid_aligned() {
+        let target = 100_000;
+        let (from, to) = plan_scan_range(0, target, 50, 5, Duration::ZERO, Duration::from_secs(60))
+            .expect("a full retention window is pending, so the block trigger fires");
+        // Starts one retention window back, snapped so `from - 1` is on-grid.
+        assert_eq!(from - 1, align_down_to_grid(target - scan::CANDIDATE_RETENTION_BLOCKS - 1, 5));
+        assert_eq!(to % 5, 0, "cold-start ranges must be grid-aligned too");
+        assert_eq!(to - (from - 1), 50, "a full batch per backfill step");
+    }
+
+    /// Nothing to do, and degenerate inputs that must not stall or panic.
+    #[test]
+    fn plan_scan_range_declines_when_there_is_nothing_to_scan() {
+        let lag = Duration::from_secs(60);
+
+        // Consensus has not observed the chain yet.
+        assert_eq!(plan_scan_range(0, 0, 50, 5, lag, lag), None);
+        // Fully caught up.
+        assert_eq!(plan_scan_range(105, 105, 50, 5, lag, lag), None);
+        // Pending blocks exist, but not enough to complete a grid cell: wait
+        // for the boundary rather than issue an unaligned range.
+        assert_eq!(plan_scan_range(105, 108, 50, 5, lag, lag), None);
+
+        // A batch SMALLER than the grid must degrade to the batch rather than
+        // stall forever waiting for a cell it can never read in one request
+        // (free tiers cap `eth_getLogs` ranges as low as ~10 blocks). The
+        // effective grid becomes 3, so `to` snaps to 102 rather than 103 --
+        // one block short of the batch, and on-grid from here on.
+        assert_eq!(plan_scan_range(100, 200, 3, 5, lag, lag), Some((101, 102)));
+        // A zero batch (misconfiguration) must still make progress.
+        assert!(plan_scan_range(100, 200, 0, 5, lag, lag).is_some());
+    }
+
+    /// An off-grid cursor -- left by a build predating grid snapping -- must
+    /// re-align on the first scan WITHOUT re-reading blocks it already
+    /// covered, which would violate `record_scan`'s monotonicity.
+    #[test]
+    fn plan_scan_range_realigns_a_legacy_cursor_without_rescanning() {
+        let lag = Duration::from_secs(60);
+        let (from, to) = plan_scan_range(107, 120, 50, 5, lag, lag).expect("should scan");
+        assert_eq!(from, 108, "must start exactly one past the existing cursor");
+        assert_eq!(to, 120, "and land on-grid, re-aligning from here on");
+        assert!(to > 107, "cursor must move strictly forward");
     }
 
     #[test]
@@ -21172,19 +21598,47 @@ mod tests {
         let target = 100_000;
         let batch = 50;
 
-        let advanced =
-            Usdt::scan_step(&evm_rpc, &log, target, usdt_contract, &group_pk, batch).await;
+        // A whole retention window is pending, so the BLOCK trigger fires
+        // regardless of the timer -- a restarting guardian starts backfilling
+        // at once rather than waiting out a `max_lag`.
+        let outcome = Usdt::scan_step(
+            &evm_rpc,
+            &log,
+            target,
+            usdt_contract,
+            &group_pk,
+            batch,
+            Duration::ZERO,
+            Duration::from_secs(3600),
+        )
+        .await;
 
-        assert!(advanced);
-        // Cold start: the first batch spans
-        // [target - CANDIDATE_RETENTION_BLOCKS, .. + (batch - 1)], so the
-        // cursor lands `batch - 1` (not `batch`) past the retention floor --
-        // an inclusive `[from, to]` range of `batch` blocks advances the
-        // high-water mark by `batch - 1` relative to `from`.
-        assert_eq!(
-            log.lock().expect("not poisoned").scanned_to(),
-            target - scan::CANDIDATE_RETENTION_BLOCKS + (batch - 1)
+        assert_eq!(outcome, ScanOutcome::Scanned { backlog: true });
+
+        // Asserted as PROPERTIES rather than one literal height, because the
+        // effective grid differs by runner: `is_running_in_test_env()` is
+        // `cfg!(test)` evaluated inside `fedimint-core` (a dependency, so
+        // never built in test mode), which makes it false under a plain
+        // `cargo test` and true under nextest/devimint. Both must pass.
+        let cursor = log.lock().expect("not poisoned").scanned_to();
+        let grid = scan_grid_blocks();
+        let retention_floor = target - scan::CANDIDATE_RETENTION_BLOCKS;
+
+        // The window scanned is one retention window back, NOT block 1: a
+        // guardian starting against a chain already at 100k backfills only
+        // the retention window.
+        assert!(
+            cursor >= retention_floor,
+            "cursor {cursor} must be at or past the retention floor {retention_floor}"
         );
+        assert!(
+            cursor < retention_floor + batch + grid,
+            "cursor {cursor} must be one batch (plus at most one grid cell of \
+             alignment slack) past the retention floor {retention_floor}"
+        );
+        // And it lands ON-GRID, so the next request this guardian issues is
+        // one every other caught-up guardian issues too.
+        assert_eq!(cursor % grid, 0, "cursor {cursor} must be grid-aligned");
     }
 }
 
