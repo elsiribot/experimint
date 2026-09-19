@@ -2971,6 +2971,76 @@ const FEE_VOTE_TTL_BLOCKS: u64 = 50;
 /// move monotonically) rather than on inequality.
 const FEE_VOTE_REFRESH_BLOCKS: u64 = 20;
 
+/// How long the fee-estimate poller keeps re-proposing its last successful
+/// reading while polls are failing, before it falls back to abstaining
+/// (clearing the cache). Sized for the default 60 s poll cadence; the
+/// poller widens it to five poll intervals when the operator slows polling
+/// past that (see [`Usdt::spawn_fee_estimate_poller`] and
+/// [`fee_estimate_grace_for`]), so raising `FM_USDT_POLL_INTERVAL_SECS`
+/// can never itself put the first failing poll past grace -- and
+/// [`FEE_ESTIMATE_GRACE_CAP`] then bounds that widened grace so it can
+/// never exceed the vote TTL, regardless of how far the operator raises
+/// the poll interval.
+///
+/// This constant does NOT bound how long a dead fee source can stay
+/// authoritative; it only bounds how long this poller keeps re-proposing
+/// after its RPC starts failing. With the mainnet defaults, that wider
+/// bound is roughly 16 minutes, up from roughly 11 minutes before this
+/// grace existed:
+///
+/// The slow poll interval ([`slow_poll_interval_secs`]) is 60 s
+/// (`poll_interval_secs`'s 15 s times [`SLOW_POLL_MULTIPLIER`]'s 4),
+/// [`FEE_VOTE_REFRESH_BLOCKS`] is 20 blocks (roughly 240 s), and
+/// [`FEE_VOTE_TTL_BLOCKS`] is 50 blocks (roughly 600 s). A source that dies
+/// right after a successful poll can still be re-proposed as late as one
+/// grace period plus one slow-poll interval (roughly 360 s) after it died,
+/// since the last poll still inside the grace window re-stamps
+/// `recorded_block`; that stamp then stays authoritative for a further
+/// full TTL. Worst case, a dead source stays authoritative for roughly
+/// `grace + slow_poll_interval_secs() + FEE_VOTE_TTL_BLOCKS * 12s`: about
+/// 960 s (16 minutes) on mainnet with the defaults, versus about 660 s
+/// (11 minutes) before this grace existed, and capped at roughly 1260 s
+/// (21 minutes) for any operator poll-interval setting, since
+/// [`fee_estimate_grace_for`] never returns more than
+/// [`FEE_ESTIMATE_GRACE_CAP`]. Still finite: a permanently dead source is
+/// guaranteed to fall out of `fee_vote_median`'s quorum eventually, so
+/// security finding 06's freshness facet holds.
+const FEE_ESTIMATE_GRACE: Duration = Duration::from_mins(5);
+
+/// Hard ceiling on [`fee_estimate_grace_for`]'s result: the vote TTL
+/// ([`FEE_VOTE_TTL_BLOCKS`]) in wall-clock terms at 12 s mainnet blocks.
+/// The grace never exceeds it, so a dead source's reading stays
+/// authoritative for at most `grace + slow_poll_interval_secs() +
+/// FEE_VOTE_TTL_BLOCKS * 12s`, about 21 minutes in the worst operator
+/// configuration and 16 minutes with defaults -- never unbounded, no
+/// matter how far an operator raises `FM_USDT_POLL_INTERVAL_SECS`.
+const FEE_ESTIMATE_GRACE_CAP: Duration = Duration::from_secs(FEE_VOTE_TTL_BLOCKS * 12);
+
+/// The grace period [`Usdt::new`] actually passes to
+/// [`Usdt::spawn_fee_estimate_poller`]: [`FEE_ESTIMATE_GRACE`] widened to
+/// five consecutive misses at whatever cadence the operator has configured
+/// (`FM_USDT_POLL_INTERVAL_SECS`, read via `slow_poll_interval_secs`), then
+/// capped at [`FEE_ESTIMATE_GRACE_CAP`] so an operator-raised poll interval
+/// can widen the grace only up to the vote TTL, never past it -- closing
+/// the gap where `FEE_ESTIMATE_GRACE.max(5 * slow_poll_secs)` alone could
+/// otherwise exceed `FEE_VOTE_TTL_BLOCKS * 12s` for any
+/// `FM_USDT_POLL_INTERVAL_SECS` above 30 s.
+fn fee_estimate_grace_for(slow_poll_secs: u64) -> Duration {
+    FEE_ESTIMATE_GRACE
+        .max(Duration::from_secs(slow_poll_secs.saturating_mul(5)))
+        .min(FEE_ESTIMATE_GRACE_CAP)
+}
+
+/// Whether a failed poll should keep the reading taken at `last_good_at`.
+/// `None` (never polled successfully) never keeps anything.
+fn keep_last_good_fee_estimate(
+    last_good_at: Option<Instant>,
+    now: Instant,
+    grace: Duration,
+) -> bool {
+    last_good_at.is_some_and(|at| now.saturating_duration_since(at) <= grace)
+}
+
 /// Extra age (in consensus blocks, ON TOP of `confirmation_depth`) a stored
 /// [`BlockHashObservation`] vote may have and still be accepted / counted
 /// toward the ring anchor (security finding 12; originally shared with the
@@ -3048,7 +3118,13 @@ impl Usdt {
         );
 
         let fee_estimate = Arc::new(Mutex::new(None));
-        Self::spawn_fee_estimate_poller(&task_group, evm_rpc.clone(), fee_estimate.clone());
+        Self::spawn_fee_estimate_poller(
+            &task_group,
+            evm_rpc.clone(),
+            fee_estimate.clone(),
+            fee_estimate_grace_for(slow_poll_interval_secs()),
+            Duration::from_secs(slow_poll_interval_secs()),
+        );
 
         let bootstrap_proposals = Arc::new(Mutex::new(Vec::new()));
         Self::spawn_bootstrap_observer(
@@ -3232,33 +3308,71 @@ impl Usdt {
     /// only becomes one once proposed as a `UsdtConsensusItem::FeeVote` and
     /// aggregated (by median, over every peer's vote) into the federation's
     /// actual fee quote (see [`Usdt::fee_vote_median`]).
+    ///
+    /// `grace` is [`keep_last_good_fee_estimate`]'s grace period: how long a
+    /// failing poll keeps re-proposing the last successful reading before
+    /// this guardian abstains. [`Usdt::new`] passes
+    /// [`fee_estimate_grace_for`]'s result, which widens
+    /// [`FEE_ESTIMATE_GRACE`] to cover the operator's actual poll cadence,
+    /// since [`slow_poll_interval_secs`] has no configured ceiling and an
+    /// operator-raised `FM_USDT_POLL_INTERVAL_SECS` could otherwise put the
+    /// very first failing poll past a fixed grace -- and then caps the
+    /// widened result at [`FEE_ESTIMATE_GRACE_CAP`] so it never exceeds the
+    /// vote TTL regardless of that cadence.
+    ///
+    /// `poll_interval` is how long the loop sleeps between ticks;
+    /// [`Usdt::new`] passes `Duration::from_secs(slow_poll_interval_secs())`.
+    /// Taking it as a parameter (rather than this loop calling
+    /// [`slow_poll_interval_secs`] itself) lets tests drive a fast cadence
+    /// without touching any process-wide env var.
     fn spawn_fee_estimate_poller(
         task_group: &TaskGroup,
         evm_rpc: DynServerEvmRpc,
         fee_estimate: Arc<Mutex<Option<FeeVote>>>,
+        grace: Duration,
+        poll_interval: Duration,
     ) {
         task_group.spawn_cancellable("usdt-fee-estimate-poller", async move {
+            let mut last_good_at: Option<Instant> = None;
             loop {
                 match rpc_deadline(evm_rpc.get_fee_estimate()).await {
                     Ok(vote) => {
                         *fee_estimate.lock().expect("not poisoned") = Some(vote);
+                        last_good_at = Some(Instant::now());
                     }
                     Err(err) => {
-                        // Security finding 06's freshness facet: clear the
-                        // cached reading (rather than keeping the last
-                        // successful one) so `consensus_proposal` stops
-                        // re-proposing/refreshing this guardian's `FeeVote`
-                        // while its fee source is unreachable. Its
-                        // last-stored vote then ages past
-                        // `FEE_VOTE_TTL_BLOCKS` on its own and drops out of
-                        // `fee_vote_median`'s quorum, instead of pinning a
-                        // possibly-wrong value forever.
-                        warn!(
-                            target: "usdt",
-                            err = %err.fmt_compact_anyhow(),
-                            "fee estimate poll failed; abstaining until the next successful poll"
-                        );
-                        *fee_estimate.lock().expect("not poisoned") = None;
+                        // Security finding 06's freshness facet still holds:
+                        // a fee source that never recovers must not pin a
+                        // wrong value forever. But clearing on the very
+                        // first missed poll made the whole federation's fee
+                        // quote fall below quorum on a single transient RPC
+                        // hiccup (a 429 burst, one timed-out call of the
+                        // four `get_fee_estimate` needs). So instead, keep
+                        // re-proposing the last successful reading for a
+                        // bounded grace period (`grace`, never above
+                        // `FEE_VOTE_TTL_BLOCKS`): a permanently broken
+                        // source still ages its vote out of
+                        // `fee_vote_median`'s quorum once the grace runs
+                        // out, while a transient failure no longer drops
+                        // this guardian's vote immediately.
+                        let now = Instant::now();
+                        if keep_last_good_fee_estimate(last_good_at, now, grace) {
+                            warn!(
+                                target: "usdt",
+                                err = %err.fmt_compact_anyhow(),
+                                age_secs = last_good_at
+                                    .map_or(0, |at| now.saturating_duration_since(at).as_secs()),
+                                "fee estimate poll failed; keeping the last good reading for now"
+                            );
+                        } else {
+                            warn!(
+                                target: "usdt",
+                                err = %err.fmt_compact_anyhow(),
+                                "fee estimate poll failed; abstaining until the next successful poll"
+                            );
+                            *fee_estimate.lock().expect("not poisoned") = None;
+                            last_good_at = None;
+                        }
                     }
                 }
 
@@ -3266,7 +3380,7 @@ impl Usdt {
                 // heartbeat and the refresh stays well within
                 // `FEE_VOTE_TTL_BLOCKS`, so polling it every base tick is pure
                 // waste. See `SLOW_POLL_MULTIPLIER`.
-                fedimint_core::runtime::sleep(Duration::from_secs(slow_poll_interval_secs())).await;
+                fedimint_core::runtime::sleep(poll_interval).await;
             }
         });
     }
@@ -7884,6 +7998,8 @@ async fn handle_latest_anchored_block(dbtx: &mut DatabaseTransaction<'_>) -> Anc
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use fedimint_core::bitcoin::Network;
     use fedimint_core::{Amount, BitcoinHash, PeerId, TransactionId};
     use fedimint_usdt_common::EvmAddress;
@@ -7928,6 +8044,108 @@ mod tests {
             25_737_551,
             ANCHOR_LAG_WARN_BLOCKS
         ));
+    }
+
+    #[test]
+    fn fee_estimate_survives_a_failed_poll_within_grace() {
+        let t0 = Instant::now();
+        let grace = Duration::from_secs(300);
+        assert!(
+            !keep_last_good_fee_estimate(None, t0, grace),
+            "never polled: nothing to keep"
+        );
+        assert!(keep_last_good_fee_estimate(
+            Some(t0),
+            t0 + Duration::from_secs(299),
+            grace
+        ));
+        assert!(
+            keep_last_good_fee_estimate(Some(t0), t0 + grace, grace),
+            "grace is inclusive"
+        );
+        assert!(!keep_last_good_fee_estimate(
+            Some(t0),
+            t0 + grace + Duration::from_secs(1),
+            grace
+        ));
+    }
+
+    #[test]
+    fn fee_estimate_grace_is_shorter_than_the_vote_ttl() {
+        // `fee_estimate_grace_for` widens `FEE_ESTIMATE_GRACE` to five poll
+        // intervals at the operator's cadence, but must never let that
+        // widened result reach or exceed the vote TTL (12 s mainnet
+        // blocks), or a dead source could pin a vote forever (security
+        // finding 06).
+        assert_eq!(fee_estimate_grace_for(60), Duration::from_secs(300));
+        assert_eq!(fee_estimate_grace_for(100), Duration::from_secs(500));
+        assert_eq!(fee_estimate_grace_for(1_000), FEE_ESTIMATE_GRACE_CAP);
+        assert_eq!(fee_estimate_grace_for(u64::MAX), FEE_ESTIMATE_GRACE_CAP);
+        assert!(FEE_ESTIMATE_GRACE_CAP <= Duration::from_secs(FEE_VOTE_TTL_BLOCKS * 12));
+    }
+
+    /// Wires an actual [`Usdt::spawn_fee_estimate_poller`] task to a
+    /// [`MockEvmRpc`] whose `get_fee_estimate` can be switched to fail
+    /// mid-test, proving the grace behavior end-to-end rather than only at
+    /// [`keep_last_good_fee_estimate`]'s pure-function level.
+    ///
+    /// Drives the poller's cadence directly via `spawn_fee_estimate_poller`'s
+    /// `poll_interval` parameter (a fast 1s here) instead of going through
+    /// [`slow_poll_interval_secs`]'s `NEXTEST`-gated test-env cadence, so
+    /// this test does not touch any process-wide env var -- `NEXTEST` is
+    /// read unsynchronized by `is_running_in_test_env()` from every other
+    /// poller and test in this module, so mutating it here would be a
+    /// cross-test hazard under plain `cargo test`.
+    #[tokio::test]
+    async fn fee_estimate_poller_keeps_the_cache_until_grace_elapses() {
+        let grace = Duration::from_secs(3);
+        let poll_interval = Duration::from_secs(1);
+        let mock = MockEvmRpc::default();
+        let fail_switch = mock.fee_estimate_failure_switch();
+        let evm_rpc = mock.into_dyn();
+        let fee_estimate: Arc<Mutex<Option<FeeVote>>> = Arc::new(Mutex::new(None));
+        let task_group = TaskGroup::new();
+        Usdt::spawn_fee_estimate_poller(
+            &task_group,
+            evm_rpc,
+            fee_estimate.clone(),
+            grace,
+            poll_interval,
+        );
+
+        // Wait for the first successful poll to populate the cache.
+        let deadline = fedimint_core::time::now() + Duration::from_secs(5);
+        while fee_estimate.lock().expect("not poisoned").is_none() {
+            assert!(
+                fedimint_core::time::now() < deadline,
+                "poller never populated the fee estimate cache"
+            );
+            fedimint_core::runtime::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Now make every subsequent poll fail.
+        fail_switch.store(true, Ordering::SeqCst);
+
+        // Well within grace (a couple of 1s polls have failed by now, but
+        // not enough to exceed the 3s grace): the cache must still hold
+        // the last good reading.
+        fedimint_core::runtime::sleep(Duration::from_secs(2)).await;
+        assert!(
+            fee_estimate.lock().expect("not poisoned").is_some(),
+            "a transient failure within grace must not clear the cache"
+        );
+
+        // Past grace: the poller must have abstained.
+        fedimint_core::runtime::sleep(Duration::from_secs(3)).await;
+        assert!(
+            fee_estimate.lock().expect("not poisoned").is_none(),
+            "a failure outlasting grace must clear the cache"
+        );
+
+        task_group
+            .shutdown_join_all(None)
+            .await
+            .expect("the poller task shuts down cleanly on cancellation");
     }
 
     #[test]
@@ -8150,6 +8368,11 @@ mod tests {
         /// When `true`, `get_storage_at` returns `Err` -- for exercising the
         /// balances-slot probe's fail-safe "cannot check" path.
         storage_err: Mutex<bool>,
+        /// When `true`, `get_fee_estimate()` returns `Err` instead of the
+        /// scripted constant vote -- for exercising
+        /// [`Usdt::spawn_fee_estimate_poller`]'s grace-period behavior.
+        /// Defaults to `false` via `#[derive(Default)]`.
+        fail_fee_estimate: Arc<AtomicBool>,
     }
 
     /// Deterministic, block-number-derived stand-in for a canonical block hash
@@ -8274,6 +8497,16 @@ mod tests {
             *self.storage_err.lock().expect("not poisoned") = true;
         }
 
+        /// Returns a cheaply-cloneable handle onto `fail_fee_estimate`, to
+        /// keep after the mock is moved into a `DynServerEvmRpc` (`into_dyn`
+        /// consumes `self`): flipping it to `true` makes every subsequent
+        /// `get_fee_estimate()` call return `Err`, for exercising
+        /// [`Usdt::spawn_fee_estimate_poller`]'s grace-period behavior.
+        #[allow(dead_code)]
+        fn fee_estimate_failure_switch(&self) -> Arc<AtomicBool> {
+            self.fail_fee_estimate.clone()
+        }
+
         /// Scripts `get_chain_id()` to return `Ok(chain_id)`.
         fn set_chain_id(&self, chain_id: u64) {
             *self.chain_id.lock().expect("not poisoned") = chain_id;
@@ -8396,6 +8629,9 @@ mod tests {
         }
 
         async fn get_fee_estimate(&self) -> anyhow::Result<fedimint_usdt_common::FeeVote> {
+            if self.fail_fee_estimate.load(Ordering::SeqCst) {
+                return Err(anyhow::anyhow!("injected"));
+            }
             Ok(fedimint_usdt_common::FeeVote {
                 max_fee_per_gas_wei: 0,
                 usdt_per_eth_e6: 0,
@@ -8565,8 +8801,9 @@ mod tests {
             .expect("an RPC error reading chain_id must warn and let startup continue, not fail");
     }
 
-    /// Serializes tests that touch process-wide `FM_USDT_*` env vars so they
-    /// cannot race under `cargo test`'s default parallel-test execution.
+    /// Serializes tests that touch process-wide `FM_USDT_*` (or `NEXTEST`)
+    /// env vars so they cannot race under `cargo test`'s default
+    /// parallel-test execution.
     static ENV_VAR_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
