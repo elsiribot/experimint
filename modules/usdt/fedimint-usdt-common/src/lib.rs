@@ -248,7 +248,9 @@ impl std::str::FromStr for EvmAddress {
 }
 
 /// An amount of USDT expressed in its smallest on-chain unit (10^-6 USDT).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable,
+)]
 pub struct UsdtAmount(pub u64);
 
 impl fmt::Display for UsdtAmount {
@@ -499,6 +501,47 @@ pub fn chainlink_eth_usd_to_usdt_per_eth_e6(
     let scaled = answer.checked_mul(1_000_000)?; // 1e6 USDT fixed-point
     let divisor = 10u128.checked_pow(u32::from(feed_decimals))?;
     u64::try_from(scaled.checked_div(divisor)?).ok()
+}
+
+/// The part of a deposit account's proven on-chain balance that the
+/// high-water credit rule can never turn into e-cash: a repeat deposit to
+/// an address whose earlier deposit was credited and swept. The federation
+/// credits only `proven - credited`; of the rest, `credited - swept` is
+/// the earlier deposit still waiting for its sweep, and whatever remains
+/// arrived after the sweep and is stranded.
+///
+/// # Freshness precondition
+///
+/// This is only meaningful when `proven` was observed at or after the
+/// block in which the sweep that produced `swept` confirmed. A `proven`
+/// balance read from a proof anchored before that sweep reports a false
+/// stranded amount: it reflects a balance the sweep had not yet moved,
+/// which this function has no way to tell apart from a genuine repeat
+/// deposit. The server-side credit rule guards against exactly this
+/// hazard on the credit path itself -- `Usdt::process_deposit_proof`'s
+/// high-water mark is intentionally raw-balance (`proven > credited`),
+/// not `swept + balance`, "to stay race-free against a proof straddling a
+/// sweep" (`Usdt::maybe_trigger_sweep`'s own doc comment) -- but this is a
+/// pure function of its three inputs and cannot enforce that guard
+/// itself; the caller must supply a `proven` reading no older than the
+/// sweep.
+///
+/// # Dust caveat
+///
+/// `Usdt::maybe_trigger_sweep` refuses to sweep a `credited - swept`
+/// remainder that is at or below the deposit fee quote, so a sub-fee
+/// remainder is left sitting on-chain indefinitely; this function still
+/// counts it as the earlier deposit "waiting for its sweep", not as
+/// stranded, even though no sweep will ever actually clear it.
+#[must_use]
+pub fn stranded_repeat_deposit(
+    proven: UsdtAmount,
+    credited: UsdtAmount,
+    swept: UsdtAmount,
+) -> UsdtAmount {
+    let unswept = credited.0.saturating_sub(swept.0);
+    let not_creditable = proven.0.min(credited.0);
+    UsdtAmount(not_creditable.saturating_sub(unswept))
 }
 
 /// Domain-separation tag mixed into a deposit account's CREATE2 `salt` (see
@@ -1121,6 +1164,15 @@ pub struct DepositStatusResponse {
     pub credited: UsdtAmount,
     pub claimed: UsdtAmount,
     pub claimable: UsdtAmount,
+    /// How much of `credited` a confirmed sweep has already moved into the
+    /// pool. `credited - swept` is what still sits on the deposit account
+    /// as far as the federation knows; a proven balance below that has
+    /// nothing to do with a new deposit, and a proven balance above it
+    /// that still does not exceed `credited` is a repeat deposit the
+    /// high-water rule cannot credit (see [`stranded_repeat_deposit`]).
+    /// Absent from guardians predating this field: defaults to zero.
+    #[serde(default)]
+    pub swept: UsdtAmount,
 }
 
 /// Response to the `pool_state` diagnostic endpoint (Phase 7, Task 5):
@@ -2634,6 +2686,25 @@ mod tests {
             chainlink_eth_usd_to_usdt_per_eth_e6(300_000_000_000, 8, 1, 1, 2_000, 1_000, 14_400),
             None
         );
+    }
+
+    #[test]
+    fn stranded_repeat_deposit_cases() {
+        let a = |n: u64| UsdtAmount(n);
+        // fresh address, first deposit pending credit: nothing stranded
+        assert_eq!(stranded_repeat_deposit(a(5), a(0), a(0)), a(0));
+        // credited, not yet swept: the balance is the earlier deposit
+        assert_eq!(stranded_repeat_deposit(a(5), a(5), a(0)), a(0));
+        // credited and swept, then a smaller repeat deposit: all of it stranded
+        assert_eq!(stranded_repeat_deposit(a(2), a(5), a(5)), a(2));
+        // credited and swept, then an equal repeat deposit
+        assert_eq!(stranded_repeat_deposit(a(5), a(5), a(5)), a(5));
+        // credited and swept, then a larger repeat deposit: the excess is credited, the old amount stranded
+        assert_eq!(stranded_repeat_deposit(a(8), a(5), a(5)), a(5));
+        // partially swept
+        assert_eq!(stranded_repeat_deposit(a(4), a(5), a(3)), a(2));
+        // swept then emptied: nothing on chain, nothing stranded
+        assert_eq!(stranded_repeat_deposit(a(0), a(5), a(5)), a(0));
     }
 
     fn test_out_point(idx: u64) -> OutPoint {

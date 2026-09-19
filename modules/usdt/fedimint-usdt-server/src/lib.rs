@@ -6214,7 +6214,9 @@ impl Usdt {
     }
 
     /// Reports `claim_pk`'s deposit account state: `claimable` is
-    /// `credited - claimed` (saturating). Returns all-zero amounts (with the
+    /// `credited - claimed` (saturating), and `swept` is how much of
+    /// `credited` a confirmed sweep has already moved into the pool (see
+    /// [`DepositStatusResponse::swept`]). Returns all-zero amounts (with the
     /// derived `account` still populated) if no [`DepositRecord`] exists yet,
     /// so a client can poll this before any credit has landed.
     async fn handle_deposit_status(
@@ -6229,11 +6231,11 @@ impl Usdt {
             &claim_pk,
         );
 
-        let (credited, claimed) = dbtx
+        let (credited, claimed, swept) = dbtx
             .get_value(&DepositRecordKey(account))
             .await
-            .map_or((UsdtAmount(0), UsdtAmount(0)), |record| {
-                (record.credited, record.claimed)
+            .map_or((UsdtAmount(0), UsdtAmount(0), UsdtAmount(0)), |record| {
+                (record.credited, record.claimed, record.swept)
             });
 
         DepositStatusResponse {
@@ -6241,6 +6243,7 @@ impl Usdt {
             credited,
             claimed,
             claimable: UsdtAmount(credited.0.saturating_sub(claimed.0)),
+            swept,
         }
     }
 
@@ -11700,6 +11703,7 @@ mod tests {
         assert_eq!(response.credited, UsdtAmount(0));
         assert_eq!(response.claimed, UsdtAmount(0));
         assert_eq!(response.claimable, UsdtAmount(0));
+        assert_eq!(response.swept, UsdtAmount(0));
     }
 
     #[tokio::test]
@@ -11741,6 +11745,76 @@ mod tests {
         assert_eq!(response.credited, UsdtAmount(5_000_000));
         assert_eq!(response.claimed, UsdtAmount(2_000_000));
         assert_eq!(response.claimable, UsdtAmount(3_000_000));
+        assert_eq!(response.swept, UsdtAmount(0));
+    }
+
+    #[tokio::test]
+    async fn deposit_status_reports_swept_from_the_record() {
+        let module = test_module_with_block_count(4, 0).await;
+        let db = module.db_for_test();
+        let claim_pk = test_pubkey(0x04);
+        let account = fedimint_usdt_common::derive_deposit_account(
+            &module.cfg.consensus.group_public_key,
+            module.cfg.consensus.account_factory,
+            module.cfg.consensus.simple_account_impl,
+            &claim_pk,
+        );
+
+        {
+            let mut dbtx = db.begin_transaction().await;
+            dbtx.insert_new_entry(
+                &DepositRecordKey(account),
+                &DepositRecord {
+                    claim_pk,
+                    credited: UsdtAmount(5),
+                    claimed: UsdtAmount(5),
+                    last_observed_block: 42,
+                    swept: UsdtAmount(3),
+                    nonce: 1,
+                    fees_accrued: UsdtAmount(0),
+                },
+            )
+            .await;
+            dbtx.commit_tx().await;
+        }
+
+        let mut dbtx = db.begin_transaction_nc().await;
+        let response = module
+            .handle_deposit_status(&mut dbtx.to_ref_nc(), claim_pk)
+            .await;
+
+        assert_eq!(response.swept, UsdtAmount(3));
+    }
+
+    #[test]
+    fn deposit_status_response_defaults_swept_to_zero_when_absent() {
+        // Simulate a guardian predating the `swept` field: serialize a real
+        // response, then strip the `swept` key out of the resulting JSON
+        // (rather than hand-writing the JSON, since `EvmAddress` serializes
+        // as a byte array, not the hex string a literal would suggest). A
+        // new client must still parse it, filling the missing field with
+        // zero.
+        let original = DepositStatusResponse {
+            account: fedimint_usdt_common::EvmAddress([0xda; 20]),
+            credited: UsdtAmount(5),
+            claimed: UsdtAmount(5),
+            claimable: UsdtAmount(0),
+            swept: UsdtAmount(3),
+        };
+        let mut value = serde_json::to_value(&original).expect("serializes to a JSON value");
+        value
+            .as_object_mut()
+            .expect("response serializes as a JSON object")
+            .remove("swept");
+
+        let response: DepositStatusResponse = serde_json::from_value(value)
+            .expect("a response missing `swept` (pre-upgrade guardian) must still deserialize");
+
+        assert_eq!(response.account, original.account);
+        assert_eq!(response.credited, original.credited);
+        assert_eq!(response.claimed, original.claimed);
+        assert_eq!(response.claimable, original.claimable);
+        assert_eq!(response.swept, UsdtAmount(0));
     }
 
     #[tokio::test]

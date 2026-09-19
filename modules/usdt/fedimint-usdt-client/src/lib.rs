@@ -1901,6 +1901,7 @@ mod tests {
             credited: UsdtAmount(0),
             claimed: UsdtAmount(0),
             claimable: UsdtAmount(0),
+            swept: UsdtAmount(0),
         }
     }
 
@@ -2105,6 +2106,7 @@ mod tests {
                 credited: UsdtAmount(1_000_000),
                 claimed: UsdtAmount(0),
                 claimable: UsdtAmount(1_000_000),
+                swept: UsdtAmount(0),
             },
         );
         let api = FakeRecoveryApi::new(responses);
